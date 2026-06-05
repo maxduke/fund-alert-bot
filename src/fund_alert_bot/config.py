@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,6 +24,9 @@ DEFAULT_SQLITE_PATH = Path("/app/data/fund_alert_bot.sqlite3")
 DEFAULT_TIMEZONE = "Asia/Shanghai"
 DEFAULT_AFTER_CLOSE_CHECK_TIME = "17:10"
 DEFAULT_DCA_REMINDER_TIME = "09:30"
+DEFAULT_AKSHARE_RETRIES = 3
+DEFAULT_AKSHARE_RETRY_DELAY_SECONDS = 0.5
+DEFAULT_AKSHARE_LATEST_LOOKBACK_DAYS = 45
 TRUE_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
 FALSE_ENV_VALUES = frozenset({"0", "false", "no", "off", ""})
 
@@ -61,6 +65,41 @@ def parse_bool_env(raw_value: str | None, *, name: str) -> bool:
     raise ValueError(msg)
 
 
+def parse_positive_int_env(raw_value: str | None, *, name: str, default: int) -> int:
+    """Parse a positive integer environment variable."""
+    if raw_value is None or not raw_value.strip():
+        return default
+
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive integer") from exc
+
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return value
+
+
+def parse_non_negative_float_env(
+    raw_value: str | None,
+    *,
+    name: str,
+    default: float,
+) -> float:
+    """Parse a non-negative float environment variable."""
+    if raw_value is None or not raw_value.strip():
+        return default
+
+    try:
+        value = float(raw_value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a non-negative number") from exc
+
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(f"{name} must be a non-negative number")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class NotificationSettings:
     """Optional notification channel settings."""
@@ -85,6 +124,9 @@ class Settings:
     dca_reminder_time: str
     telegram_bot_token: str
     telegram_allowed_user_ids: frozenset[int]
+    akshare_retries: int
+    akshare_retry_delay_seconds: float
+    akshare_latest_lookback_days: int
     notifications: NotificationSettings
 
 
@@ -111,6 +153,21 @@ def load_settings(
         telegram_bot_token=os.environ.get("TELEGRAM_BOT_TOKEN", ""),
         telegram_allowed_user_ids=parse_allowed_user_ids(
             os.environ.get("TELEGRAM_ALLOWED_USER_IDS")
+        ),
+        akshare_retries=parse_positive_int_env(
+            os.environ.get("AKSHARE_RETRIES"),
+            name="AKSHARE_RETRIES",
+            default=DEFAULT_AKSHARE_RETRIES,
+        ),
+        akshare_retry_delay_seconds=parse_non_negative_float_env(
+            os.environ.get("AKSHARE_RETRY_DELAY_SECONDS"),
+            name="AKSHARE_RETRY_DELAY_SECONDS",
+            default=DEFAULT_AKSHARE_RETRY_DELAY_SECONDS,
+        ),
+        akshare_latest_lookback_days=parse_positive_int_env(
+            os.environ.get("AKSHARE_LATEST_LOOKBACK_DAYS"),
+            name="AKSHARE_LATEST_LOOKBACK_DAYS",
+            default=DEFAULT_AKSHARE_LATEST_LOOKBACK_DAYS,
         ),
         notifications=NotificationSettings(
             bark_enabled=parse_bool_env(

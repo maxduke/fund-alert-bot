@@ -14,6 +14,9 @@ from fund_alert_bot.commands import (
 )
 from fund_alert_bot.config import (
     DEFAULT_AFTER_CLOSE_CHECK_TIME,
+    DEFAULT_AKSHARE_LATEST_LOOKBACK_DAYS,
+    DEFAULT_AKSHARE_RETRIES,
+    DEFAULT_AKSHARE_RETRY_DELAY_SECONDS,
     DEFAULT_DCA_REMINDER_TIME,
     DEFAULT_SQLITE_PATH,
     DEFAULT_TIMEZONE,
@@ -21,6 +24,8 @@ from fund_alert_bot.config import (
     load_settings,
     parse_allowed_user_ids,
     parse_bool_env,
+    parse_non_negative_float_env,
+    parse_positive_int_env,
 )
 from fund_alert_bot.db import initialize_database, open_connection
 
@@ -70,6 +75,30 @@ def test_scheduler_settings_from_environment(monkeypatch) -> None:
     assert settings.dca_reminder_time == "09:30"
 
 
+def test_akshare_settings_from_environment(monkeypatch) -> None:
+    monkeypatch.setenv("AKSHARE_RETRIES", "5")
+    monkeypatch.setenv("AKSHARE_RETRY_DELAY_SECONDS", "1.25")
+    monkeypatch.setenv("AKSHARE_LATEST_LOOKBACK_DAYS", "60")
+
+    settings = load_settings(load_env_file=False)
+
+    assert settings.akshare_retries == 5
+    assert settings.akshare_retry_delay_seconds == 1.25
+    assert settings.akshare_latest_lookback_days == 60
+
+
+def test_akshare_settings_use_defaults(monkeypatch) -> None:
+    monkeypatch.delenv("AKSHARE_RETRIES", raising=False)
+    monkeypatch.delenv("AKSHARE_RETRY_DELAY_SECONDS", raising=False)
+    monkeypatch.delenv("AKSHARE_LATEST_LOOKBACK_DAYS", raising=False)
+
+    settings = load_settings(load_env_file=False)
+
+    assert settings.akshare_retries == DEFAULT_AKSHARE_RETRIES
+    assert settings.akshare_retry_delay_seconds == DEFAULT_AKSHARE_RETRY_DELAY_SECONDS
+    assert settings.akshare_latest_lookback_days == DEFAULT_AKSHARE_LATEST_LOOKBACK_DAYS
+
+
 def test_parse_bool_env_accepts_common_values() -> None:
     assert parse_bool_env("true", name="FEATURE")
     assert parse_bool_env("1", name="FEATURE")
@@ -82,6 +111,14 @@ def test_parse_bool_env_accepts_common_values() -> None:
 def test_parse_bool_env_rejects_invalid_values() -> None:
     with pytest.raises(ValueError, match="FEATURE must be one of"):
         parse_bool_env("maybe", name="FEATURE")
+
+
+def test_numeric_env_parsers_reject_invalid_values() -> None:
+    with pytest.raises(ValueError, match="COUNT must be a positive integer"):
+        parse_positive_int_env("0", name="COUNT", default=1)
+
+    with pytest.raises(ValueError, match="DELAY must be a non-negative number"):
+        parse_non_negative_float_env("-1", name="DELAY", default=0.5)
 
 
 def test_notification_settings_from_environment(monkeypatch) -> None:

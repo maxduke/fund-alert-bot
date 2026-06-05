@@ -136,6 +136,77 @@ def test_check_prevents_duplicate_alert_notifications() -> None:
     ]
 
 
+def test_check_retries_alert_after_delivery_failure(tmp_path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    with open_connection(sqlite_path) as connection:
+        init_db(connection)
+        add_rule(
+            connection,
+            type=DRAW_DOWN_RULE_TYPE,
+            symbol="399006",
+            name="创业板指",
+            asset_type=AssetType.CN_INDEX.value,
+            params={
+                "lookback_days": 365,
+                "thresholds": [0.10],
+                "price_field": "close",
+            },
+        )
+
+    provider = FakeProvider(_history(["2024-01-01", "2024-01-02"], [100.0, 90.0]))
+    handlers = build_command_handlers(
+        {123},
+        sqlite_path=sqlite_path,
+        market_data_provider=provider,
+    )
+    failing_message = FakeMessage()
+    failing_update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        effective_message=failing_message,
+    )
+    failing_context = SimpleNamespace(bot=FakeFailingBot(), args=[])
+
+    asyncio.run(
+        _handler_by_command(handlers, "check").callback(
+            failing_update,
+            failing_context,
+        )
+    )
+
+    with open_connection(sqlite_path) as connection:
+        failed_status = connection.execute(
+            "SELECT notification_status FROM alert_events"
+        ).fetchone()["notification_status"]
+
+    success_message = FakeMessage()
+    success_update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        effective_message=success_message,
+    )
+    success_context = SimpleNamespace(bot=FakeBot(), args=[])
+
+    asyncio.run(
+        _handler_by_command(handlers, "check").callback(
+            success_update,
+            success_context,
+        )
+    )
+
+    with open_connection(sqlite_path) as connection:
+        sent_status = connection.execute(
+            "SELECT notification_status FROM alert_events"
+        ).fetchone()["notification_status"]
+
+    assert failed_status == "failed"
+    assert "Notification delivery failures: 1." in failing_message.replies[0]
+    assert sent_status == "sent"
+    assert success_context.bot.messages == [
+        {"chat_id": 456, "text": "399006 is down 10.0% from its 365-day high."}
+    ]
+
+
 def test_list_shows_asset_type() -> None:
     connection = connect(":memory:")
     try:
@@ -483,6 +554,12 @@ class FakeBot:
 
     async def send_message(self, *, chat_id: int, text: str) -> None:
         self.messages.append({"chat_id": chat_id, "text": text})
+
+
+class FakeFailingBot:
+    async def send_message(self, *, chat_id: int, text: str) -> None:
+        del chat_id, text
+        raise RuntimeError("telegram unavailable")
 
 
 class FakeResponse:

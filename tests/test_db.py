@@ -5,6 +5,9 @@ from pathlib import Path
 import pytest
 
 from fund_alert_bot.db import (
+    ALERT_NOTIFICATION_FAILED,
+    ALERT_NOTIFICATION_PENDING,
+    ALERT_NOTIFICATION_SENT,
     add_alert_event,
     add_rule,
     alert_exists,
@@ -13,6 +16,8 @@ from fund_alert_bot.db import (
     list_enabled_rules,
     list_rules,
     open_connection,
+    record_alert_notification_result,
+    reserve_alert_event,
 )
 
 
@@ -81,6 +86,10 @@ def test_init_db_creates_required_event_and_channel_columns(tmp_path: Path) -> N
         "message",
         "payload_json",
         "triggered_at",
+        "notification_status",
+        "notification_attempted_at",
+        "notification_sent_at",
+        "notification_result_json",
     }
     assert set(channel_columns) == {
         "id",
@@ -173,6 +182,7 @@ def test_alert_event_helpers_store_payload_and_detect_existing_alerts(
     assert row["alert_key"] == "profit_taking:510500:2026-06-05"
     assert json.loads(row["payload_json"]) == {"gain_pct": 21.5}
     assert row["triggered_at"] == "2026-06-05T10:00:00+00:00"
+    assert row["notification_status"] == ALERT_NOTIFICATION_PENDING
 
 
 def test_alert_key_is_unique(tmp_path: Path) -> None:
@@ -204,3 +214,70 @@ def test_alert_key_is_unique(tmp_path: Path) -> None:
                 title="Drawdown reminder",
                 message="Duplicate alert key.",
             )
+
+
+def test_failed_alert_delivery_is_retryable(tmp_path: Path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+
+    with open_connection(sqlite_path) as connection:
+        init_db(connection)
+        rule_id = add_rule(
+            connection,
+            type="drawdown",
+            symbol="510300",
+            name="CSI 300 ETF drawdown",
+            asset_type="fund",
+            params={"drawdown_pct": 10},
+        )
+        event_id = reserve_alert_event(
+            connection,
+            rule_id=rule_id,
+            alert_key="drawdown:510300:retry",
+            title="Drawdown reminder",
+            message="510300 crossed the configured drawdown threshold.",
+        )
+
+        assert alert_exists(connection, "drawdown:510300:retry")
+
+        record_alert_notification_result(
+            connection,
+            event_id=event_id,
+            results=[{"channel": "telegram", "success": False, "detail": "failed"}],
+        )
+        failed_row = connection.execute(
+            "SELECT notification_status FROM alert_events WHERE id = ?",
+            (event_id,),
+        ).fetchone()
+
+        assert not alert_exists(connection, "drawdown:510300:retry")
+
+        retried_event_id = reserve_alert_event(
+            connection,
+            rule_id=rule_id,
+            alert_key="drawdown:510300:retry",
+            title="Drawdown reminder",
+            message="Retrying the alert.",
+        )
+
+        record_alert_notification_result(
+            connection,
+            event_id=retried_event_id,
+            results=[{"channel": "telegram", "success": True, "detail": "sent"}],
+        )
+        sent_row = connection.execute(
+            """
+            SELECT notification_status, notification_result_json
+            FROM alert_events
+            WHERE id = ?
+            """,
+            (event_id,),
+        ).fetchone()
+
+        assert alert_exists(connection, "drawdown:510300:retry")
+
+    assert failed_row["notification_status"] == ALERT_NOTIFICATION_FAILED
+    assert retried_event_id == event_id
+    assert sent_row["notification_status"] == ALERT_NOTIFICATION_SENT
+    assert json.loads(sent_row["notification_result_json"]) == [
+        {"channel": "telegram", "detail": "sent", "success": True}
+    ]

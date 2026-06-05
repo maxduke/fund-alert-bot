@@ -4,11 +4,20 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+ALERT_NOTIFICATION_PENDING = "pending"
+ALERT_NOTIFICATION_SENT = "sent"
+ALERT_NOTIFICATION_FAILED = "failed"
+RETRYABLE_ALERT_NOTIFICATION_STATUSES = frozenset({ALERT_NOTIFICATION_FAILED})
+SUPPRESSING_ALERT_NOTIFICATION_STATUSES = (
+    ALERT_NOTIFICATION_PENDING,
+    ALERT_NOTIFICATION_SENT,
+)
 
 
 def connect(sqlite_path: str | Path) -> sqlite3.Connection:
@@ -20,6 +29,9 @@ def connect(sqlite_path: str | Path) -> sqlite3.Connection:
     connection = sqlite3.connect(path)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
+    connection.execute("PRAGMA busy_timeout = 5000")
+    if path != Path(":memory:"):
+        connection.execute("PRAGMA journal_mode = WAL")
     return connection
 
 
@@ -62,7 +74,11 @@ def init_db(connection: sqlite3.Connection) -> None:
             title TEXT NOT NULL,
             message TEXT NOT NULL,
             payload_json TEXT,
-            triggered_at TEXT NOT NULL
+            triggered_at TEXT NOT NULL,
+            notification_status TEXT NOT NULL DEFAULT 'pending',
+            notification_attempted_at TEXT,
+            notification_sent_at TEXT,
+            notification_result_json TEXT
         );
 
         CREATE TABLE IF NOT EXISTS notification_channels (
@@ -76,6 +92,7 @@ def init_db(connection: sqlite3.Connection) -> None:
         );
         """
     )
+    _ensure_alert_event_delivery_columns(connection)
     connection.commit()
 
 
@@ -178,15 +195,19 @@ def delete_rule(connection: sqlite3.Connection, rule_id: int) -> bool:
 
 
 def alert_exists(connection: sqlite3.Connection, alert_key: str) -> bool:
-    """Return whether an alert event with the given unique key exists."""
+    """Return whether a non-failed alert event with the key already exists."""
     row = connection.execute(
         """
         SELECT 1
         FROM alert_events
         WHERE alert_key = ?
+            AND notification_status IN (?, ?)
         LIMIT 1
         """,
-        (alert_key,),
+        (
+            alert_key,
+            *SUPPRESSING_ALERT_NOTIFICATION_STATUSES,
+        ),
     ).fetchone()
     return row is not None
 
@@ -225,6 +246,137 @@ def add_alert_event(
     )
     connection.commit()
     return int(cursor.lastrowid)
+
+
+def reserve_alert_event(
+    connection: sqlite3.Connection,
+    *,
+    rule_id: int,
+    alert_key: str,
+    title: str,
+    message: str,
+    payload: Any | None = None,
+    triggered_at: str | datetime | None = None,
+) -> int:
+    """Create or re-reserve a retryable alert event for notification delivery."""
+
+    try:
+        return add_alert_event(
+            connection,
+            rule_id=rule_id,
+            alert_key=alert_key,
+            title=title,
+            message=message,
+            payload=payload,
+            triggered_at=triggered_at,
+        )
+    except sqlite3.IntegrityError:
+        row = connection.execute(
+            """
+            SELECT id, notification_status
+            FROM alert_events
+            WHERE alert_key = ?
+            """,
+            (alert_key,),
+        ).fetchone()
+        if (
+            row is None
+            or row["notification_status"] not in RETRYABLE_ALERT_NOTIFICATION_STATUSES
+        ):
+            raise
+
+        event_id = int(row["id"])
+        connection.execute(
+            """
+            UPDATE alert_events
+            SET
+                rule_id = ?,
+                title = ?,
+                message = ?,
+                payload_json = ?,
+                triggered_at = ?,
+                notification_status = ?,
+                notification_attempted_at = NULL,
+                notification_sent_at = NULL,
+                notification_result_json = NULL
+            WHERE id = ?
+            """,
+            (
+                rule_id,
+                title,
+                message,
+                None if payload is None else _json_text(payload),
+                _timestamp_text(triggered_at),
+                ALERT_NOTIFICATION_PENDING,
+                event_id,
+            ),
+        )
+        connection.commit()
+        return event_id
+
+
+def record_alert_notification_result(
+    connection: sqlite3.Connection,
+    *,
+    event_id: int,
+    results: Sequence[Any],
+) -> None:
+    """Record channel delivery results for an alert event."""
+
+    result_payload = [_notification_result_payload(result) for result in results]
+    delivered = any(bool(result["success"]) for result in result_payload)
+    now = _utc_now_text()
+    connection.execute(
+        """
+        UPDATE alert_events
+        SET
+            notification_status = ?,
+            notification_attempted_at = ?,
+            notification_sent_at = ?,
+            notification_result_json = ?
+        WHERE id = ?
+        """,
+        (
+            ALERT_NOTIFICATION_SENT if delivered else ALERT_NOTIFICATION_FAILED,
+            now,
+            now if delivered else None,
+            _json_text(result_payload),
+            event_id,
+        ),
+    )
+    connection.commit()
+
+
+def _ensure_alert_event_delivery_columns(connection: sqlite3.Connection) -> None:
+    columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(alert_events)").fetchall()
+    }
+    column_definitions = {
+        "notification_status": "TEXT NOT NULL DEFAULT 'pending'",
+        "notification_attempted_at": "TEXT",
+        "notification_sent_at": "TEXT",
+        "notification_result_json": "TEXT",
+    }
+    for column, definition in column_definitions.items():
+        if column not in columns:
+            connection.execute(
+                f"ALTER TABLE alert_events ADD COLUMN {column} {definition}"
+            )
+
+
+def _notification_result_payload(result: Any) -> dict[str, object]:
+    return {
+        "channel": str(_read_result_value(result, "channel", "")),
+        "success": bool(_read_result_value(result, "success", False)),
+        "detail": str(_read_result_value(result, "detail", "")),
+    }
+
+
+def _read_result_value(result: Any, key: str, default: Any) -> Any:
+    if isinstance(result, dict):
+        return result.get(key, default)
+    return getattr(result, key, default)
 
 
 def _json_text(value: Any) -> str:

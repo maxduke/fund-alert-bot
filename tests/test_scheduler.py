@@ -77,6 +77,7 @@ def test_daily_dca_trigger_runs_on_weekends() -> None:
 def test_check_and_scheduler_use_same_evaluator() -> None:
     assert commands.evaluate_drawdown_rules is scheduler.evaluate_drawdown_rules
     assert commands.evaluate_dca_rules is scheduler.evaluate_dca_rules
+    assert commands.evaluate_profit_rules is scheduler.evaluate_profit_rules
 
 
 def test_scheduled_check_prevents_duplicate_alerts_by_alert_key(
@@ -117,11 +118,14 @@ def test_scheduled_check_prevents_duplicate_alerts_by_alert_key(
         )
 
     with open_connection(sqlite_path) as connection:
-        event_count = connection.execute(
-            "SELECT COUNT(*) FROM alert_events"
-        ).fetchone()[0]
+        event_row = connection.execute(
+            """
+            SELECT notification_status
+            FROM alert_events
+            """
+        ).fetchone()
 
-    assert event_count == 1
+    assert event_row["notification_status"] == "sent"
     assert application.bot.messages == [
         {"chat_id": 123, "text": "399006 is down 10.0% from its 365-day high."}
     ]
@@ -167,10 +171,10 @@ def test_scheduled_check_logs_and_skips_when_no_new_data(
 
     assert event_count == 0
     assert application.bot.messages == []
-    assert "Scheduled drawdown check started" in caplog.text
-    assert "Scheduled drawdown check skipped" in caplog.text
+    assert "Scheduled market reminder check started" in caplog.text
+    assert "Scheduled market reminder check skipped" in caplog.text
     assert "No market data available for 2024-01-02" in caplog.text
-    assert "Scheduled drawdown check ended" in caplog.text
+    assert "Scheduled market reminder check ended" in caplog.text
 
 
 def test_scheduled_drawdown_check_skips_when_cn_market_is_closed(
@@ -218,12 +222,69 @@ def test_register_jobs_passes_calendar_only_to_after_close_job() -> None:
         market_calendar=market_calendar,
     )
 
-    after_close_job = fake_scheduler.jobs[scheduler.DRAW_DOWN_AFTER_CLOSE_JOB_ID]
+    after_close_job = fake_scheduler.jobs[scheduler.MARKET_AFTER_CLOSE_JOB_ID]
     dca_job = fake_scheduler.jobs[scheduler.DCA_MORNING_JOB_ID]
 
+    assert after_close_job["func"] is scheduler.run_scheduled_market_check
     assert after_close_job["kwargs"]["market_calendar"] is market_calendar
     assert after_close_job["kwargs"]["market_data_provider"] is provider
     assert "market_calendar" not in dca_job["kwargs"]
+
+
+def test_scheduled_market_check_evaluates_profit_rules(
+    tmp_path: Path,
+) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    _add_profit_rule(sqlite_path)
+    application = FakeApplication()
+    provider = FakeProvider(
+        _history(["2024-01-01"], [100.0]),
+        latest={"date": "2024-01-02", "close": 2.4, "source": "test"},
+    )
+    market_calendar = FakeMarketCalendar(is_trading_day=True)
+
+    asyncio.run(
+        scheduler.run_scheduled_market_check(
+            application=application,
+            sqlite_path=sqlite_path,
+            allowed_user_ids={123},
+            market_data_provider=provider,
+            market_calendar=market_calendar,
+            timezone="Asia/Shanghai",
+            run_date=date(2024, 1, 2),
+        )
+    )
+
+    with open_connection(sqlite_path) as connection:
+        event_rows = connection.execute(
+            """
+            SELECT alert_key, notification_status
+            FROM alert_events
+            ORDER BY id
+            """
+        ).fetchall()
+
+    assert [call.asset_type for call in provider.latest_calls] == [AssetType.CN_ETF]
+    assert [row["alert_key"] for row in event_rows] == [
+        "159915:profit:cost:1.85:threshold:0.25"
+    ]
+    assert [row["notification_status"] for row in event_rows] == ["sent"]
+    assert application.bot.messages == [
+        {
+            "chat_id": 123,
+            "text": (
+                "Profit-taking reminder\n"
+                "Symbol: 159915\n"
+                "Name: ChiNext ETF\n"
+                "Asset type: cn_etf\n"
+                "Cost: 1.85\n"
+                "Latest price: 2.4\n"
+                "Profit rate: 29.7%\n"
+                "Triggered threshold: 25.0%\n"
+                "Reminder: this is not automatic trading and no orders will be placed."
+            ),
+        }
+    ]
 
 
 def test_scheduled_dca_check_prevents_duplicate_alerts_by_alert_key(
@@ -286,9 +347,16 @@ def test_scheduled_dca_check_prevents_duplicate_alerts_by_alert_key(
 
 
 class FakeProvider:
-    def __init__(self, history: pd.DataFrame) -> None:
+    def __init__(
+        self,
+        history: pd.DataFrame,
+        *,
+        latest: dict[str, object] | None = None,
+    ) -> None:
         self.history = history
+        self.latest = latest
         self.calls: list[tuple[Instrument, object, object]] = []
+        self.latest_calls: list[Instrument] = []
 
     def get_history(
         self,
@@ -300,7 +368,8 @@ class FakeProvider:
         return self.history
 
     def get_latest(self, instrument: Instrument) -> dict[str, object] | None:
-        return None
+        self.latest_calls.append(instrument)
+        return self.latest
 
 
 class FakeMarketCalendar:
@@ -369,6 +438,22 @@ def _add_dca_rule(sqlite_path: Path) -> None:
             params={
                 "weekday": "THU",
                 "amount": 1000,
+            },
+        )
+
+
+def _add_profit_rule(sqlite_path: Path) -> None:
+    with open_connection(sqlite_path) as connection:
+        initialize_database(connection)
+        add_rule(
+            connection,
+            type=commands.PROFIT_RULE_TYPE,
+            symbol="159915",
+            name="ChiNext ETF",
+            asset_type=AssetType.CN_ETF.value,
+            params={
+                "cost": 1.85,
+                "thresholds": [0.25],
             },
         )
 

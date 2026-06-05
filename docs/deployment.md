@@ -53,7 +53,7 @@ Copy `deploy/docker-compose.prod.yml` from this repository to:
 /opt/fund-alert-bot/docker-compose.yml
 ```
 
-Copy `deploy/.env.example` from this repository to:
+Copy `.env.example` from this repository to:
 
 ```text
 /opt/fund-alert-bot/.env
