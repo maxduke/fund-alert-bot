@@ -395,8 +395,9 @@ def test_check_reports_unavailable_latest_profit_data(tmp_path) -> None:
 
     assert context.bot.messages == []
     assert "No-data skips: 1." in message.replies[0]
-    assert "Rule 1 110026: Latest unit NAV is unavailable for 110026." in (
-        message.replies[0]
+    assert (
+        "Rule 1 110026: Latest unit NAV is unavailable for 110026."
+        in (message.replies[0])
     )
 
 
@@ -428,9 +429,7 @@ def test_test_notify_sends_to_enabled_channels(monkeypatch) -> None:
 
     asyncio.run(handlers[-1].callback(update, context))
 
-    assert context.bot.messages == [
-        {"chat_id": 456, "text": TEST_NOTIFICATION_MESSAGE}
-    ]
+    assert context.bot.messages == [{"chat_id": 456, "text": TEST_NOTIFICATION_MESSAGE}]
     assert webhook_calls == [
         {
             "url": "https://hooks.example.test/secret",

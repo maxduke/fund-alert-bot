@@ -341,9 +341,7 @@ def _format_combined_check_summary(
         return NO_RULES_TO_CHECK_MESSAGE
 
     dca_notifications = [] if dca_result is None else dca_result.notifications
-    profit_notifications = (
-        [] if profit_result is None else profit_result.notifications
-    )
+    profit_notifications = [] if profit_result is None else profit_result.notifications
     alert_count = (
         len(drawdown_result.notifications)
         + len(profit_notifications)
@@ -359,18 +357,14 @@ def _format_combined_check_summary(
         parts.append("No alerts triggered.")
 
     dca_duplicates = 0 if dca_result is None else dca_result.skipped_duplicates
-    profit_duplicates = (
-        0 if profit_result is None else profit_result.skipped_duplicates
-    )
+    profit_duplicates = 0 if profit_result is None else profit_result.skipped_duplicates
     skipped_duplicates = (
         drawdown_result.skipped_duplicates + profit_duplicates + dca_duplicates
     )
     if skipped_duplicates:
         parts.append(f"Duplicate alerts skipped: {skipped_duplicates}.")
 
-    profit_no_data_skips = (
-        [] if profit_result is None else profit_result.no_data_skips
-    )
+    profit_no_data_skips = [] if profit_result is None else profit_result.no_data_skips
     no_data_skips = [*drawdown_result.no_data_skips, *profit_no_data_skips]
     if no_data_skips:
         parts.append(f"No-data skips: {len(no_data_skips)}.")
@@ -403,10 +397,7 @@ def _format_rule_row(row: Any) -> str:
     )
     if row["type"] == DCA_RULE_TYPE:
         return (
-            f"id={row['id']} "
-            f"type={row['type']} "
-            f"name={row['name']} "
-            f"params={params_text}"
+            f"id={row['id']} type={row['type']} name={row['name']} params={params_text}"
         )
 
     return (

@@ -1,18 +1,17 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
-    branches: [main]
-  workflow_dispatch:
+  push:
+    branches:
+      - main
 
 permissions:
   contents: read
 
 jobs:
-  test:
-    runs-on: ubuntu-22.04
+  checks:
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
@@ -25,25 +24,16 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
-      - name: Install build tooling
+      - name: Install dev dependencies
         run: |
-          python -m pip install --upgrade \
-            pip==25.2 \
-            setuptools==75.1.0 \
-            wheel==0.44.0
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
 
-      - name: Install project
-        run: python -m pip install -e ".[dev]"
+      - name: Check formatting
+        run: python -m ruff format --check .
 
-      - name: Show tool versions
-        run: |
-          python -V
-          pip -V
-          ruff --version
-          pytest --version
-
-      - name: Ruff
+      - name: Lint
         run: python -m ruff check .
 
-      - name: Pytest
+      - name: Test
         run: python -m pytest
