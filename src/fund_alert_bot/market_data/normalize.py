@@ -54,7 +54,11 @@ def normalize_history(
         raise EmptyMarketDataError("Market data provider returned no rows.")
 
     resolved_asset_type = _resolve_asset_type(asset_type)
-    if resolved_asset_type is AssetType.CN_ETF:
+    if resolved_asset_type in {
+        AssetType.CN_INDEX,
+        AssetType.CN_ETF,
+        AssetType.CN_STOCK,
+    }:
         return _normalize_price_history(raw_data, source=source)
     if resolved_asset_type is AssetType.CN_OPEN_FUND:
         return _normalize_open_fund_history(raw_data, source=source)

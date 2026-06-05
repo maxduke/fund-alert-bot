@@ -9,7 +9,9 @@ from enum import StrEnum
 class AssetType(StrEnum):
     """Supported market data asset types."""
 
+    CN_INDEX = "cn_index"
     CN_ETF = "cn_etf"
+    CN_STOCK = "cn_stock"
     CN_OPEN_FUND = "cn_open_fund"
 
 

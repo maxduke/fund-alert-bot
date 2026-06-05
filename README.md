@@ -13,9 +13,22 @@ This repository is intentionally not a web platform, not an RSI implementation, 
 
 ## Current Status
 
-The project has an initial Python package skeleton, basic configuration loading,
-SQLite initialization helpers, smoke tests, Ruff configuration, and Docker
-packaging. There is no alert business logic yet.
+The project has a Python package skeleton, environment-based configuration,
+SQLite storage helpers, drawdown-from-high rule evaluation, Telegram commands,
+market data normalization, tests, Ruff configuration, and Docker packaging.
+
+Implemented Telegram commands:
+
+- `/add_drawdown <asset_type> <symbol> <name> <lookback_days> <thresholds>`
+- `/list`
+- `/del <id>`
+- `/check`
+
+Supported drawdown `asset_type` values are `cn_index`, `cn_etf`, `cn_stock`,
+and `cn_open_fund`. Thresholds are entered as percentages, for example
+`10,15,20`. `/check` runs enabled drawdown rules immediately; scheduled checks,
+DCA reminders, profit-taking reminders, realtime quotes, and RSI/RSI6 alerts are
+not implemented here.
 
 ## Planned Stack
 
