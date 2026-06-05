@@ -11,6 +11,7 @@ import pandas as pd
 import pytest
 
 from fund_alert_bot import commands, scheduler
+from fund_alert_bot.config import NotificationSettings
 from fund_alert_bot.db import add_rule, initialize_database, open_connection
 from fund_alert_bot.market_data import AssetType, Instrument
 
@@ -53,11 +54,22 @@ def test_check_and_scheduler_use_same_evaluator() -> None:
 
 def test_scheduled_check_prevents_duplicate_alerts_by_alert_key(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
     _add_drawdown_rule(sqlite_path)
     application = FakeApplication()
     provider = FakeProvider(_history(["2024-01-01", "2024-01-02"], [100.0, 90.0]))
+    webhook_calls: list[dict[str, object]] = []
+
+    def fake_post(url: str, **kwargs: object) -> object:
+        webhook_calls.append({"url": url, **kwargs})
+        return FakeResponse(status_code=200)
+
+    monkeypatch.setattr(
+        "fund_alert_bot.notifications.webhook.requests.post",
+        fake_post,
+    )
 
     for _ in range(2):
         asyncio.run(
@@ -68,6 +80,10 @@ def test_scheduled_check_prevents_duplicate_alerts_by_alert_key(
                 market_data_provider=provider,
                 timezone="Asia/Shanghai",
                 run_date=date(2024, 1, 2),
+                notification_settings=NotificationSettings(
+                    webhook_enabled=True,
+                    webhook_url="https://hooks.example.test/secret",
+                ),
             )
         )
 
@@ -79,6 +95,16 @@ def test_scheduled_check_prevents_duplicate_alerts_by_alert_key(
     assert event_count == 1
     assert application.bot.messages == [
         {"chat_id": 123, "text": "399006 is down 10.0% from its 365-day high."}
+    ]
+    assert webhook_calls == [
+        {
+            "url": "https://hooks.example.test/secret",
+            "json": {
+                "title": "Drawdown reminder",
+                "body": "399006 is down 10.0% from its 365-day high.",
+            },
+            "timeout": 10,
+        }
     ]
 
 
@@ -145,6 +171,11 @@ class FakeBot:
 class FakeApplication(SimpleNamespace):
     def __init__(self) -> None:
         super().__init__(bot=FakeBot())
+
+
+class FakeResponse:
+    def __init__(self, *, status_code: int) -> None:
+        self.status_code = status_code
 
 
 def _add_drawdown_rule(sqlite_path: Path) -> None:

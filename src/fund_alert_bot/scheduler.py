@@ -10,8 +10,10 @@ from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 from fund_alert_bot.checks import AlertNotification, evaluate_drawdown_rules
+from fund_alert_bot.config import NotificationSettings
 from fund_alert_bot.db import initialize_database, open_connection
 from fund_alert_bot.market_data import AkshareMarketDataProvider, MarketDataProvider
+from fund_alert_bot.notifications.service import build_notification_service
 
 if TYPE_CHECKING:
     from telegram.ext import Application
@@ -75,6 +77,7 @@ def register_jobs(
     timezone: str,
     check_time: str = DEFAULT_AFTER_CLOSE_CHECK_TIME,
     market_data_provider: MarketDataProvider | None = None,
+    notification_settings: NotificationSettings | None = None,
 ) -> None:
     """Register scheduled drawdown jobs."""
 
@@ -96,6 +99,7 @@ def register_jobs(
             "allowed_user_ids": frozenset(allowed_user_ids),
             "market_data_provider": market_data_provider,
             "timezone": timezone,
+            "notification_settings": notification_settings,
         },
         replace_existing=True,
         coalesce=True,
@@ -118,6 +122,7 @@ async def run_scheduled_drawdown_check(
     market_data_provider: MarketDataProvider,
     timezone: str | tzinfo,
     run_date: date | None = None,
+    notification_settings: NotificationSettings | None = None,
 ) -> None:
     """Run the scheduled drawdown check and send new alert notifications."""
 
@@ -153,6 +158,7 @@ async def run_scheduled_drawdown_check(
             application=application,
             allowed_user_ids=allowed_user_ids,
             notifications=result.notifications,
+            notification_settings=notification_settings,
         )
     except Exception:
         LOGGER.exception("Scheduled drawdown check failed")
@@ -177,26 +183,23 @@ async def send_scheduled_notifications(
     application: Application[Any, Any, Any, Any, Any, Any],
     allowed_user_ids: Collection[int],
     notifications: list[AlertNotification],
+    notification_settings: NotificationSettings | None = None,
 ) -> None:
-    """Send scheduled alert notifications to allowed Telegram users."""
+    """Send scheduled alert notifications to enabled channels."""
 
     if not notifications:
         return
 
-    if not allowed_user_ids:
-        LOGGER.warning(
-            "Scheduled drawdown check produced %d alert(s), but no allowed "
-            "Telegram users are configured",
-            len(notifications),
+    notification_service = build_notification_service(
+        settings=notification_settings,
+        telegram_bot=application.bot,
+        telegram_chat_ids=allowed_user_ids,
+    )
+    for notification in notifications:
+        await notification_service.send_alert(
+            title=notification.title,
+            body=notification.text,
         )
-        return
-
-    for chat_id in sorted(allowed_user_ids):
-        for notification in notifications:
-            await application.bot.send_message(
-                chat_id=chat_id,
-                text=notification.text,
-            )
 
 
 def _current_date(timezone: str | tzinfo) -> date:

@@ -22,6 +22,8 @@ except ModuleNotFoundError:  # pragma: no cover
 DEFAULT_SQLITE_PATH = Path("/app/data/fund_alert_bot.sqlite3")
 DEFAULT_TIMEZONE = "Asia/Shanghai"
 DEFAULT_AFTER_CLOSE_CHECK_TIME = "17:10"
+TRUE_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
+FALSE_ENV_VALUES = frozenset({"0", "false", "no", "off", ""})
 
 
 def parse_allowed_user_ids(raw_value: str | None) -> frozenset[int]:
@@ -43,6 +45,35 @@ def parse_allowed_user_ids(raw_value: str | None) -> frozenset[int]:
     return frozenset(allowed_user_ids)
 
 
+def parse_bool_env(raw_value: str | None, *, name: str) -> bool:
+    """Parse a boolean environment variable."""
+    if raw_value is None:
+        return False
+
+    normalized = raw_value.strip().lower()
+    if normalized in TRUE_ENV_VALUES:
+        return True
+    if normalized in FALSE_ENV_VALUES:
+        return False
+
+    msg = f"{name} must be one of: 1, true, yes, on, 0, false, no, off"
+    raise ValueError(msg)
+
+
+@dataclass(frozen=True, slots=True)
+class NotificationSettings:
+    """Optional notification channel settings."""
+
+    bark_enabled: bool = False
+    bark_server_url: str = ""
+    bark_device_key: str = ""
+    ntfy_enabled: bool = False
+    ntfy_server_url: str = ""
+    ntfy_topic: str = ""
+    webhook_enabled: bool = False
+    webhook_url: str = ""
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     """Typed runtime settings loaded from the environment."""
@@ -52,6 +83,7 @@ class Settings:
     after_close_check_time: str
     telegram_bot_token: str
     telegram_allowed_user_ids: frozenset[int]
+    notifications: NotificationSettings
 
 
 def load_settings(
@@ -73,5 +105,24 @@ def load_settings(
         telegram_bot_token=os.environ.get("TELEGRAM_BOT_TOKEN", ""),
         telegram_allowed_user_ids=parse_allowed_user_ids(
             os.environ.get("TELEGRAM_ALLOWED_USER_IDS")
+        ),
+        notifications=NotificationSettings(
+            bark_enabled=parse_bool_env(
+                os.environ.get("BARK_ENABLED"),
+                name="BARK_ENABLED",
+            ),
+            bark_server_url=os.environ.get("BARK_SERVER_URL", ""),
+            bark_device_key=os.environ.get("BARK_DEVICE_KEY", ""),
+            ntfy_enabled=parse_bool_env(
+                os.environ.get("NTFY_ENABLED"),
+                name="NTFY_ENABLED",
+            ),
+            ntfy_server_url=os.environ.get("NTFY_SERVER_URL", ""),
+            ntfy_topic=os.environ.get("NTFY_TOPIC", ""),
+            webhook_enabled=parse_bool_env(
+                os.environ.get("WEBHOOK_ENABLED"),
+                name="WEBHOOK_ENABLED",
+            ),
+            webhook_url=os.environ.get("WEBHOOK_URL", ""),
         ),
     )

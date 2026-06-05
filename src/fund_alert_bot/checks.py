@@ -31,6 +31,7 @@ class AlertNotification:
     """Alert text ready to send after the event has been stored."""
 
     event_id: int
+    title: str
     text: str
 
 
@@ -155,6 +156,7 @@ def evaluate_drawdown_rules(
             notifications.append(
                 AlertNotification(
                     event_id=event_id,
+                    title=str(alert["title"]),
                     text=str(alert["message"]),
                 )
             )

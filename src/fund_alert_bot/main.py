@@ -41,6 +41,7 @@ def run() -> None:
             timezone=settings.timezone,
             check_time=settings.after_close_check_time,
             market_data_provider=market_data_provider,
+            notification_settings=settings.notifications,
         )
         scheduler.start()
         LOGGER.info("APScheduler started")
@@ -56,6 +57,7 @@ def run() -> None:
         allowed_user_ids=settings.telegram_allowed_user_ids,
         sqlite_path=settings.sqlite_path,
         market_data_provider=market_data_provider,
+        notification_settings=settings.notifications,
         post_init=start_scheduler,
         post_shutdown=stop_scheduler,
     )
