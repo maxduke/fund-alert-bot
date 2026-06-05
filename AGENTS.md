@@ -55,6 +55,31 @@ Prefer simple modules, explicit configuration, and boring operational behavior.
 - Use `.env.example` for placeholder configuration only.
 - Document behavior before broadening alert rules or notification channels.
 
+## PR Workflow
+
+Use this finish process for repository changes:
+
+1. Review the diff and confirm the scope is correct.
+2. Run available tests and checks.
+3. Commit the change.
+4. Push the branch.
+5. Open a PR.
+6. After approval or explicit merge request, use squash merge.
+7. Delete the remote branch.
+8. Sync local `main`.
+9. Delete the local feature branch.
+
+Prefer:
+
+```powershell
+gh pr merge <PR_NUMBER> --squash --delete-branch
+git switch main
+git pull --ff-only origin main
+git branch -d <branch>
+```
+
+If `git branch -d` refuses after a verified squash merge, use `git branch -D <branch>`.
+
 ## Alert Ownership
 
 This project owns:
