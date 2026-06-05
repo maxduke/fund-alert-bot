@@ -1,0 +1,11 @@
+services:
+  bot:
+    build: .
+    # For production, use the image published by the Docker Build workflow:
+    # image: ghcr.io/maxduke/fund-alert-bot:latest
+    container_name: fund_alert_bot
+    restart: unless-stopped
+    environment:
+      SQLITE_PATH: /app/data/fund_alert_bot.sqlite3
+    volumes:
+      - ./data:/app/data
