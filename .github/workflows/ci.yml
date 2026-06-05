@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install build tooling
+        run: |
+          python -m pip install --upgrade \
+            pip==25.2 \
+            setuptools==75.1.0 \
+            wheel==0.44.0
+
+      - name: Install project
+        run: python -m pip install -e ".[dev]"
+
+      - name: Show tool versions
+        run: |
+          python -V
+          pip -V
+          ruff --version
+          pytest --version
+
+      - name: Ruff
+        run: python -m ruff check .
+
+      - name: Pytest
+        run: python -m pytest

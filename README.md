@@ -13,9 +13,9 @@ This repository is intentionally not a web platform, not an RSI implementation, 
 
 ## Current Status
 
-The project is in documentation-only scaffold mode. There is no business logic yet.
-
-The first implementation PRs should add the Python package skeleton, tooling, tests, and configuration loading before any alert rules are built.
+The project has an initial Python package skeleton, basic configuration loading,
+SQLite initialization helpers, smoke tests, Ruff configuration, and Docker
+packaging. There is no alert business logic yet.
 
 ## Planned Stack
 
@@ -57,8 +57,17 @@ Once tooling exists, use:
 ```powershell
 ruff check .
 pytest
-docker compose up --build
 ```
+
+Docker builds are validated by GitHub Actions on Linux. Local Docker is optional,
+especially on Windows workstations.
+
+## GitHub Actions
+
+- `CI`: installs the project with dev dependencies, then runs Ruff and pytest on
+  Python 3.12.
+- `Docker Build`: builds the Docker image on Ubuntu for pull requests and pushes
+  `ghcr.io/maxduke/fund-alert-bot` on non-PR runs.
 
 ## Project Documents
 

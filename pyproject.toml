@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fund-alert-bot"
+version = "0.1.0"
+description = "Lightweight local-first investment reminder bot."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "akshare",
+    "apscheduler",
+    "pandas",
+    "python-dotenv",
+    "python-telegram-bot",
+    "requests",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+]
+
+[project.scripts]
+fund-alert-bot = "fund_alert_bot.main:main"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
