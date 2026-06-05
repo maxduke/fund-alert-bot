@@ -4,20 +4,20 @@ from __future__ import annotations
 
 import json
 import logging
-import sqlite3
-from collections.abc import Collection, Sequence
+from collections.abc import Awaitable, Callable, Collection, Sequence
 from dataclasses import dataclass
-from datetime import date, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from fund_alert_bot.checks import (
+    DRAW_DOWN_RULE_TYPE,
+    DrawdownCheckResult,
+    evaluate_drawdown_rules,
+)
 from fund_alert_bot.db import (
-    add_alert_event,
     add_rule,
-    alert_exists,
     delete_rule,
     initialize_database,
-    list_enabled_rules,
     open_connection,
 )
 from fund_alert_bot.db import (
@@ -26,10 +26,8 @@ from fund_alert_bot.db import (
 from fund_alert_bot.market_data import (
     AkshareMarketDataProvider,
     AssetType,
-    Instrument,
     MarketDataProvider,
 )
-from fund_alert_bot.rules.drawdown import build_drawdown_alerts
 
 if TYPE_CHECKING:
     from telegram import Update
@@ -37,7 +35,6 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
-DRAW_DOWN_RULE_TYPE = "drawdown_from_high"
 ADD_DRAWDOWN_USAGE = (
     "Usage: /add_drawdown <asset_type> <symbol> <name> <lookback_days> <thresholds>"
 )
@@ -73,33 +70,6 @@ class DrawdownCommand:
     name: str
     lookback_days: int
     thresholds: list[float]
-
-
-@dataclass(frozen=True, slots=True)
-class AlertNotification:
-    """Alert text ready to send after the event has been stored."""
-
-    event_id: int
-    text: str
-
-
-@dataclass(frozen=True, slots=True)
-class RuleCheckError:
-    """A per-rule manual check error."""
-
-    rule_id: int
-    symbol: str
-    message: str
-
-
-@dataclass(frozen=True, slots=True)
-class DrawdownCheckResult:
-    """Summary of one manual drawdown check run."""
-
-    checked_rules: int
-    notifications: list[AlertNotification]
-    skipped_duplicates: int
-    errors: list[RuleCheckError]
 
 
 def parse_add_drawdown_args(args: Sequence[str]) -> DrawdownCommand:
@@ -186,84 +156,6 @@ def format_rules_list(rows: Sequence[Any]) -> str:
     return "\n".join(lines)
 
 
-def evaluate_drawdown_rules(
-    connection: Any,
-    market_data_provider: MarketDataProvider,
-    *,
-    today: date | None = None,
-) -> DrawdownCheckResult:
-    """Evaluate all enabled drawdown rules and store new alert events."""
-
-    end_date = today or date.today()
-    rules = [
-        row
-        for row in list_enabled_rules(connection)
-        if row["type"] == DRAW_DOWN_RULE_TYPE
-    ]
-
-    notifications: list[AlertNotification] = []
-    errors: list[RuleCheckError] = []
-    skipped_duplicates = 0
-
-    for row in rules:
-        try:
-            params = _load_params(row["params_json"])
-            lookback_days = int(params["lookback_days"])
-            start_date = end_date - timedelta(days=lookback_days)
-            instrument = Instrument(
-                symbol=row["symbol"],
-                name=row["name"],
-                asset_type=AssetType(row["asset_type"]),
-            )
-            history = market_data_provider.get_history(
-                instrument,
-                start_date,
-                end_date,
-            )
-            alerts = build_drawdown_alerts(
-                row,
-                history,
-                lambda alert_key: alert_exists(connection, alert_key),
-            )
-        except Exception as exc:  # noqa: BLE001
-            errors.append(
-                RuleCheckError(
-                    rule_id=int(row["id"]),
-                    symbol=str(row["symbol"]),
-                    message=str(exc),
-                )
-            )
-            continue
-
-        for alert in alerts:
-            try:
-                event_id = add_alert_event(
-                    connection,
-                    rule_id=int(row["id"]),
-                    alert_key=str(alert["alert_key"]),
-                    title=str(alert["title"]),
-                    message=str(alert["message"]),
-                    payload=alert.get("payload"),
-                )
-            except sqlite3.IntegrityError:
-                skipped_duplicates += 1
-                continue
-
-            notifications.append(
-                AlertNotification(
-                    event_id=event_id,
-                    text=str(alert["message"]),
-                )
-            )
-
-    return DrawdownCheckResult(
-        checked_rules=len(rules),
-        notifications=notifications,
-        skipped_duplicates=skipped_duplicates,
-        errors=errors,
-    )
-
-
 def format_check_summary(result: DrawdownCheckResult) -> str:
     """Format a clear manual check summary."""
 
@@ -279,6 +171,10 @@ def format_check_summary(result: DrawdownCheckResult) -> str:
         parts.append("No alerts triggered.")
     if result.skipped_duplicates:
         parts.append(f"Duplicate alerts skipped: {result.skipped_duplicates}.")
+    if result.no_data_skips:
+        parts.append(f"No-data skips: {len(result.no_data_skips)}.")
+        for skip in result.no_data_skips:
+            parts.append(f"Rule {skip.rule_id} {skip.symbol}: {skip.message}")
     if result.errors:
         parts.append(f"Errors: {len(result.errors)}.")
         for error in result.errors:
@@ -519,6 +415,16 @@ def create_application(
     allowed_user_ids: Collection[int],
     sqlite_path: str | Path = ":memory:",
     market_data_provider: MarketDataProvider | None = None,
+    post_init: Callable[
+        [Application[Any, Any, Any, Any, Any, Any]],
+        Awaitable[None],
+    ]
+    | None = None,
+    post_shutdown: Callable[
+        [Application[Any, Any, Any, Any, Any, Any]],
+        Awaitable[None],
+    ]
+    | None = None,
 ) -> Application[Any, Any, Any, Any, Any, Any]:
     """Create a python-telegram-bot application for the command shell."""
     from telegram.ext import Application
@@ -530,7 +436,13 @@ def create_application(
     if not allowed_user_ids:
         LOGGER.warning("TELEGRAM_ALLOWED_USER_IDS is empty; all commands are disabled")
 
-    application = Application.builder().token(token).build()
+    application_builder = Application.builder().token(token)
+    if post_init is not None:
+        application_builder.post_init(post_init)
+    if post_shutdown is not None:
+        application_builder.post_shutdown(post_shutdown)
+
+    application = application_builder.build()
     register_command_handlers(
         application,
         allowed_user_ids,

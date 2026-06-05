@@ -15,7 +15,8 @@ This repository is intentionally not a web platform, not an RSI implementation, 
 
 The project has a Python package skeleton, environment-based configuration,
 SQLite storage helpers, drawdown-from-high rule evaluation, Telegram commands,
-market data normalization, tests, Ruff configuration, and Docker packaging.
+weekday after-close drawdown scheduling, market data normalization, tests, Ruff
+configuration, and Docker packaging.
 
 Implemented Telegram commands:
 
@@ -26,7 +27,14 @@ Implemented Telegram commands:
 
 Supported drawdown `asset_type` values are `cn_index`, `cn_etf`, `cn_stock`,
 and `cn_open_fund`. Thresholds are entered as percentages, for example
-`10,15,20`. `/check` runs enabled drawdown rules immediately; scheduled checks,
+`10,15,20`. `/check` runs enabled drawdown rules immediately. APScheduler also
+runs the same drawdown evaluation Monday-Friday after CN market close.
+
+Default scheduler configuration:
+
+- `TZ=Asia/Shanghai`
+- `AFTER_CLOSE_CHECK_TIME=17:10`
+
 DCA reminders, profit-taking reminders, realtime quotes, and RSI/RSI6 alerts are
 not implemented here.
 

@@ -7,5 +7,7 @@ services:
     restart: unless-stopped
     environment:
       SQLITE_PATH: /app/data/fund_alert_bot.sqlite3
+      TZ: Asia/Shanghai
+      AFTER_CLOSE_CHECK_TIME: "17:10"
     volumes:
       - ./data:/app/data

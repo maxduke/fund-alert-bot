@@ -13,7 +13,9 @@ from fund_alert_bot.commands import (
     reject_if_unauthorized,
 )
 from fund_alert_bot.config import (
+    DEFAULT_AFTER_CLOSE_CHECK_TIME,
     DEFAULT_SQLITE_PATH,
+    DEFAULT_TIMEZONE,
     load_settings,
     parse_allowed_user_ids,
 )
@@ -39,6 +41,26 @@ def test_sqlite_path_from_environment(monkeypatch, tmp_path) -> None:
     settings = load_settings(load_env_file=False)
 
     assert settings.sqlite_path == sqlite_path
+
+
+def test_scheduler_defaults_from_environment(monkeypatch) -> None:
+    monkeypatch.delenv("TZ", raising=False)
+    monkeypatch.delenv("AFTER_CLOSE_CHECK_TIME", raising=False)
+
+    settings = load_settings(load_env_file=False)
+
+    assert settings.timezone == DEFAULT_TIMEZONE
+    assert settings.after_close_check_time == DEFAULT_AFTER_CLOSE_CHECK_TIME
+
+
+def test_scheduler_settings_from_environment(monkeypatch) -> None:
+    monkeypatch.setenv("TZ", "Asia/Shanghai")
+    monkeypatch.setenv("AFTER_CLOSE_CHECK_TIME", "17:10")
+
+    settings = load_settings(load_env_file=False)
+
+    assert settings.timezone == "Asia/Shanghai"
+    assert settings.after_close_check_time == "17:10"
 
 
 def test_parse_allowed_user_ids_returns_empty_set_for_blank_values() -> None:
