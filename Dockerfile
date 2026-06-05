@@ -19,7 +19,9 @@ FROM python:3.12-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    SQLITE_PATH=/app/data/fund_alert_bot.sqlite3
+    SQLITE_PATH=/app/data/fund_alert_bot.sqlite3 \
+    TZ=Asia/Shanghai \
+    AFTER_CLOSE_CHECK_TIME=17:10
 
 WORKDIR /app
 
