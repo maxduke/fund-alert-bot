@@ -47,9 +47,7 @@ class AkshareMarketDataProvider(MarketDataProvider):
         asset_type = self._resolve_asset_type(instrument.asset_type)
         raw_data = self._fetch_raw_history(instrument, asset_type, start_date, end_date)
         history = normalize_history(raw_data, asset_type, source="akshare")
-
-        if asset_type is AssetType.CN_OPEN_FUND:
-            history = self._filter_by_date(history, start_date, end_date)
+        history = self._filter_by_date(history, start_date, end_date)
 
         if history.empty:
             raise EmptyMarketDataError(
@@ -84,40 +82,43 @@ class AkshareMarketDataProvider(MarketDataProvider):
         end = _format_akshare_date(end_date)
         ak_module = self._akshare
 
-        if asset_type is AssetType.CN_INDEX:
-            return self._call_with_retry(
-                ak_module.index_zh_a_hist,
-                symbol=instrument.symbol,
-                period="daily",
-                start_date=start,
-                end_date=end,
-            )
         if asset_type is AssetType.CN_ETF:
-            return self._call_with_retry(
-                ak_module.fund_etf_hist_em,
-                symbol=instrument.symbol,
-                period="daily",
-                start_date=start,
-                end_date=end,
-                adjust="",
-            )
-        if asset_type is AssetType.CN_STOCK:
-            return self._call_with_retry(
-                ak_module.stock_zh_a_hist,
-                symbol=instrument.symbol,
-                period="daily",
-                start_date=start,
-                end_date=end,
-                adjust="qfq",
-            )
+            return self._fetch_cn_etf_history(instrument, start, end)
         if asset_type is AssetType.CN_OPEN_FUND:
             return self._call_with_retry(
                 ak_module.fund_open_fund_info_em,
                 symbol=instrument.symbol,
-                indicator="单位净值走势",
+                indicator="\u5355\u4f4d\u51c0\u503c\u8d70\u52bf",
             )
 
         raise UnsupportedAssetTypeError(f"Unsupported asset type: {asset_type!r}")
+
+    def _fetch_cn_etf_history(
+        self,
+        instrument: Instrument,
+        start_date: str,
+        end_date: str,
+    ) -> pd.DataFrame:
+        ak_module = self._akshare
+        try:
+            raw_data = self._call_with_retry(
+                ak_module.fund_etf_hist_em,
+                symbol=instrument.symbol,
+                period="daily",
+                start_date=start_date,
+                end_date=end_date,
+                adjust="",
+            )
+        except MarketDataFetchError:
+            raw_data = pd.DataFrame()
+
+        if raw_data is not None and not raw_data.empty:
+            return raw_data
+
+        return self._call_with_retry(
+            ak_module.fund_etf_hist_sina,
+            symbol=_format_sina_etf_symbol(instrument.symbol),
+        )
 
     def _call_with_retry(
         self,
@@ -173,3 +174,14 @@ def _format_akshare_date(value: DateLike) -> str:
 
 def _to_timestamp(value: DateLike) -> pd.Timestamp:
     return pd.to_datetime(value, errors="raise").normalize()
+
+
+def _format_sina_etf_symbol(symbol: str) -> str:
+    normalized = symbol.lower()
+    if normalized.startswith(("sh", "sz")):
+        return normalized
+    if normalized.startswith("5"):
+        return f"sh{normalized}"
+    if normalized.startswith("1"):
+        return f"sz{normalized}"
+    return normalized
