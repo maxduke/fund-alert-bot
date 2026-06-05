@@ -32,7 +32,10 @@ Implemented Telegram commands:
 Supported drawdown `asset_type` values are `cn_index`, `cn_etf`, `cn_stock`,
 and `cn_open_fund`. Thresholds are entered as percentages, for example
 `10,15,20`. `/check` runs enabled drawdown rules immediately. APScheduler also
-runs the same drawdown evaluation Monday-Friday after CN market close.
+runs the same drawdown evaluation Monday-Friday after CN market close, and the
+job skips official CN market holidays when AKShare's Sina trade-date calendar is
+available. If that calendar cannot be loaded, the scheduled check falls back to
+weekday behavior.
 
 Profit-taking reminders are added with `/add_profit`, for example
 `/add_profit cn_etf 159915 ChiNext-ETF 1.85 25,40` or
