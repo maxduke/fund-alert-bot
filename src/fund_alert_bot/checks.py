@@ -299,9 +299,7 @@ def evaluate_dca_rules(
 
     check_date = today or date.today()
     rules = [
-        row
-        for row in list_enabled_rules(connection)
-        if row["type"] == DCA_RULE_TYPE
+        row for row in list_enabled_rules(connection) if row["type"] == DCA_RULE_TYPE
     ]
 
     notifications: list[AlertNotification] = []

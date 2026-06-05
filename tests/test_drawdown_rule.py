@@ -28,10 +28,7 @@ def test_drawdown_rule_triggers_ten_percent_threshold() -> None:
 
     assert len(alerts) == 1
     alert = alerts[0]
-    assert (
-        alert["alert_key"]
-        == "510300:drawdown:365:peak:2024-01-01:threshold:0.1"
-    )
+    assert alert["alert_key"] == "510300:drawdown:365:peak:2024-01-01:threshold:0.1"
     assert alert["payload"] == {
         "symbol": "510300",
         "name": "CSI 300 ETF",
@@ -92,10 +89,7 @@ def test_drawdown_rule_new_peak_creates_different_alert_key() -> None:
     alerts = build_drawdown_alerts(rule, df, existing_keys.__contains__)
 
     assert len(alerts) == 1
-    assert (
-        alerts[0]["alert_key"]
-        == "510300:drawdown:365:peak:2024-01-02:threshold:0.1"
-    )
+    assert alerts[0]["alert_key"] == "510300:drawdown:365:peak:2024-01-02:threshold:0.1"
 
 
 def test_drawdown_rule_works_with_open_fund_data() -> None:

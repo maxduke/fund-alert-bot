@@ -212,8 +212,7 @@ def test_scheduled_dca_check_prevents_duplicate_alerts_by_alert_key(
         ).fetchall()
 
     expected_message = (
-        "今天是 创业板 定投日，计划定投 1000 元。\n"
-        "提醒：这是纪律提醒，不会自动交易。"
+        "今天是 创业板 定投日，计划定投 1000 元。\n提醒：这是纪律提醒，不会自动交易。"
     )
     assert [row["alert_key"] for row in event_rows] == ["dca:1:2024-01-04"]
     assert application.bot.messages == [{"chat_id": 123, "text": expected_message}]

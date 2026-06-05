@@ -135,9 +135,7 @@ def test_index_history_formats_exchange_symbol_and_normalizes() -> None:
 
     assert list(history.columns) == NORMALIZED_COLUMNS
     assert history["close"].tolist() == [2.2, 2.3]
-    assert fake_ak.calls == [
-        ("stock_zh_index_daily_em", {"symbol": "sz399006"})
-    ]
+    assert fake_ak.calls == [("stock_zh_index_daily_em", {"symbol": "sz399006"})]
 
 
 def test_stock_history_uses_a_share_history_and_normalizes() -> None:
