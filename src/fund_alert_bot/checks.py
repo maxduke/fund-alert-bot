@@ -23,9 +23,15 @@ from fund_alert_bot.market_data import (
 )
 from fund_alert_bot.rules.dca import build_dca_reminder_alert
 from fund_alert_bot.rules.drawdown import build_drawdown_alerts
+from fund_alert_bot.rules.profit import (
+    LatestDataUnavailableError,
+    build_profit_alerts,
+    latest_unavailable_message,
+)
 
 DCA_RULE_TYPE = "dca_reminder"
 DRAW_DOWN_RULE_TYPE = "drawdown_from_high"
+PROFIT_RULE_TYPE = "profit_reminder"
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +79,17 @@ class DcaCheckResult:
     checked_rules: int
     notifications: list[AlertNotification]
     skipped_duplicates: int
+    errors: list[RuleCheckError]
+
+
+@dataclass(frozen=True, slots=True)
+class ProfitCheckResult:
+    """Summary of one profit reminder check run."""
+
+    checked_rules: int
+    notifications: list[AlertNotification]
+    skipped_duplicates: int
+    no_data_skips: list[RuleNoDataSkip]
     errors: list[RuleCheckError]
 
 
@@ -174,6 +191,97 @@ def evaluate_drawdown_rules(
             )
 
     return DrawdownCheckResult(
+        checked_rules=len(rules),
+        notifications=notifications,
+        skipped_duplicates=skipped_duplicates,
+        no_data_skips=no_data_skips,
+        errors=errors,
+    )
+
+
+def evaluate_profit_rules(
+    connection: Any,
+    market_data_provider: MarketDataProvider,
+) -> ProfitCheckResult:
+    """Evaluate enabled profit reminder rules and store new alert events."""
+
+    rules = [
+        row for row in list_enabled_rules(connection) if row["type"] == PROFIT_RULE_TYPE
+    ]
+
+    notifications: list[AlertNotification] = []
+    errors: list[RuleCheckError] = []
+    no_data_skips: list[RuleNoDataSkip] = []
+    skipped_duplicates = 0
+
+    for row in rules:
+        try:
+            instrument = Instrument(
+                symbol=row["symbol"],
+                name=row["name"],
+                asset_type=AssetType(row["asset_type"]),
+            )
+            latest = market_data_provider.get_latest(instrument)
+            if latest is None:
+                no_data_skips.append(
+                    RuleNoDataSkip(
+                        rule_id=int(row["id"]),
+                        symbol=str(row["symbol"]),
+                        message=latest_unavailable_message(
+                            symbol=str(row["symbol"]),
+                            asset_type=str(row["asset_type"]),
+                        ),
+                    )
+                )
+                continue
+
+            alerts = build_profit_alerts(
+                row,
+                latest,
+                lambda alert_key: alert_exists(connection, alert_key),
+            )
+        except LatestDataUnavailableError as exc:
+            no_data_skips.append(
+                RuleNoDataSkip(
+                    rule_id=int(row["id"]),
+                    symbol=str(row["symbol"]),
+                    message=str(exc),
+                )
+            )
+            continue
+        except Exception as exc:  # noqa: BLE001
+            errors.append(
+                RuleCheckError(
+                    rule_id=int(row["id"]),
+                    symbol=str(row["symbol"]),
+                    message=str(exc),
+                )
+            )
+            continue
+
+        for alert in alerts:
+            try:
+                event_id = add_alert_event(
+                    connection,
+                    rule_id=int(row["id"]),
+                    alert_key=str(alert["alert_key"]),
+                    title=str(alert["title"]),
+                    message=str(alert["message"]),
+                    payload=alert.get("payload"),
+                )
+            except sqlite3.IntegrityError:
+                skipped_duplicates += 1
+                continue
+
+            notifications.append(
+                AlertNotification(
+                    event_id=event_id,
+                    title=str(alert["title"]),
+                    text=str(alert["message"]),
+                )
+            )
+
+    return ProfitCheckResult(
         checked_rules=len(rules),
         notifications=notifications,
         skipped_duplicates=skipped_duplicates,

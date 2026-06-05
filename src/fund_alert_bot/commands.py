@@ -13,10 +13,13 @@ from typing import TYPE_CHECKING, Any
 from fund_alert_bot.checks import (
     DCA_RULE_TYPE,
     DRAW_DOWN_RULE_TYPE,
+    PROFIT_RULE_TYPE,
     DcaCheckResult,
     DrawdownCheckResult,
+    ProfitCheckResult,
     evaluate_dca_rules,
     evaluate_drawdown_rules,
+    evaluate_profit_rules,
 )
 from fund_alert_bot.config import NotificationSettings
 from fund_alert_bot.db import (
@@ -46,6 +49,7 @@ ADD_DRAWDOWN_USAGE = (
     "Usage: /add_drawdown <asset_type> <symbol> <name> <lookback_days> <thresholds>"
 )
 ADD_DCA_USAGE = "Usage: /add_dca <name> <weekday> <amount>"
+ADD_PROFIT_USAGE = "Usage: /add_profit <asset_type> <symbol> <name> <cost> <thresholds>"
 START_MESSAGE = "fund-alert-bot is running. Use /help to see available commands."
 HELP_MESSAGE = "\n".join(
     (
@@ -53,6 +57,7 @@ HELP_MESSAGE = "\n".join(
         "/start - Start the bot",
         "/help - Show available commands",
         "/add_drawdown <asset_type> <symbol> <name> <lookback_days> <thresholds>",
+        "/add_profit <asset_type> <symbol> <name> <cost> <thresholds>",
         "/add_dca <name> <weekday> <amount>",
         "/list - List configured rules",
         "/del <id> - Delete a configured rule",
@@ -63,7 +68,7 @@ HELP_MESSAGE = "\n".join(
 NO_RULES_CONFIGURED_MESSAGE = "No rules configured"
 NO_DRAWDOWN_RULES_TO_CHECK_MESSAGE = "No enabled drawdown_from_high rules to check"
 NO_RULES_TO_CHECK_MESSAGE = (
-    "No enabled drawdown_from_high or dca_reminder rules to check"
+    "No enabled drawdown_from_high, profit_reminder, or dca_reminder rules to check"
 )
 TEST_NOTIFICATION_TITLE = "fund-alert-bot test"
 TEST_NOTIFICATION_MESSAGE = "Test notification from fund-alert-bot."
@@ -92,6 +97,17 @@ class DcaCommand:
     name: str
     weekday: str
     amount: int | float
+
+
+@dataclass(frozen=True, slots=True)
+class ProfitCommand:
+    """Parsed /add_profit command fields."""
+
+    asset_type: AssetType
+    symbol: str
+    name: str
+    cost: float
+    thresholds: list[float]
 
 
 def parse_add_drawdown_args(args: Sequence[str]) -> DrawdownCommand:
@@ -132,6 +148,37 @@ def parse_add_drawdown_args(args: Sequence[str]) -> DrawdownCommand:
     )
 
 
+def parse_add_profit_args(args: Sequence[str]) -> ProfitCommand:
+    """Parse /add_profit arguments into a typed command object."""
+
+    if len(args) != 5:
+        raise CommandParseError(ADD_PROFIT_USAGE)
+
+    raw_asset_type, symbol, name, raw_cost, raw_thresholds = args
+    try:
+        asset_type = AssetType(raw_asset_type)
+    except ValueError as exc:
+        valid_values = ", ".join(asset_type.value for asset_type in AssetType)
+        raise CommandParseError(
+            f"Invalid asset_type: {raw_asset_type}. Valid values: {valid_values}"
+        ) from exc
+
+    symbol = symbol.strip()
+    name = name.strip()
+    if not symbol:
+        raise CommandParseError("symbol must not be empty")
+    if not name:
+        raise CommandParseError("name must not be empty")
+
+    return ProfitCommand(
+        asset_type=asset_type,
+        symbol=symbol,
+        name=name,
+        cost=parse_profit_cost(raw_cost),
+        thresholds=parse_thresholds(raw_thresholds),
+    )
+
+
 def parse_thresholds(raw_thresholds: str) -> list[float]:
     """Parse comma-separated percent thresholds into decimal fractions."""
 
@@ -155,6 +202,20 @@ def parse_thresholds(raw_thresholds: str) -> list[float]:
         thresholds.append(threshold_percent / 100)
 
     return thresholds
+
+
+def parse_profit_cost(raw_cost: str) -> float:
+    """Parse a positive profit reminder cost basis."""
+
+    try:
+        cost = float(raw_cost)
+    except ValueError as exc:
+        raise CommandParseError("cost must be a positive number") from exc
+
+    if not math.isfinite(cost) or cost <= 0:
+        raise CommandParseError("cost must be a positive number")
+
+    return cost
 
 
 def parse_add_dca_args(args: Sequence[str]) -> DcaCommand:
@@ -215,6 +276,15 @@ def dca_params(command: DcaCommand) -> dict[str, object]:
     }
 
 
+def profit_params(command: ProfitCommand) -> dict[str, object]:
+    """Build the persisted params_json object for a profit reminder rule."""
+
+    return {
+        "cost": command.cost,
+        "thresholds": command.thresholds,
+    }
+
+
 def format_rules_list(rows: Sequence[Any]) -> str:
     """Format rules for the /list command."""
 
@@ -229,11 +299,12 @@ def format_rules_list(rows: Sequence[Any]) -> str:
 def format_check_summary(
     result: DrawdownCheckResult,
     dca_result: DcaCheckResult | None = None,
+    profit_result: ProfitCheckResult | None = None,
 ) -> str:
     """Format a clear manual check summary."""
 
-    if dca_result is not None:
-        return _format_combined_check_summary(result, dca_result)
+    if dca_result is not None or profit_result is not None:
+        return _format_combined_check_summary(result, dca_result, profit_result)
 
     if result.checked_rules == 0:
         return NO_DRAWDOWN_RULES_TO_CHECK_MESSAGE
@@ -260,33 +331,55 @@ def format_check_summary(
 
 def _format_combined_check_summary(
     drawdown_result: DrawdownCheckResult,
-    dca_result: DcaCheckResult,
+    dca_result: DcaCheckResult | None,
+    profit_result: ProfitCheckResult | None,
 ) -> str:
-    total_checked = drawdown_result.checked_rules + dca_result.checked_rules
+    dca_checked = 0 if dca_result is None else dca_result.checked_rules
+    profit_checked = 0 if profit_result is None else profit_result.checked_rules
+    total_checked = drawdown_result.checked_rules + profit_checked + dca_checked
     if total_checked == 0:
         return NO_RULES_TO_CHECK_MESSAGE
 
-    alert_count = len(drawdown_result.notifications) + len(dca_result.notifications)
+    dca_notifications = [] if dca_result is None else dca_result.notifications
+    profit_notifications = (
+        [] if profit_result is None else profit_result.notifications
+    )
+    alert_count = (
+        len(drawdown_result.notifications)
+        + len(profit_notifications)
+        + len(dca_notifications)
+    )
     parts = [
         f"Checked {drawdown_result.checked_rules} drawdown_from_high rule(s).",
-        f"Checked {dca_result.checked_rules} dca_reminder rule(s).",
+        f"Checked {profit_checked} profit_reminder rule(s).",
+        f"Checked {dca_checked} dca_reminder rule(s).",
         f"New alerts: {alert_count}.",
     ]
     if alert_count == 0:
         parts.append("No alerts triggered.")
 
+    dca_duplicates = 0 if dca_result is None else dca_result.skipped_duplicates
+    profit_duplicates = (
+        0 if profit_result is None else profit_result.skipped_duplicates
+    )
     skipped_duplicates = (
-        drawdown_result.skipped_duplicates + dca_result.skipped_duplicates
+        drawdown_result.skipped_duplicates + profit_duplicates + dca_duplicates
     )
     if skipped_duplicates:
         parts.append(f"Duplicate alerts skipped: {skipped_duplicates}.")
 
-    if drawdown_result.no_data_skips:
-        parts.append(f"No-data skips: {len(drawdown_result.no_data_skips)}.")
-        for skip in drawdown_result.no_data_skips:
+    profit_no_data_skips = (
+        [] if profit_result is None else profit_result.no_data_skips
+    )
+    no_data_skips = [*drawdown_result.no_data_skips, *profit_no_data_skips]
+    if no_data_skips:
+        parts.append(f"No-data skips: {len(no_data_skips)}.")
+        for skip in no_data_skips:
             parts.append(f"Rule {skip.rule_id} {skip.symbol}: {skip.message}")
 
-    errors = [*drawdown_result.errors, *dca_result.errors]
+    dca_errors = [] if dca_result is None else dca_result.errors
+    profit_errors = [] if profit_result is None else profit_result.errors
+    errors = [*drawdown_result.errors, *profit_errors, *dca_errors]
     if errors:
         parts.append(f"Errors: {len(errors)}.")
         for error in errors:
@@ -446,6 +539,36 @@ def build_command_handlers(
             ),
         )
 
+    async def add_profit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if await reject_if_unauthorized(update, allowed_user_ids):
+            return
+        try:
+            command = parse_add_profit_args(getattr(context, "args", ()))
+        except CommandParseError as exc:
+            await _reply_text(update, str(exc))
+            return
+
+        with open_connection(sqlite_path) as connection:
+            initialize_database(connection)
+            rule_id = add_rule(
+                connection,
+                type=PROFIT_RULE_TYPE,
+                symbol=command.symbol,
+                name=command.name,
+                asset_type=command.asset_type.value,
+                params=profit_params(command),
+            )
+
+        await _reply_text(
+            update,
+            (
+                f"Added profit rule id={rule_id} "
+                f"asset_type={command.asset_type.value} "
+                f"symbol={command.symbol} name={command.name} "
+                f"cost={command.cost:.12g}"
+            ),
+        )
+
     async def add_dca(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if await reject_if_unauthorized(update, allowed_user_ids):
             return
@@ -518,9 +641,14 @@ def build_command_handlers(
         with open_connection(sqlite_path) as connection:
             initialize_database(connection)
             result = evaluate_drawdown_rules(connection, market_data_provider)
+            profit_result = evaluate_profit_rules(connection, market_data_provider)
             dca_result = evaluate_dca_rules(connection)
 
-        notifications = [*result.notifications, *dca_result.notifications]
+        notifications = [
+            *result.notifications,
+            *profit_result.notifications,
+            *dca_result.notifications,
+        ]
         if notifications:
             notification_service = build_notification_service(
                 settings=notification_settings,
@@ -533,7 +661,10 @@ def build_command_handlers(
                     body=notification.text,
                 )
 
-        await _reply_text(update, format_check_summary(result, dca_result))
+        await _reply_text(
+            update,
+            format_check_summary(result, dca_result, profit_result),
+        )
 
     async def test_notify(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if await reject_if_unauthorized(update, allowed_user_ids):
@@ -560,6 +691,7 @@ def build_command_handlers(
         CommandHandler("start", start),
         CommandHandler("help", help_command),
         CommandHandler("add_drawdown", add_drawdown),
+        CommandHandler("add_profit", add_profit),
         CommandHandler("add_dca", add_dca),
         CommandHandler("list", list_rules),
         CommandHandler("del", delete_rule_command),

@@ -15,13 +15,14 @@ This repository is intentionally not a web platform, not an RSI implementation, 
 
 The project has a Python package skeleton, environment-based configuration,
 SQLite storage helpers, drawdown-from-high rule evaluation, DCA reminder
-evaluation, Telegram commands, scheduled checks, multi-channel notification
-dispatch, market data normalization, tests, Ruff configuration, and Docker
-packaging.
+evaluation, profit-taking reminder evaluation, Telegram commands, scheduled
+checks, multi-channel notification dispatch, market data normalization, tests,
+Ruff configuration, and Docker packaging.
 
 Implemented Telegram commands:
 
 - `/add_drawdown <asset_type> <symbol> <name> <lookback_days> <thresholds>`
+- `/add_profit <asset_type> <symbol> <name> <cost> <thresholds>`
 - `/add_dca <name> <weekday> <amount>`
 - `/list`
 - `/del <id>`
@@ -32,6 +33,16 @@ Supported drawdown `asset_type` values are `cn_index`, `cn_etf`, `cn_stock`,
 and `cn_open_fund`. Thresholds are entered as percentages, for example
 `10,15,20`. `/check` runs enabled drawdown rules immediately. APScheduler also
 runs the same drawdown evaluation Monday-Friday after CN market close.
+
+Profit-taking reminders are added with `/add_profit`, for example
+`/add_profit cn_etf 159915 ChiNext-ETF 1.85 25,40` or
+`/add_profit cn_open_fund 110026 Example-Fund 1.234 25,40`. The cost is the
+personal cost basis, and thresholds are entered as percentages. `/check` uses
+the latest normalized `close` value from the market data provider as the current
+price; for `cn_open_fund`, that `close` value is the latest unit NAV. Each
+configured threshold sends at most one reminder per cost basis. Profit reminders
+are notifications only and do not calculate position size, redeem funds, place
+orders, or connect to a broker.
 
 DCA reminders are added with `/add_dca`, for example `/add_dca 创业板 周四
 1000` or `/add_dca 创业板 Thursday 1000`. Supported weekdays are 周一 through
@@ -60,8 +71,7 @@ Optional notification channel configuration:
 - `NTFY_TOPIC`
 - `WEBHOOK_URL`
 
-Profit-taking reminders, realtime quotes, and RSI/RSI6 alerts are not
-implemented here.
+Realtime quotes and RSI/RSI6 alerts are not implemented here.
 
 ## Planned Stack
 
