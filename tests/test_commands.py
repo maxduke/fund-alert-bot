@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import date
 from types import SimpleNamespace
 
@@ -10,6 +11,7 @@ import pytest
 from fund_alert_bot.commands import (
     DCA_RULE_TYPE,
     DRAW_DOWN_RULE_TYPE,
+    PROFIT_RULE_TYPE,
     TEST_NOTIFICATION_MESSAGE,
     CommandParseError,
     build_command_handlers,
@@ -19,7 +21,9 @@ from fund_alert_bot.commands import (
     format_rules_list,
     parse_add_dca_args,
     parse_add_drawdown_args,
+    parse_add_profit_args,
     parse_thresholds,
+    profit_params,
 )
 from fund_alert_bot.config import NotificationSettings
 from fund_alert_bot.db import add_rule, connect, init_db, list_rules, open_connection
@@ -43,6 +47,22 @@ def test_parse_valid_drawdown_command() -> None:
     }
 
 
+def test_parse_valid_profit_command() -> None:
+    command = parse_add_profit_args(
+        ["cn_open_fund", "110026", "Example Fund", "1.234", "25,40"]
+    )
+
+    assert command.asset_type is AssetType.CN_OPEN_FUND
+    assert command.symbol == "110026"
+    assert command.name == "Example Fund"
+    assert command.cost == 1.234
+    assert command.thresholds == [0.25, 0.40]
+    assert profit_params(command) == {
+        "cost": 1.234,
+        "thresholds": [0.25, 0.40],
+    }
+
+
 def test_parse_valid_dca_command_with_chinese_weekday() -> None:
     command = parse_add_dca_args(["创业板", "周四", "1000"])
 
@@ -63,6 +83,9 @@ def test_parse_valid_dca_command_with_english_weekday() -> None:
 def test_reject_invalid_asset_type() -> None:
     with pytest.raises(CommandParseError, match="Invalid asset_type"):
         parse_add_drawdown_args(["crypto", "BTC", "Bitcoin", "365", "10"])
+
+    with pytest.raises(CommandParseError, match="Invalid asset_type"):
+        parse_add_profit_args(["crypto", "BTC", "Bitcoin", "100", "25"])
 
 
 def test_parse_thresholds_correctly() -> None:
@@ -139,6 +162,29 @@ def test_list_shows_asset_type() -> None:
     assert "symbol=110026" in response
 
 
+def test_list_shows_profit_rule() -> None:
+    connection = connect(":memory:")
+    try:
+        init_db(connection)
+        add_rule(
+            connection,
+            type=PROFIT_RULE_TYPE,
+            symbol="159915",
+            name="ChiNext ETF",
+            asset_type=AssetType.CN_ETF.value,
+            params={"cost": 1.85, "thresholds": [0.25, 0.40]},
+        )
+
+        response = format_rules_list(list_rules(connection))
+    finally:
+        connection.close()
+
+    assert "type=profit_reminder" in response
+    assert "asset_type=cn_etf" in response
+    assert "symbol=159915" in response
+    assert 'params={"cost":1.85,"thresholds":[0.25,0.4]}' in response
+
+
 def test_list_shows_dca_rule() -> None:
     connection = connect(":memory:")
     try:
@@ -187,6 +233,42 @@ def test_add_dca_command_persists_rule(tmp_path) -> None:
     ]
 
 
+def test_add_profit_command_persists_rule(tmp_path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    handlers = build_command_handlers({123}, sqlite_path=sqlite_path)
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        effective_message=message,
+    )
+    context = SimpleNamespace(
+        bot=FakeBot(),
+        args=["cn_etf", "159915", "ChiNext ETF", "1.85", "25,40"],
+    )
+
+    asyncio.run(_handler_by_command(handlers, "add_profit").callback(update, context))
+
+    with open_connection(sqlite_path) as connection:
+        rows = list_rules(connection)
+
+    assert len(rows) == 1
+    assert rows[0]["type"] == PROFIT_RULE_TYPE
+    assert rows[0]["symbol"] == "159915"
+    assert rows[0]["name"] == "ChiNext ETF"
+    assert rows[0]["asset_type"] == AssetType.CN_ETF.value
+    assert json.loads(rows[0]["params_json"]) == {
+        "cost": 1.85,
+        "thresholds": [0.25, 0.40],
+    }
+    assert message.replies == [
+        (
+            "Added profit rule id=1 asset_type=cn_etf "
+            "symbol=159915 name=ChiNext ETF cost=1.85"
+        )
+    ]
+
+
 def test_check_sends_due_dca_without_market_data_fetch(tmp_path) -> None:
     sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
     with open_connection(sqlite_path) as connection:
@@ -227,6 +309,95 @@ def test_check_sends_due_dca_without_market_data_fetch(tmp_path) -> None:
         }
     ]
     assert "Checked 1 dca_reminder rule(s)." in message.replies[0]
+
+
+def test_check_evaluates_profit_rules_with_latest_data(tmp_path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    with open_connection(sqlite_path) as connection:
+        init_db(connection)
+        add_rule(
+            connection,
+            type=PROFIT_RULE_TYPE,
+            symbol="159915",
+            name="ChiNext ETF",
+            asset_type=AssetType.CN_ETF.value,
+            params={"cost": 1.85, "thresholds": [0.25, 0.40]},
+        )
+
+    provider = FakeProvider(
+        _history(["2024-01-01"], [100.0]),
+        latest={"date": "2024-01-02", "close": 2.4, "source": "test"},
+    )
+    handlers = build_command_handlers(
+        {123},
+        sqlite_path=sqlite_path,
+        market_data_provider=provider,
+    )
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        effective_message=message,
+    )
+    context = SimpleNamespace(bot=FakeBot(), args=[])
+
+    asyncio.run(_handler_by_command(handlers, "check").callback(update, context))
+
+    assert [call.asset_type for call in provider.latest_calls] == [AssetType.CN_ETF]
+    assert context.bot.messages == [
+        {
+            "chat_id": 456,
+            "text": (
+                "Profit-taking reminder\n"
+                "Symbol: 159915\n"
+                "Name: ChiNext ETF\n"
+                "Asset type: cn_etf\n"
+                "Cost: 1.85\n"
+                "Latest price: 2.4\n"
+                "Profit rate: 29.7%\n"
+                "Triggered threshold: 25.0%\n"
+                "Reminder: this is not automatic trading and no orders will be placed."
+            ),
+        }
+    ]
+    assert "Checked 1 profit_reminder rule(s)." in message.replies[0]
+    assert "New alerts: 1." in message.replies[0]
+
+
+def test_check_reports_unavailable_latest_profit_data(tmp_path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    with open_connection(sqlite_path) as connection:
+        init_db(connection)
+        add_rule(
+            connection,
+            type=PROFIT_RULE_TYPE,
+            symbol="110026",
+            name="Example Fund",
+            asset_type=AssetType.CN_OPEN_FUND.value,
+            params={"cost": 1.0, "thresholds": [0.25]},
+        )
+
+    provider = FakeProvider(_history(["2024-01-01"], [100.0]), latest=None)
+    handlers = build_command_handlers(
+        {123},
+        sqlite_path=sqlite_path,
+        market_data_provider=provider,
+    )
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        effective_message=message,
+    )
+    context = SimpleNamespace(bot=FakeBot(), args=[])
+
+    asyncio.run(_handler_by_command(handlers, "check").callback(update, context))
+
+    assert context.bot.messages == []
+    assert "No-data skips: 1." in message.replies[0]
+    assert "Rule 1 110026: Latest unit NAV is unavailable for 110026." in (
+        message.replies[0]
+    )
 
 
 def test_test_notify_sends_to_enabled_channels(monkeypatch) -> None:
@@ -274,9 +445,16 @@ def test_test_notify_sends_to_enabled_channels(monkeypatch) -> None:
 
 
 class FakeProvider:
-    def __init__(self, history: pd.DataFrame) -> None:
+    def __init__(
+        self,
+        history: pd.DataFrame,
+        *,
+        latest: dict[str, object] | None = None,
+    ) -> None:
         self.history = history
+        self.latest = latest
         self.calls: list[tuple[Instrument, object, object]] = []
+        self.latest_calls: list[Instrument] = []
 
     def get_history(
         self,
@@ -288,7 +466,8 @@ class FakeProvider:
         return self.history
 
     def get_latest(self, instrument: Instrument) -> dict[str, object] | None:
-        return None
+        self.latest_calls.append(instrument)
+        return self.latest
 
 
 class FakeMessage:
