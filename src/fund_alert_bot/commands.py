@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from collections.abc import Awaitable, Callable, Collection, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from fund_alert_bot.checks import (
+    DCA_RULE_TYPE,
     DRAW_DOWN_RULE_TYPE,
+    DcaCheckResult,
     DrawdownCheckResult,
+    evaluate_dca_rules,
     evaluate_drawdown_rules,
 )
 from fund_alert_bot.config import NotificationSettings
@@ -30,6 +34,7 @@ from fund_alert_bot.market_data import (
     MarketDataProvider,
 )
 from fund_alert_bot.notifications.service import build_notification_service
+from fund_alert_bot.rules.dca import normalize_weekday
 
 if TYPE_CHECKING:
     from telegram import Update
@@ -40,6 +45,7 @@ LOGGER = logging.getLogger(__name__)
 ADD_DRAWDOWN_USAGE = (
     "Usage: /add_drawdown <asset_type> <symbol> <name> <lookback_days> <thresholds>"
 )
+ADD_DCA_USAGE = "Usage: /add_dca <name> <weekday> <amount>"
 START_MESSAGE = "fund-alert-bot is running. Use /help to see available commands."
 HELP_MESSAGE = "\n".join(
     (
@@ -47,6 +53,7 @@ HELP_MESSAGE = "\n".join(
         "/start - Start the bot",
         "/help - Show available commands",
         "/add_drawdown <asset_type> <symbol> <name> <lookback_days> <thresholds>",
+        "/add_dca <name> <weekday> <amount>",
         "/list - List configured rules",
         "/del <id> - Delete a configured rule",
         "/check - Run a manual check",
@@ -54,7 +61,10 @@ HELP_MESSAGE = "\n".join(
     )
 )
 NO_RULES_CONFIGURED_MESSAGE = "No rules configured"
-NO_RULES_TO_CHECK_MESSAGE = "No enabled drawdown_from_high rules to check"
+NO_DRAWDOWN_RULES_TO_CHECK_MESSAGE = "No enabled drawdown_from_high rules to check"
+NO_RULES_TO_CHECK_MESSAGE = (
+    "No enabled drawdown_from_high or dca_reminder rules to check"
+)
 TEST_NOTIFICATION_TITLE = "fund-alert-bot test"
 TEST_NOTIFICATION_MESSAGE = "Test notification from fund-alert-bot."
 UNAUTHORIZED_MESSAGE = "You are not allowed to use this bot."
@@ -73,6 +83,15 @@ class DrawdownCommand:
     name: str
     lookback_days: int
     thresholds: list[float]
+
+
+@dataclass(frozen=True, slots=True)
+class DcaCommand:
+    """Parsed /add_dca command fields."""
+
+    name: str
+    weekday: str
+    amount: int | float
 
 
 def parse_add_drawdown_args(args: Sequence[str]) -> DrawdownCommand:
@@ -138,6 +157,45 @@ def parse_thresholds(raw_thresholds: str) -> list[float]:
     return thresholds
 
 
+def parse_add_dca_args(args: Sequence[str]) -> DcaCommand:
+    """Parse /add_dca arguments into a typed command object."""
+
+    if len(args) != 3:
+        raise CommandParseError(ADD_DCA_USAGE)
+
+    raw_name, raw_weekday, raw_amount = args
+    name = raw_name.strip()
+    if not name:
+        raise CommandParseError("name must not be empty")
+
+    try:
+        weekday = normalize_weekday(raw_weekday)
+    except ValueError as exc:
+        raise CommandParseError(str(exc)) from exc
+
+    return DcaCommand(
+        name=name,
+        weekday=weekday,
+        amount=parse_dca_amount(raw_amount),
+    )
+
+
+def parse_dca_amount(raw_amount: str) -> int | float:
+    """Parse a positive DCA amount."""
+
+    try:
+        amount = float(raw_amount)
+    except ValueError as exc:
+        raise CommandParseError("amount must be a positive number") from exc
+
+    if not math.isfinite(amount) or amount <= 0:
+        raise CommandParseError("amount must be a positive number")
+
+    if amount.is_integer():
+        return int(amount)
+    return amount
+
+
 def drawdown_params(command: DrawdownCommand) -> dict[str, object]:
     """Build the persisted params_json object for a drawdown rule."""
 
@@ -145,6 +203,15 @@ def drawdown_params(command: DrawdownCommand) -> dict[str, object]:
         "lookback_days": command.lookback_days,
         "thresholds": command.thresholds,
         "price_field": "close",
+    }
+
+
+def dca_params(command: DcaCommand) -> dict[str, object]:
+    """Build the persisted params_json object for a DCA rule."""
+
+    return {
+        "weekday": command.weekday,
+        "amount": command.amount,
     }
 
 
@@ -159,11 +226,17 @@ def format_rules_list(rows: Sequence[Any]) -> str:
     return "\n".join(lines)
 
 
-def format_check_summary(result: DrawdownCheckResult) -> str:
+def format_check_summary(
+    result: DrawdownCheckResult,
+    dca_result: DcaCheckResult | None = None,
+) -> str:
     """Format a clear manual check summary."""
 
+    if dca_result is not None:
+        return _format_combined_check_summary(result, dca_result)
+
     if result.checked_rules == 0:
-        return NO_RULES_TO_CHECK_MESSAGE
+        return NO_DRAWDOWN_RULES_TO_CHECK_MESSAGE
 
     alert_count = len(result.notifications)
     parts = [
@@ -185,6 +258,43 @@ def format_check_summary(result: DrawdownCheckResult) -> str:
     return "\n".join(parts)
 
 
+def _format_combined_check_summary(
+    drawdown_result: DrawdownCheckResult,
+    dca_result: DcaCheckResult,
+) -> str:
+    total_checked = drawdown_result.checked_rules + dca_result.checked_rules
+    if total_checked == 0:
+        return NO_RULES_TO_CHECK_MESSAGE
+
+    alert_count = len(drawdown_result.notifications) + len(dca_result.notifications)
+    parts = [
+        f"Checked {drawdown_result.checked_rules} drawdown_from_high rule(s).",
+        f"Checked {dca_result.checked_rules} dca_reminder rule(s).",
+        f"New alerts: {alert_count}.",
+    ]
+    if alert_count == 0:
+        parts.append("No alerts triggered.")
+
+    skipped_duplicates = (
+        drawdown_result.skipped_duplicates + dca_result.skipped_duplicates
+    )
+    if skipped_duplicates:
+        parts.append(f"Duplicate alerts skipped: {skipped_duplicates}.")
+
+    if drawdown_result.no_data_skips:
+        parts.append(f"No-data skips: {len(drawdown_result.no_data_skips)}.")
+        for skip in drawdown_result.no_data_skips:
+            parts.append(f"Rule {skip.rule_id} {skip.symbol}: {skip.message}")
+
+    errors = [*drawdown_result.errors, *dca_result.errors]
+    if errors:
+        parts.append(f"Errors: {len(errors)}.")
+        for error in errors:
+            parts.append(f"Rule {error.rule_id} {error.symbol}: {error.message}")
+
+    return "\n".join(parts)
+
+
 def get_start_message() -> str:
     """Return the current start message."""
     return START_MESSAGE
@@ -198,6 +308,14 @@ def _format_rule_row(row: Any) -> str:
         sort_keys=True,
         separators=(",", ":"),
     )
+    if row["type"] == DCA_RULE_TYPE:
+        return (
+            f"id={row['id']} "
+            f"type={row['type']} "
+            f"name={row['name']} "
+            f"params={params_text}"
+        )
+
     return (
         f"id={row['id']} "
         f"type={row['type']} "
@@ -328,6 +446,35 @@ def build_command_handlers(
             ),
         )
 
+    async def add_dca(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if await reject_if_unauthorized(update, allowed_user_ids):
+            return
+        try:
+            command = parse_add_dca_args(getattr(context, "args", ()))
+        except CommandParseError as exc:
+            await _reply_text(update, str(exc))
+            return
+
+        with open_connection(sqlite_path) as connection:
+            initialize_database(connection)
+            rule_id = add_rule(
+                connection,
+                type=DCA_RULE_TYPE,
+                symbol=command.name,
+                name=command.name,
+                asset_type="dca",
+                params=dca_params(command),
+            )
+
+        await _reply_text(
+            update,
+            (
+                f"Added DCA rule id={rule_id} "
+                f"name={command.name} weekday={command.weekday} "
+                f"amount={command.amount}"
+            ),
+        )
+
     async def list_rules(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context
         if await reject_if_unauthorized(update, allowed_user_ids):
@@ -371,20 +518,22 @@ def build_command_handlers(
         with open_connection(sqlite_path) as connection:
             initialize_database(connection)
             result = evaluate_drawdown_rules(connection, market_data_provider)
+            dca_result = evaluate_dca_rules(connection)
 
-        if result.notifications:
+        notifications = [*result.notifications, *dca_result.notifications]
+        if notifications:
             notification_service = build_notification_service(
                 settings=notification_settings,
                 telegram_bot=context.bot,
                 telegram_chat_ids=_command_chat_ids(update),
             )
-            for notification in result.notifications:
+            for notification in notifications:
                 await notification_service.send_alert(
                     title=notification.title,
                     body=notification.text,
                 )
 
-        await _reply_text(update, format_check_summary(result))
+        await _reply_text(update, format_check_summary(result, dca_result))
 
     async def test_notify(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if await reject_if_unauthorized(update, allowed_user_ids):
@@ -411,6 +560,7 @@ def build_command_handlers(
         CommandHandler("start", start),
         CommandHandler("help", help_command),
         CommandHandler("add_drawdown", add_drawdown),
+        CommandHandler("add_dca", add_dca),
         CommandHandler("list", list_rules),
         CommandHandler("del", delete_rule_command),
         CommandHandler("check", check),

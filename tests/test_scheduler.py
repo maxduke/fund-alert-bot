@@ -23,6 +23,13 @@ def test_scheduler_time_parsing() -> None:
     assert parsed_time.minute == 10
 
 
+def test_dca_reminder_time_parsing() -> None:
+    parsed_time = scheduler.parse_dca_reminder_time("09:30")
+
+    assert parsed_time.hour == 9
+    assert parsed_time.minute == 30
+
+
 @pytest.mark.parametrize("raw_value", ["", "1710", "24:00", "17:60", "aa:10"])
 def test_scheduler_time_parsing_rejects_invalid_values(raw_value: str) -> None:
     with pytest.raises(ValueError, match="AFTER_CLOSE_CHECK_TIME"):
@@ -48,8 +55,28 @@ def test_weekday_trigger_skips_weekends() -> None:
     assert next_fire.minute == 10
 
 
+def test_daily_dca_trigger_runs_on_weekends() -> None:
+    timezone = ZoneInfo("Asia/Shanghai")
+    trigger = scheduler.create_daily_dca_trigger(
+        reminder_time=scheduler.parse_dca_reminder_time("09:30"),
+        timezone=timezone,
+    )
+
+    next_fire = trigger.get_next_fire_time(
+        None,
+        datetime(2024, 1, 5, 9, 31, tzinfo=timezone),
+    )
+
+    assert next_fire is not None
+    assert next_fire.date() == date(2024, 1, 6)
+    assert next_fire.weekday() == 5
+    assert next_fire.hour == 9
+    assert next_fire.minute == 30
+
+
 def test_check_and_scheduler_use_same_evaluator() -> None:
     assert commands.evaluate_drawdown_rules is scheduler.evaluate_drawdown_rules
+    assert commands.evaluate_dca_rules is scheduler.evaluate_dca_rules
 
 
 def test_scheduled_check_prevents_duplicate_alerts_by_alert_key(
@@ -142,6 +169,66 @@ def test_scheduled_check_logs_and_skips_when_no_new_data(
     assert "Scheduled drawdown check ended" in caplog.text
 
 
+def test_scheduled_dca_check_prevents_duplicate_alerts_by_alert_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    _add_dca_rule(sqlite_path)
+    application = FakeApplication()
+    webhook_calls: list[dict[str, object]] = []
+
+    def fake_post(url: str, **kwargs: object) -> object:
+        webhook_calls.append({"url": url, **kwargs})
+        return FakeResponse(status_code=200)
+
+    monkeypatch.setattr(
+        "fund_alert_bot.notifications.webhook.requests.post",
+        fake_post,
+    )
+
+    for _ in range(2):
+        asyncio.run(
+            scheduler.run_scheduled_dca_check(
+                application=application,
+                sqlite_path=sqlite_path,
+                allowed_user_ids={123},
+                timezone="Asia/Shanghai",
+                run_date=date(2024, 1, 4),
+                notification_settings=NotificationSettings(
+                    webhook_enabled=True,
+                    webhook_url="https://hooks.example.test/secret",
+                ),
+            )
+        )
+
+    with open_connection(sqlite_path) as connection:
+        event_rows = connection.execute(
+            """
+            SELECT alert_key
+            FROM alert_events
+            ORDER BY id
+            """
+        ).fetchall()
+
+    expected_message = (
+        "今天是 创业板 定投日，计划定投 1000 元。\n"
+        "提醒：这是纪律提醒，不会自动交易。"
+    )
+    assert [row["alert_key"] for row in event_rows] == ["dca:1:2024-01-04"]
+    assert application.bot.messages == [{"chat_id": 123, "text": expected_message}]
+    assert webhook_calls == [
+        {
+            "url": "https://hooks.example.test/secret",
+            "json": {
+                "title": "DCA reminder",
+                "body": expected_message,
+            },
+            "timeout": 10,
+        }
+    ]
+
+
 class FakeProvider:
     def __init__(self, history: pd.DataFrame) -> None:
         self.history = history
@@ -191,6 +278,22 @@ def _add_drawdown_rule(sqlite_path: Path) -> None:
                 "lookback_days": 365,
                 "thresholds": [0.10],
                 "price_field": "close",
+            },
+        )
+
+
+def _add_dca_rule(sqlite_path: Path) -> None:
+    with open_connection(sqlite_path) as connection:
+        initialize_database(connection)
+        add_rule(
+            connection,
+            type=commands.DCA_RULE_TYPE,
+            symbol="创业板",
+            name="创业板",
+            asset_type="dca",
+            params={
+                "weekday": "THU",
+                "amount": 1000,
             },
         )
 

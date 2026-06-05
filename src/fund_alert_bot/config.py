@@ -22,6 +22,7 @@ except ModuleNotFoundError:  # pragma: no cover
 DEFAULT_SQLITE_PATH = Path("/app/data/fund_alert_bot.sqlite3")
 DEFAULT_TIMEZONE = "Asia/Shanghai"
 DEFAULT_AFTER_CLOSE_CHECK_TIME = "17:10"
+DEFAULT_DCA_REMINDER_TIME = "09:30"
 TRUE_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
 FALSE_ENV_VALUES = frozenset({"0", "false", "no", "off", ""})
 
@@ -81,6 +82,7 @@ class Settings:
     sqlite_path: Path
     timezone: str
     after_close_check_time: str
+    dca_reminder_time: str
     telegram_bot_token: str
     telegram_allowed_user_ids: frozenset[int]
     notifications: NotificationSettings
@@ -101,6 +103,10 @@ def load_settings(
         after_close_check_time=os.environ.get(
             "AFTER_CLOSE_CHECK_TIME",
             DEFAULT_AFTER_CLOSE_CHECK_TIME,
+        ),
+        dca_reminder_time=os.environ.get(
+            "DCA_REMINDER_TIME",
+            DEFAULT_DCA_REMINDER_TIME,
         ),
         telegram_bot_token=os.environ.get("TELEGRAM_BOT_TOKEN", ""),
         telegram_allowed_user_ids=parse_allowed_user_ids(
