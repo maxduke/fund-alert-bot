@@ -28,13 +28,19 @@ class AkshareMarketDataProvider(MarketDataProvider):
         ak_module: Any | None = None,
         retries: int = 3,
         retry_delay_seconds: float = 0.5,
+        latest_lookback_days: int = 45,
+        today_factory: Callable[[], date] = date.today,
     ) -> None:
         if retries < 1:
             raise ValueError("retries must be at least 1")
+        if latest_lookback_days < 1:
+            raise ValueError("latest_lookback_days must be at least 1")
 
         self._ak_module = ak_module
         self._retries = retries
         self._retry_delay_seconds = retry_delay_seconds
+        self._latest_lookback_days = latest_lookback_days
+        self._today_factory = today_factory
 
     def get_history(
         self,
@@ -59,8 +65,8 @@ class AkshareMarketDataProvider(MarketDataProvider):
     def get_latest(self, instrument: Instrument) -> dict[str, object] | None:
         """Return the last normalized historical row for now."""
 
-        end_date = date.today()
-        start_date = end_date - timedelta(days=365 * 30)
+        end_date = self._today_factory()
+        start_date = end_date - timedelta(days=self._latest_lookback_days)
         try:
             history = self.get_history(instrument, start_date, end_date)
         except EmptyMarketDataError:

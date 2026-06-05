@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from typing import Any, cast
 
 import pandas as pd
@@ -219,7 +220,11 @@ def test_etf_history_falls_back_to_sina_when_eastmoney_fails() -> None:
 
 def test_get_latest_returns_last_normalized_row() -> None:
     fake_ak = FakeAkshare()
-    provider = AkshareMarketDataProvider(ak_module=fake_ak, retry_delay_seconds=0)
+    provider = AkshareMarketDataProvider(
+        ak_module=fake_ak,
+        retry_delay_seconds=0,
+        today_factory=lambda: date(2024, 1, 4),
+    )
     instrument = Instrument(
         symbol="000001",
         name="Example Open Fund",

@@ -11,9 +11,9 @@ from typing import Any
 import pandas as pd
 
 from fund_alert_bot.db import (
-    add_alert_event,
     alert_exists,
     list_enabled_rules,
+    reserve_alert_event,
 )
 from fund_alert_bot.market_data import (
     AssetType,
@@ -36,7 +36,7 @@ PROFIT_RULE_TYPE = "profit_reminder"
 
 @dataclass(frozen=True, slots=True)
 class AlertNotification:
-    """Alert text ready to send after the event has been stored."""
+    """Alert text ready to send after the event has been reserved."""
 
     event_id: int
     title: str
@@ -113,6 +113,7 @@ def evaluate_drawdown_rules(
     errors: list[RuleCheckError] = []
     no_data_skips: list[RuleNoDataSkip] = []
     skipped_duplicates = 0
+    history_cache: dict[tuple[Instrument, date, date], pd.DataFrame] = {}
 
     for row in rules:
         try:
@@ -124,11 +125,14 @@ def evaluate_drawdown_rules(
                 name=row["name"],
                 asset_type=AssetType(row["asset_type"]),
             )
-            history = market_data_provider.get_history(
-                instrument,
-                start_date,
-                end_date,
-            )
+            history_key = (instrument, start_date, end_date)
+            if history_key not in history_cache:
+                history_cache[history_key] = market_data_provider.get_history(
+                    instrument,
+                    start_date,
+                    end_date,
+                )
+            history = history_cache[history_key]
             if require_new_data_date is not None:
                 latest_data_date = _latest_history_date(history)
                 if latest_data_date != require_new_data_date:
@@ -170,7 +174,7 @@ def evaluate_drawdown_rules(
 
         for alert in alerts:
             try:
-                event_id = add_alert_event(
+                event_id = reserve_alert_event(
                     connection,
                     rule_id=int(row["id"]),
                     alert_key=str(alert["alert_key"]),
@@ -213,6 +217,7 @@ def evaluate_profit_rules(
     errors: list[RuleCheckError] = []
     no_data_skips: list[RuleNoDataSkip] = []
     skipped_duplicates = 0
+    latest_cache: dict[Instrument, dict[str, object] | None] = {}
 
     for row in rules:
         try:
@@ -221,7 +226,9 @@ def evaluate_profit_rules(
                 name=row["name"],
                 asset_type=AssetType(row["asset_type"]),
             )
-            latest = market_data_provider.get_latest(instrument)
+            if instrument not in latest_cache:
+                latest_cache[instrument] = market_data_provider.get_latest(instrument)
+            latest = latest_cache[instrument]
             if latest is None:
                 no_data_skips.append(
                     RuleNoDataSkip(
@@ -261,7 +268,7 @@ def evaluate_profit_rules(
 
         for alert in alerts:
             try:
-                event_id = add_alert_event(
+                event_id = reserve_alert_event(
                     connection,
                     rule_id=int(row["id"]),
                     alert_key=str(alert["alert_key"]),
@@ -327,7 +334,7 @@ def evaluate_dca_rules(
             continue
 
         try:
-            event_id = add_alert_event(
+            event_id = reserve_alert_event(
                 connection,
                 rule_id=int(row["id"]),
                 alert_key=str(alert["alert_key"]),

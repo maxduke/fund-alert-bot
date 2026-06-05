@@ -13,6 +13,7 @@ from fund_alert_bot.checks import (
     AlertNotification,
     evaluate_dca_rules,
     evaluate_drawdown_rules,
+    evaluate_profit_rules,
 )
 from fund_alert_bot.config import NotificationSettings
 from fund_alert_bot.db import initialize_database, open_connection
@@ -22,6 +23,7 @@ from fund_alert_bot.market_data import (
     MarketCalendar,
     MarketDataProvider,
 )
+from fund_alert_bot.notifications.dispatch import send_alert_notifications
 from fund_alert_bot.notifications.service import build_notification_service
 
 if TYPE_CHECKING:
@@ -31,7 +33,8 @@ LOGGER = logging.getLogger(__name__)
 
 DEFAULT_AFTER_CLOSE_CHECK_TIME = "17:10"
 DEFAULT_DCA_REMINDER_TIME = "09:30"
-DRAW_DOWN_AFTER_CLOSE_JOB_ID = "drawdown-after-close-check"
+MARKET_AFTER_CLOSE_JOB_ID = "market-after-close-check"
+DRAW_DOWN_AFTER_CLOSE_JOB_ID = MARKET_AFTER_CLOSE_JOB_ID
 DCA_MORNING_JOB_ID = "dca-morning-reminder-check"
 WEEKDAY_CRON_FILTER = "mon-fri"
 
@@ -127,13 +130,13 @@ def register_jobs(
         market_calendar = CNMarketCalendar()
 
     scheduler.add_job(
-        run_scheduled_drawdown_check,
+        run_scheduled_market_check,
         trigger=create_weekday_after_close_trigger(
             check_time=parsed_time,
             timezone=timezone,
         ),
-        id=DRAW_DOWN_AFTER_CLOSE_JOB_ID,
-        name="Drawdown after-close check",
+        id=MARKET_AFTER_CLOSE_JOB_ID,
+        name="Market after-close reminder check",
         kwargs={
             "application": application,
             "sqlite_path": sqlite_path,
@@ -149,7 +152,7 @@ def register_jobs(
         misfire_grace_time=3600,
     )
     LOGGER.info(
-        "Registered scheduled drawdown check for %s at %s %s",
+        "Registered scheduled market reminder check for %s at %s %s",
         WEEKDAY_CRON_FILTER,
         parsed_time.strftime("%H:%M"),
         timezone,
@@ -182,7 +185,7 @@ def register_jobs(
     )
 
 
-async def run_scheduled_drawdown_check(
+async def run_scheduled_market_check(
     *,
     application: Application[Any, Any, Any, Any, Any, Any],
     sqlite_path: str | Path,
@@ -193,17 +196,21 @@ async def run_scheduled_drawdown_check(
     run_date: date | None = None,
     notification_settings: NotificationSettings | None = None,
 ) -> None:
-    """Run the scheduled drawdown check and send new alert notifications."""
+    """Run scheduled after-close market reminders and send notifications."""
 
     check_date = run_date or _current_date(timezone)
-    LOGGER.info("Scheduled drawdown check started for date=%s", check_date.isoformat())
-    result = None
+    LOGGER.info(
+        "Scheduled market reminder check started for date=%s",
+        check_date.isoformat(),
+    )
+    drawdown_result = None
+    profit_result = None
     try:
         if market_calendar is None:
             market_calendar = CNMarketCalendar()
         if not market_calendar.is_trading_day(check_date):
             LOGGER.info(
-                "Scheduled drawdown check skipped for date=%s: "
+                "Scheduled market reminder check skipped for date=%s: "
                 "CN market is not trading.",
                 check_date.isoformat(),
             )
@@ -211,23 +218,24 @@ async def run_scheduled_drawdown_check(
 
         with open_connection(sqlite_path) as connection:
             initialize_database(connection)
-            result = evaluate_drawdown_rules(
+            drawdown_result = evaluate_drawdown_rules(
                 connection,
                 market_data_provider,
                 today=check_date,
                 require_new_data_date=check_date,
             )
+            profit_result = evaluate_profit_rules(connection, market_data_provider)
 
-        for skip in result.no_data_skips:
+        for skip in [*drawdown_result.no_data_skips, *profit_result.no_data_skips]:
             LOGGER.info(
-                "Scheduled drawdown check skipped rule_id=%s symbol=%s: %s",
+                "Scheduled market reminder check skipped rule_id=%s symbol=%s: %s",
                 skip.rule_id,
                 skip.symbol,
                 skip.message,
             )
-        for error in result.errors:
+        for error in [*drawdown_result.errors, *profit_result.errors]:
             LOGGER.warning(
-                "Scheduled drawdown check error rule_id=%s symbol=%s: %s",
+                "Scheduled market reminder check error rule_id=%s symbol=%s: %s",
                 error.rule_id,
                 error.symbol,
                 error.message,
@@ -235,26 +243,40 @@ async def run_scheduled_drawdown_check(
 
         await send_scheduled_notifications(
             application=application,
+            sqlite_path=sqlite_path,
             allowed_user_ids=allowed_user_ids,
-            notifications=result.notifications,
+            notifications=[
+                *drawdown_result.notifications,
+                *profit_result.notifications,
+            ],
             notification_settings=notification_settings,
         )
     except Exception:
-        LOGGER.exception("Scheduled drawdown check failed")
+        LOGGER.exception("Scheduled market reminder check failed")
         raise
     finally:
-        if result is None:
-            LOGGER.info("Scheduled drawdown check ended")
+        if drawdown_result is None or profit_result is None:
+            LOGGER.info("Scheduled market reminder check ended")
         else:
             LOGGER.info(
-                "Scheduled drawdown check ended: checked_rules=%d new_alerts=%d "
+                "Scheduled market reminder check ended: "
+                "drawdown_rules=%d profit_rules=%d new_alerts=%d "
                 "duplicate_alerts=%d no_data_skips=%d errors=%d",
-                result.checked_rules,
-                len(result.notifications),
-                result.skipped_duplicates,
-                len(result.no_data_skips),
-                len(result.errors),
+                drawdown_result.checked_rules,
+                profit_result.checked_rules,
+                len(drawdown_result.notifications) + len(profit_result.notifications),
+                drawdown_result.skipped_duplicates + profit_result.skipped_duplicates,
+                len(drawdown_result.no_data_skips) + len(profit_result.no_data_skips),
+                len(drawdown_result.errors) + len(profit_result.errors),
             )
+
+
+async def run_scheduled_drawdown_check(
+    **kwargs: Any,
+) -> None:
+    """Backward-compatible wrapper for the after-close market reminder job."""
+
+    await run_scheduled_market_check(**kwargs)
 
 
 async def run_scheduled_dca_check(
@@ -286,6 +308,7 @@ async def run_scheduled_dca_check(
 
         await send_scheduled_notifications(
             application=application,
+            sqlite_path=sqlite_path,
             allowed_user_ids=allowed_user_ids,
             notifications=result.notifications,
             notification_settings=notification_settings,
@@ -310,6 +333,7 @@ async def run_scheduled_dca_check(
 async def send_scheduled_notifications(
     *,
     application: Application[Any, Any, Any, Any, Any, Any],
+    sqlite_path: str | Path,
     allowed_user_ids: Collection[int],
     notifications: list[AlertNotification],
     notification_settings: NotificationSettings | None = None,
@@ -324,10 +348,15 @@ async def send_scheduled_notifications(
         telegram_bot=application.bot,
         telegram_chat_ids=allowed_user_ids,
     )
-    for notification in notifications:
-        await notification_service.send_alert(
-            title=notification.title,
-            body=notification.text,
+    dispatch_summary = await send_alert_notifications(
+        sqlite_path=sqlite_path,
+        notification_service=notification_service,
+        notifications=notifications,
+    )
+    if dispatch_summary.failed:
+        LOGGER.warning(
+            "Scheduled notification delivery failures: %d",
+            dispatch_summary.failed,
         )
 
 

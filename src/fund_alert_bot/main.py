@@ -29,7 +29,11 @@ def run() -> None:
     with open_connection(settings.sqlite_path) as connection:
         initialize_database(connection)
 
-    market_data_provider = AkshareMarketDataProvider()
+    market_data_provider = AkshareMarketDataProvider(
+        retries=settings.akshare_retries,
+        retry_delay_seconds=settings.akshare_retry_delay_seconds,
+        latest_lookback_days=settings.akshare_latest_lookback_days,
+    )
     scheduler = create_scheduler(timezone=settings.timezone)
 
     async def start_scheduler(application) -> None:

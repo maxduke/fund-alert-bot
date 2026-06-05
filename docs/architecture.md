@@ -90,6 +90,8 @@ Environment -> Configuration -> Scheduler
 ```
 
 Alert evaluation may read prior state from storage and write updated state after each run.
+Notification dispatch records whether each reserved alert was delivered,
+failed, or is still pending so transient delivery failures can be retried.
 
 ## Explicit Non-Goals
 

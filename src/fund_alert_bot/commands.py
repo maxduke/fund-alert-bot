@@ -36,6 +36,7 @@ from fund_alert_bot.market_data import (
     AssetType,
     MarketDataProvider,
 )
+from fund_alert_bot.notifications.dispatch import send_alert_notifications
 from fund_alert_bot.notifications.service import build_notification_service
 from fund_alert_bot.rules.dca import normalize_weekday
 
@@ -646,16 +647,22 @@ def build_command_handlers(
                 telegram_bot=context.bot,
                 telegram_chat_ids=_command_chat_ids(update),
             )
-            for notification in notifications:
-                await notification_service.send_alert(
-                    title=notification.title,
-                    body=notification.text,
-                )
+            dispatch_summary = await send_alert_notifications(
+                sqlite_path=sqlite_path,
+                notification_service=notification_service,
+                notifications=notifications,
+            )
+        else:
+            dispatch_summary = None
 
-        await _reply_text(
-            update,
-            format_check_summary(result, dca_result, profit_result),
-        )
+        response = format_check_summary(result, dca_result, profit_result)
+        if dispatch_summary is not None and dispatch_summary.failed:
+            response = (
+                f"{response}\n"
+                f"Notification delivery failures: {dispatch_summary.failed}."
+            )
+
+        await _reply_text(update, response)
 
     async def test_notify(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if await reject_if_unauthorized(update, allowed_user_ids):
@@ -665,13 +672,22 @@ def build_command_handlers(
             telegram_bot=context.bot,
             telegram_chat_ids=_command_chat_ids(update),
         )
-        await notification_service.send_alert(
+        results = await notification_service.send_alert(
             title=TEST_NOTIFICATION_TITLE,
             body=TEST_NOTIFICATION_MESSAGE,
         )
         channel_count = len(notification_service.enabled_channel_names)
         if channel_count == 0:
             await _reply_text(update, "No enabled notification channels.")
+        elif any(not result.success for result in results):
+            successful_channels = sum(1 for result in results if result.success)
+            await _reply_text(
+                update,
+                (
+                    f"Sent test notification to {successful_channels} of "
+                    f"{channel_count} channel(s)."
+                ),
+            )
         else:
             await _reply_text(
                 update,

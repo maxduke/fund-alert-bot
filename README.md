@@ -16,8 +16,8 @@ This repository is intentionally not a web platform, not an RSI implementation, 
 The project has a Python package skeleton, environment-based configuration,
 SQLite storage helpers, drawdown-from-high rule evaluation, DCA reminder
 evaluation, profit-taking reminder evaluation, Telegram commands, scheduled
-checks, multi-channel notification dispatch, market data normalization, tests,
-Ruff configuration, and Docker packaging.
+market and DCA checks, multi-channel notification dispatch with delivery state,
+market data normalization, tests, Ruff configuration, and Docker packaging.
 
 Implemented Telegram commands:
 
@@ -32,10 +32,10 @@ Implemented Telegram commands:
 Supported drawdown `asset_type` values are `cn_index`, `cn_etf`, `cn_stock`,
 and `cn_open_fund`. Thresholds are entered as percentages, for example
 `10,15,20`. `/check` runs enabled drawdown rules immediately. APScheduler also
-runs the same drawdown evaluation Monday-Friday after CN market close, and the
-job skips official CN market holidays when AKShare's Sina trade-date calendar is
-available. If that calendar cannot be loaded, the scheduled check falls back to
-weekday behavior.
+runs the same drawdown evaluation Monday-Friday after CN market close as part of
+the scheduled market reminder check, and the job skips official CN market
+holidays when AKShare's Sina trade-date calendar is available. If that calendar
+cannot be loaded, the scheduled check falls back to weekday behavior.
 
 Profit-taking reminders are added with `/add_profit`, for example
 `/add_profit cn_etf 159915 ChiNext-ETF 1.85 25,40` or
@@ -45,7 +45,8 @@ the latest normalized `close` value from the market data provider as the current
 price; for `cn_open_fund`, that `close` value is the latest unit NAV. Each
 configured threshold sends at most one reminder per cost basis. Profit reminders
 are notifications only and do not calculate position size, redeem funds, place
-orders, or connect to a broker.
+orders, or connect to a broker. APScheduler evaluates profit reminders in the
+same after-close scheduled market reminder check as drawdown rules.
 
 DCA reminders are added with `/add_dca`, for example `/add_dca 创业板 周四
 1000` or `/add_dca 创业板 Thursday 1000`. Supported weekdays are 周一 through
@@ -62,6 +63,9 @@ Default scheduler configuration:
 - `TZ=Asia/Shanghai`
 - `AFTER_CLOSE_CHECK_TIME=17:10`
 - `DCA_REMINDER_TIME=09:30`
+- `AKSHARE_RETRIES=3`
+- `AKSHARE_RETRY_DELAY_SECONDS=0.5`
+- `AKSHARE_LATEST_LOOKBACK_DAYS=45`
 - `BARK_ENABLED=false`
 - `NTFY_ENABLED=false`
 - `WEBHOOK_ENABLED=false`
