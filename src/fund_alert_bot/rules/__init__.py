@@ -1,5 +1,11 @@
-"""Alert rule package.
+"""Alert rule package."""
 
-Rule implementations are intentionally deferred until the project skeleton,
-configuration, storage, tests, and documentation are ready.
-"""
+from fund_alert_bot.rules.drawdown import (
+    build_drawdown_alerts,
+    calculate_drawdown_from_high,
+)
+
+__all__ = [
+    "build_drawdown_alerts",
+    "calculate_drawdown_from_high",
+]
