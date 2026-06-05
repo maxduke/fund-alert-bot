@@ -12,9 +12,7 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
-START_MESSAGE = (
-    "fund-alert-bot is running. Use /help to see available commands."
-)
+START_MESSAGE = "fund-alert-bot is running. Use /help to see available commands."
 HELP_MESSAGE = "\n".join(
     (
         "Available commands:",
@@ -71,9 +69,7 @@ async def reject_if_unauthorized(
     user_id = get_update_user_id(update)
 
     if not allowed_user_ids:
-        LOGGER.warning(
-            "TELEGRAM_ALLOWED_USER_IDS is empty; rejecting Telegram command"
-        )
+        LOGGER.warning("TELEGRAM_ALLOWED_USER_IDS is empty; rejecting Telegram command")
         await _reply_text(update, UNAUTHORIZED_MESSAGE)
         return True
 
