@@ -59,6 +59,11 @@ RSI and RSI6 evaluators are explicitly out of scope.
 
 Responsible for registering APScheduler jobs, running checks on configured intervals, and handling job-level logging.
 
+After-close market checks should use the CN market calendar to skip official
+holidays, with weekday fallback when AKShare calendar data is unavailable. DCA
+reminders remain personal weekday reminders and do not depend on the market
+calendar.
+
 The scheduler should coordinate modules without owning business rules.
 
 ### Notifications

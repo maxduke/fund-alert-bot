@@ -16,7 +16,12 @@ from fund_alert_bot.checks import (
 )
 from fund_alert_bot.config import NotificationSettings
 from fund_alert_bot.db import initialize_database, open_connection
-from fund_alert_bot.market_data import AkshareMarketDataProvider, MarketDataProvider
+from fund_alert_bot.market_data import (
+    AkshareMarketDataProvider,
+    CNMarketCalendar,
+    MarketCalendar,
+    MarketDataProvider,
+)
 from fund_alert_bot.notifications.service import build_notification_service
 
 if TYPE_CHECKING:
@@ -109,6 +114,7 @@ def register_jobs(
     check_time: str = DEFAULT_AFTER_CLOSE_CHECK_TIME,
     dca_reminder_time: str = DEFAULT_DCA_REMINDER_TIME,
     market_data_provider: MarketDataProvider | None = None,
+    market_calendar: MarketCalendar | None = None,
     notification_settings: NotificationSettings | None = None,
 ) -> None:
     """Register scheduled alert jobs."""
@@ -117,6 +123,8 @@ def register_jobs(
     parsed_dca_time = parse_dca_reminder_time(dca_reminder_time)
     if market_data_provider is None:
         market_data_provider = AkshareMarketDataProvider()
+    if market_calendar is None:
+        market_calendar = CNMarketCalendar()
 
     scheduler.add_job(
         run_scheduled_drawdown_check,
@@ -131,6 +139,7 @@ def register_jobs(
             "sqlite_path": sqlite_path,
             "allowed_user_ids": frozenset(allowed_user_ids),
             "market_data_provider": market_data_provider,
+            "market_calendar": market_calendar,
             "timezone": timezone,
             "notification_settings": notification_settings,
         },
@@ -180,6 +189,7 @@ async def run_scheduled_drawdown_check(
     allowed_user_ids: Collection[int],
     market_data_provider: MarketDataProvider,
     timezone: str | tzinfo,
+    market_calendar: MarketCalendar | None = None,
     run_date: date | None = None,
     notification_settings: NotificationSettings | None = None,
 ) -> None:
@@ -189,6 +199,16 @@ async def run_scheduled_drawdown_check(
     LOGGER.info("Scheduled drawdown check started for date=%s", check_date.isoformat())
     result = None
     try:
+        if market_calendar is None:
+            market_calendar = CNMarketCalendar()
+        if not market_calendar.is_trading_day(check_date):
+            LOGGER.info(
+                "Scheduled drawdown check skipped for date=%s: "
+                "CN market is not trading.",
+                check_date.isoformat(),
+            )
+            return
+
         with open_connection(sqlite_path) as connection:
             initialize_database(connection)
             result = evaluate_drawdown_rules(
