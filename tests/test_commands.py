@@ -1,19 +1,24 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import date
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
 
 from fund_alert_bot.commands import (
     DRAW_DOWN_RULE_TYPE,
+    TEST_NOTIFICATION_MESSAGE,
     CommandParseError,
+    build_command_handlers,
     drawdown_params,
     evaluate_drawdown_rules,
     format_rules_list,
     parse_add_drawdown_args,
     parse_thresholds,
 )
+from fund_alert_bot.config import NotificationSettings
 from fund_alert_bot.db import add_rule, connect, init_db, list_rules
 from fund_alert_bot.market_data import AssetType, Instrument
 
@@ -113,6 +118,50 @@ def test_list_shows_asset_type() -> None:
     assert "symbol=110026" in response
 
 
+def test_test_notify_sends_to_enabled_channels(monkeypatch) -> None:
+    webhook_calls: list[dict[str, object]] = []
+
+    def fake_post(url: str, **kwargs: object) -> object:
+        webhook_calls.append({"url": url, **kwargs})
+        return FakeResponse(status_code=200)
+
+    monkeypatch.setattr(
+        "fund_alert_bot.notifications.webhook.requests.post",
+        fake_post,
+    )
+    handlers = build_command_handlers(
+        {123},
+        notification_settings=NotificationSettings(
+            webhook_enabled=True,
+            webhook_url="https://hooks.example.test/secret",
+        ),
+    )
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        effective_message=message,
+    )
+    context = SimpleNamespace(bot=FakeBot(), args=[])
+
+    asyncio.run(handlers[-1].callback(update, context))
+
+    assert context.bot.messages == [
+        {"chat_id": 456, "text": TEST_NOTIFICATION_MESSAGE}
+    ]
+    assert webhook_calls == [
+        {
+            "url": "https://hooks.example.test/secret",
+            "json": {
+                "title": "fund-alert-bot test",
+                "body": TEST_NOTIFICATION_MESSAGE,
+            },
+            "timeout": 10,
+        }
+    ]
+    assert message.replies == ["Sent test notification to 2 channel(s)."]
+
+
 class FakeProvider:
     def __init__(self, history: pd.DataFrame) -> None:
         self.history = history
@@ -129,6 +178,27 @@ class FakeProvider:
 
     def get_latest(self, instrument: Instrument) -> dict[str, object] | None:
         return None
+
+
+class FakeMessage:
+    def __init__(self) -> None:
+        self.replies: list[str] = []
+
+    async def reply_text(self, text: str) -> None:
+        self.replies.append(text)
+
+
+class FakeBot:
+    def __init__(self) -> None:
+        self.messages: list[dict[str, object]] = []
+
+    async def send_message(self, *, chat_id: int, text: str) -> None:
+        self.messages.append({"chat_id": chat_id, "text": text})
+
+
+class FakeResponse:
+    def __init__(self, *, status_code: int) -> None:
+        self.status_code = status_code
 
 
 def _history(dates: list[str], closes: list[float]) -> pd.DataFrame:

@@ -14,6 +14,7 @@ from fund_alert_bot.checks import (
     DrawdownCheckResult,
     evaluate_drawdown_rules,
 )
+from fund_alert_bot.config import NotificationSettings
 from fund_alert_bot.db import (
     add_rule,
     delete_rule,
@@ -28,6 +29,7 @@ from fund_alert_bot.market_data import (
     AssetType,
     MarketDataProvider,
 )
+from fund_alert_bot.notifications.service import build_notification_service
 
 if TYPE_CHECKING:
     from telegram import Update
@@ -48,12 +50,13 @@ HELP_MESSAGE = "\n".join(
         "/list - List configured rules",
         "/del <id> - Delete a configured rule",
         "/check - Run a manual check",
-        "/test_notify - Send a test Telegram notification",
+        "/test_notify - Send a test notification to all enabled channels",
     )
 )
 NO_RULES_CONFIGURED_MESSAGE = "No rules configured"
 NO_RULES_TO_CHECK_MESSAGE = "No enabled drawdown_from_high rules to check"
-TEST_NOTIFICATION_MESSAGE = "Test Telegram notification from fund-alert-bot."
+TEST_NOTIFICATION_TITLE = "fund-alert-bot test"
+TEST_NOTIFICATION_MESSAGE = "Test notification from fund-alert-bot."
 UNAUTHORIZED_MESSAGE = "You are not allowed to use this bot."
 
 
@@ -227,6 +230,13 @@ def get_update_user_id(update: object) -> int | None:
     return user_id if isinstance(user_id, int) else None
 
 
+def get_update_chat_id(update: object) -> int | None:
+    """Read the effective Telegram chat ID from an update-like object."""
+    effective_chat = getattr(update, "effective_chat", None)
+    chat_id = getattr(effective_chat, "id", None)
+    return chat_id if isinstance(chat_id, int) else None
+
+
 def can_use_command(update: object, allowed_user_ids: Collection[int]) -> bool:
     """Return whether an update-like object may use bot commands."""
     return is_allowed_telegram_user(get_update_user_id(update), allowed_user_ids)
@@ -267,11 +277,13 @@ def build_command_handlers(
     *,
     sqlite_path: str | Path = ":memory:",
     market_data_provider: MarketDataProvider | None = None,
+    notification_settings: NotificationSettings | None = None,
 ) -> list[CommandHandler[Any, ContextTypes.DEFAULT_TYPE]]:
     """Build Telegram command handlers with an allowlist guard."""
     from telegram.ext import CommandHandler
 
     allowed_user_ids = frozenset(allowed_user_ids)
+    notification_settings = notification_settings or NotificationSettings()
     if market_data_provider is None:
         market_data_provider = AkshareMarketDataProvider()
 
@@ -360,13 +372,16 @@ def build_command_handlers(
             initialize_database(connection)
             result = evaluate_drawdown_rules(connection, market_data_provider)
 
-        if update.effective_chat is None and result.notifications:
-            LOGGER.warning("Telegram /check update has no effective chat")
-        elif update.effective_chat is not None:
+        if result.notifications:
+            notification_service = build_notification_service(
+                settings=notification_settings,
+                telegram_bot=context.bot,
+                telegram_chat_ids=_command_chat_ids(update),
+            )
             for notification in result.notifications:
-                await context.bot.send_message(
-                    chat_id=update.effective_chat.id,
-                    text=notification.text,
+                await notification_service.send_alert(
+                    title=notification.title,
+                    body=notification.text,
                 )
 
         await _reply_text(update, format_check_summary(result))
@@ -374,13 +389,23 @@ def build_command_handlers(
     async def test_notify(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if await reject_if_unauthorized(update, allowed_user_ids):
             return
-        if update.effective_chat is None:
-            LOGGER.warning("Telegram /test_notify update has no effective chat")
-            return
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=TEST_NOTIFICATION_MESSAGE,
+        notification_service = build_notification_service(
+            settings=notification_settings,
+            telegram_bot=context.bot,
+            telegram_chat_ids=_command_chat_ids(update),
         )
+        await notification_service.send_alert(
+            title=TEST_NOTIFICATION_TITLE,
+            body=TEST_NOTIFICATION_MESSAGE,
+        )
+        channel_count = len(notification_service.enabled_channel_names)
+        if channel_count == 0:
+            await _reply_text(update, "No enabled notification channels.")
+        else:
+            await _reply_text(
+                update,
+                f"Sent test notification to {channel_count} channel(s).",
+            )
 
     return [
         CommandHandler("start", start),
@@ -399,12 +424,14 @@ def register_command_handlers(
     *,
     sqlite_path: str | Path = ":memory:",
     market_data_provider: MarketDataProvider | None = None,
+    notification_settings: NotificationSettings | None = None,
 ) -> None:
     """Register supported Telegram command handlers."""
     for handler in build_command_handlers(
         allowed_user_ids,
         sqlite_path=sqlite_path,
         market_data_provider=market_data_provider,
+        notification_settings=notification_settings,
     ):
         application.add_handler(handler)
 
@@ -415,6 +442,7 @@ def create_application(
     allowed_user_ids: Collection[int],
     sqlite_path: str | Path = ":memory:",
     market_data_provider: MarketDataProvider | None = None,
+    notification_settings: NotificationSettings | None = None,
     post_init: Callable[
         [Application[Any, Any, Any, Any, Any, Any]],
         Awaitable[None],
@@ -448,5 +476,14 @@ def create_application(
         allowed_user_ids,
         sqlite_path=sqlite_path,
         market_data_provider=market_data_provider,
+        notification_settings=notification_settings,
     )
     return application
+
+
+def _command_chat_ids(update: object) -> frozenset[int]:
+    chat_id = get_update_chat_id(update)
+    if chat_id is None:
+        LOGGER.warning("Telegram command update has no effective chat")
+        return frozenset()
+    return frozenset({chat_id})

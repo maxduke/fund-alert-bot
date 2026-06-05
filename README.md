@@ -15,8 +15,8 @@ This repository is intentionally not a web platform, not an RSI implementation, 
 
 The project has a Python package skeleton, environment-based configuration,
 SQLite storage helpers, drawdown-from-high rule evaluation, Telegram commands,
-weekday after-close drawdown scheduling, market data normalization, tests, Ruff
-configuration, and Docker packaging.
+weekday after-close drawdown scheduling, multi-channel notification dispatch,
+market data normalization, tests, Ruff configuration, and Docker packaging.
 
 Implemented Telegram commands:
 
@@ -24,16 +24,30 @@ Implemented Telegram commands:
 - `/list`
 - `/del <id>`
 - `/check`
+- `/test_notify`
 
 Supported drawdown `asset_type` values are `cn_index`, `cn_etf`, `cn_stock`,
 and `cn_open_fund`. Thresholds are entered as percentages, for example
 `10,15,20`. `/check` runs enabled drawdown rules immediately. APScheduler also
-runs the same drawdown evaluation Monday-Friday after CN market close.
+runs the same drawdown evaluation Monday-Friday after CN market close. Telegram
+remains the command channel and default notification channel; optional Bark,
+ntfy, and webhook channels can be enabled with environment variables.
 
 Default scheduler configuration:
 
 - `TZ=Asia/Shanghai`
 - `AFTER_CLOSE_CHECK_TIME=17:10`
+- `BARK_ENABLED=false`
+- `NTFY_ENABLED=false`
+- `WEBHOOK_ENABLED=false`
+
+Optional notification channel configuration:
+
+- `BARK_SERVER_URL`
+- `BARK_DEVICE_KEY`
+- `NTFY_SERVER_URL`
+- `NTFY_TOPIC`
+- `WEBHOOK_URL`
 
 DCA reminders, profit-taking reminders, realtime quotes, and RSI/RSI6 alerts are
 not implemented here.

@@ -16,8 +16,10 @@ from fund_alert_bot.config import (
     DEFAULT_AFTER_CLOSE_CHECK_TIME,
     DEFAULT_SQLITE_PATH,
     DEFAULT_TIMEZONE,
+    NotificationSettings,
     load_settings,
     parse_allowed_user_ids,
+    parse_bool_env,
 )
 from fund_alert_bot.db import initialize_database, open_connection
 
@@ -61,6 +63,44 @@ def test_scheduler_settings_from_environment(monkeypatch) -> None:
 
     assert settings.timezone == "Asia/Shanghai"
     assert settings.after_close_check_time == "17:10"
+
+
+def test_parse_bool_env_accepts_common_values() -> None:
+    assert parse_bool_env("true", name="FEATURE")
+    assert parse_bool_env("1", name="FEATURE")
+    assert parse_bool_env("yes", name="FEATURE")
+    assert not parse_bool_env("false", name="FEATURE")
+    assert not parse_bool_env("0", name="FEATURE")
+    assert not parse_bool_env(None, name="FEATURE")
+
+
+def test_parse_bool_env_rejects_invalid_values() -> None:
+    with pytest.raises(ValueError, match="FEATURE must be one of"):
+        parse_bool_env("maybe", name="FEATURE")
+
+
+def test_notification_settings_from_environment(monkeypatch) -> None:
+    monkeypatch.setenv("BARK_ENABLED", "true")
+    monkeypatch.setenv("BARK_SERVER_URL", "https://bark.example.test")
+    monkeypatch.setenv("BARK_DEVICE_KEY", "secret-bark-key")
+    monkeypatch.setenv("NTFY_ENABLED", "yes")
+    monkeypatch.setenv("NTFY_SERVER_URL", "https://ntfy.example.test")
+    monkeypatch.setenv("NTFY_TOPIC", "secret-topic")
+    monkeypatch.setenv("WEBHOOK_ENABLED", "1")
+    monkeypatch.setenv("WEBHOOK_URL", "https://hooks.example.test/secret")
+
+    settings = load_settings(load_env_file=False)
+
+    assert settings.notifications == NotificationSettings(
+        bark_enabled=True,
+        bark_server_url="https://bark.example.test",
+        bark_device_key="secret-bark-key",
+        ntfy_enabled=True,
+        ntfy_server_url="https://ntfy.example.test",
+        ntfy_topic="secret-topic",
+        webhook_enabled=True,
+        webhook_url="https://hooks.example.test/secret",
+    )
 
 
 def test_parse_allowed_user_ids_returns_empty_set_for_blank_values() -> None:
