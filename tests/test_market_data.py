@@ -41,6 +41,14 @@ class FakeAkshare:
             }
         )
 
+    def stock_zh_index_daily_em(self, **kwargs: Any) -> pd.DataFrame:
+        self.calls.append(("stock_zh_index_daily_em", kwargs))
+        return _english_price_history()
+
+    def stock_zh_a_hist(self, **kwargs: Any) -> pd.DataFrame:
+        self.calls.append(("stock_zh_a_hist", kwargs))
+        return _price_history()
+
     def fund_etf_hist_sina(self, **kwargs: Any) -> pd.DataFrame:
         self.calls.append(("fund_etf_hist_sina", kwargs))
         return _english_price_history()
@@ -109,6 +117,51 @@ def test_open_fund_history_uses_unit_nav_as_close_and_filters_by_date() -> None:
             {
                 "symbol": "000001",
                 "indicator": "\u5355\u4f4d\u51c0\u503c\u8d70\u52bf",
+            },
+        )
+    ]
+
+
+def test_index_history_formats_exchange_symbol_and_normalizes() -> None:
+    fake_ak = FakeAkshare()
+    provider = AkshareMarketDataProvider(ak_module=fake_ak, retry_delay_seconds=0)
+    instrument = Instrument(
+        symbol="399006",
+        name="ChiNext Index",
+        asset_type=AssetType.CN_INDEX,
+    )
+
+    history = provider.get_history(instrument, "2024-01-01", "2024-01-03")
+
+    assert list(history.columns) == NORMALIZED_COLUMNS
+    assert history["close"].tolist() == [2.2, 2.3]
+    assert fake_ak.calls == [
+        ("stock_zh_index_daily_em", {"symbol": "sz399006"})
+    ]
+
+
+def test_stock_history_uses_a_share_history_and_normalizes() -> None:
+    fake_ak = FakeAkshare()
+    provider = AkshareMarketDataProvider(ak_module=fake_ak, retry_delay_seconds=0)
+    instrument = Instrument(
+        symbol="300750",
+        name="CATL",
+        asset_type=AssetType.CN_STOCK,
+    )
+
+    history = provider.get_history(instrument, "2024-01-01", "2024-01-03")
+
+    assert list(history.columns) == NORMALIZED_COLUMNS
+    assert history["close"].tolist() == [1.2, 1.3]
+    assert fake_ak.calls == [
+        (
+            "stock_zh_a_hist",
+            {
+                "symbol": "300750",
+                "period": "daily",
+                "start_date": "20240101",
+                "end_date": "20240103",
+                "adjust": "",
             },
         )
     ]
@@ -271,7 +324,7 @@ def test_missing_required_columns_raise_normalize_error() -> None:
         provider.get_history(instrument, "2024-01-01", "2024-01-03")
 
 
-@pytest.mark.parametrize("asset_type", ["cn_index", "cn_stock", "crypto"])
+@pytest.mark.parametrize("asset_type", ["crypto"])
 def test_unsupported_asset_type_raises_clear_exception(asset_type: str) -> None:
     provider = AkshareMarketDataProvider(ak_module=FakeAkshare(), retry_delay_seconds=0)
     instrument = Instrument(

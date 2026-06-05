@@ -82,8 +82,22 @@ class AkshareMarketDataProvider(MarketDataProvider):
         end = _format_akshare_date(end_date)
         ak_module = self._akshare
 
+        if asset_type is AssetType.CN_INDEX:
+            return self._call_with_retry(
+                ak_module.stock_zh_index_daily_em,
+                symbol=_format_cn_index_symbol(instrument.symbol),
+            )
         if asset_type is AssetType.CN_ETF:
             return self._fetch_cn_etf_history(instrument, start, end)
+        if asset_type is AssetType.CN_STOCK:
+            return self._call_with_retry(
+                ak_module.stock_zh_a_hist,
+                symbol=instrument.symbol,
+                period="daily",
+                start_date=start,
+                end_date=end,
+                adjust="",
+            )
         if asset_type is AssetType.CN_OPEN_FUND:
             return self._call_with_retry(
                 ak_module.fund_open_fund_info_em,
@@ -185,3 +199,12 @@ def _format_sina_etf_symbol(symbol: str) -> str:
     if normalized.startswith("1"):
         return f"sz{normalized}"
     return normalized
+
+
+def _format_cn_index_symbol(symbol: str) -> str:
+    normalized = symbol.lower()
+    if normalized.startswith(("sh", "sz")):
+        return normalized
+    if normalized.startswith("399"):
+        return f"sz{normalized}"
+    return f"sh{normalized}"

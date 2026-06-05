@@ -31,6 +31,7 @@ def run() -> None:
     application = create_application(
         token=settings.telegram_bot_token,
         allowed_user_ids=settings.telegram_allowed_user_ids,
+        sqlite_path=settings.sqlite_path,
     )
 
     scheduler = create_scheduler(timezone=settings.timezone)
