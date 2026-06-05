@@ -14,6 +14,7 @@ from fund_alert_bot.commands import (
 )
 from fund_alert_bot.config import (
     DEFAULT_AFTER_CLOSE_CHECK_TIME,
+    DEFAULT_DCA_REMINDER_TIME,
     DEFAULT_SQLITE_PATH,
     DEFAULT_TIMEZONE,
     NotificationSettings,
@@ -48,21 +49,25 @@ def test_sqlite_path_from_environment(monkeypatch, tmp_path) -> None:
 def test_scheduler_defaults_from_environment(monkeypatch) -> None:
     monkeypatch.delenv("TZ", raising=False)
     monkeypatch.delenv("AFTER_CLOSE_CHECK_TIME", raising=False)
+    monkeypatch.delenv("DCA_REMINDER_TIME", raising=False)
 
     settings = load_settings(load_env_file=False)
 
     assert settings.timezone == DEFAULT_TIMEZONE
     assert settings.after_close_check_time == DEFAULT_AFTER_CLOSE_CHECK_TIME
+    assert settings.dca_reminder_time == DEFAULT_DCA_REMINDER_TIME
 
 
 def test_scheduler_settings_from_environment(monkeypatch) -> None:
     monkeypatch.setenv("TZ", "Asia/Shanghai")
     monkeypatch.setenv("AFTER_CLOSE_CHECK_TIME", "17:10")
+    monkeypatch.setenv("DCA_REMINDER_TIME", "09:30")
 
     settings = load_settings(load_env_file=False)
 
     assert settings.timezone == "Asia/Shanghai"
     assert settings.after_close_check_time == "17:10"
+    assert settings.dca_reminder_time == "09:30"
 
 
 def test_parse_bool_env_accepts_common_values() -> None:

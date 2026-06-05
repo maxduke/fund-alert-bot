@@ -40,6 +40,7 @@ def run() -> None:
             allowed_user_ids=settings.telegram_allowed_user_ids,
             timezone=settings.timezone,
             check_time=settings.after_close_check_time,
+            dca_reminder_time=settings.dca_reminder_time,
             market_data_provider=market_data_provider,
             notification_settings=settings.notifications,
         )
@@ -64,10 +65,13 @@ def run() -> None:
 
     LOGGER.info(
         "fund-alert-bot starting with SQLite database at %s, "
-        "%d allowed Telegram users, after-close check %s %s",
+        "%d allowed Telegram users, after-close check %s %s, "
+        "DCA reminder check %s %s",
         settings.sqlite_path,
         len(settings.telegram_allowed_user_ids),
         settings.after_close_check_time,
+        settings.timezone,
+        settings.dca_reminder_time,
         settings.timezone,
     )
 

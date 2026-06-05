@@ -14,13 +14,15 @@ This repository is intentionally not a web platform, not an RSI implementation, 
 ## Current Status
 
 The project has a Python package skeleton, environment-based configuration,
-SQLite storage helpers, drawdown-from-high rule evaluation, Telegram commands,
-weekday after-close drawdown scheduling, multi-channel notification dispatch,
-market data normalization, tests, Ruff configuration, and Docker packaging.
+SQLite storage helpers, drawdown-from-high rule evaluation, DCA reminder
+evaluation, Telegram commands, scheduled checks, multi-channel notification
+dispatch, market data normalization, tests, Ruff configuration, and Docker
+packaging.
 
 Implemented Telegram commands:
 
 - `/add_drawdown <asset_type> <symbol> <name> <lookback_days> <thresholds>`
+- `/add_dca <name> <weekday> <amount>`
 - `/list`
 - `/del <id>`
 - `/check`
@@ -29,14 +31,23 @@ Implemented Telegram commands:
 Supported drawdown `asset_type` values are `cn_index`, `cn_etf`, `cn_stock`,
 and `cn_open_fund`. Thresholds are entered as percentages, for example
 `10,15,20`. `/check` runs enabled drawdown rules immediately. APScheduler also
-runs the same drawdown evaluation Monday-Friday after CN market close. Telegram
-remains the command channel and default notification channel; optional Bark,
-ntfy, and webhook channels can be enabled with environment variables.
+runs the same drawdown evaluation Monday-Friday after CN market close.
+
+DCA reminders are added with `/add_dca`, for example `/add_dca 创业板 周四
+1000` or `/add_dca 创业板 Thursday 1000`. Supported weekdays are 周一 through
+周日 and Monday through Sunday; rules store normalized weekday codes such as
+`THU`. `/check` also checks whether DCA reminders are due today. Scheduled DCA
+checks run daily and send at most one reminder per rule per date. DCA reminders
+do not fetch market data and do not trade.
+
+Telegram remains the command channel and default notification channel; optional
+Bark, ntfy, and webhook channels can be enabled with environment variables.
 
 Default scheduler configuration:
 
 - `TZ=Asia/Shanghai`
 - `AFTER_CLOSE_CHECK_TIME=17:10`
+- `DCA_REMINDER_TIME=09:30`
 - `BARK_ENABLED=false`
 - `NTFY_ENABLED=false`
 - `WEBHOOK_ENABLED=false`
@@ -49,8 +60,8 @@ Optional notification channel configuration:
 - `NTFY_TOPIC`
 - `WEBHOOK_URL`
 
-DCA reminders, profit-taking reminders, realtime quotes, and RSI/RSI6 alerts are
-not implemented here.
+Profit-taking reminders, realtime quotes, and RSI/RSI6 alerts are not
+implemented here.
 
 ## Planned Stack
 

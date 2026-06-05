@@ -21,8 +21,10 @@ from fund_alert_bot.market_data import (
     Instrument,
     MarketDataProvider,
 )
+from fund_alert_bot.rules.dca import build_dca_reminder_alert
 from fund_alert_bot.rules.drawdown import build_drawdown_alerts
 
+DCA_RULE_TYPE = "dca_reminder"
 DRAW_DOWN_RULE_TYPE = "drawdown_from_high"
 
 
@@ -61,6 +63,16 @@ class DrawdownCheckResult:
     notifications: list[AlertNotification]
     skipped_duplicates: int
     no_data_skips: list[RuleNoDataSkip]
+    errors: list[RuleCheckError]
+
+
+@dataclass(frozen=True, slots=True)
+class DcaCheckResult:
+    """Summary of one DCA reminder check run."""
+
+    checked_rules: int
+    notifications: list[AlertNotification]
+    skipped_duplicates: int
     errors: list[RuleCheckError]
 
 
@@ -166,6 +178,73 @@ def evaluate_drawdown_rules(
         notifications=notifications,
         skipped_duplicates=skipped_duplicates,
         no_data_skips=no_data_skips,
+        errors=errors,
+    )
+
+
+def evaluate_dca_rules(
+    connection: Any,
+    *,
+    today: date | None = None,
+) -> DcaCheckResult:
+    """Evaluate enabled DCA reminder rules and store new alert events."""
+
+    check_date = today or date.today()
+    rules = [
+        row
+        for row in list_enabled_rules(connection)
+        if row["type"] == DCA_RULE_TYPE
+    ]
+
+    notifications: list[AlertNotification] = []
+    errors: list[RuleCheckError] = []
+    skipped_duplicates = 0
+
+    for row in rules:
+        try:
+            alert = build_dca_reminder_alert(
+                row,
+                check_date,
+                lambda alert_key: alert_exists(connection, alert_key),
+            )
+        except Exception as exc:  # noqa: BLE001
+            errors.append(
+                RuleCheckError(
+                    rule_id=int(row["id"]),
+                    symbol=str(row["symbol"]),
+                    message=str(exc),
+                )
+            )
+            continue
+
+        if alert is None:
+            continue
+
+        try:
+            event_id = add_alert_event(
+                connection,
+                rule_id=int(row["id"]),
+                alert_key=str(alert["alert_key"]),
+                title=str(alert["title"]),
+                message=str(alert["message"]),
+                payload=alert.get("payload"),
+            )
+        except sqlite3.IntegrityError:
+            skipped_duplicates += 1
+            continue
+
+        notifications.append(
+            AlertNotification(
+                event_id=event_id,
+                title=str(alert["title"]),
+                text=str(alert["message"]),
+            )
+        )
+
+    return DcaCheckResult(
+        checked_rules=len(rules),
+        notifications=notifications,
+        skipped_duplicates=skipped_duplicates,
         errors=errors,
     )
 
