@@ -206,7 +206,7 @@ def test_scheduled_drawdown_check_skips_when_cn_market_is_closed(
     assert "CN market is not trading" in caplog.text
 
 
-def test_register_jobs_passes_calendar_only_to_after_close_job() -> None:
+def test_register_jobs_passes_calendar_to_market_jobs_only() -> None:
     fake_scheduler = FakeScheduler()
     application = FakeApplication()
     provider = FakeProvider(_history(["2024-01-02"], [100.0]))
@@ -222,13 +222,75 @@ def test_register_jobs_passes_calendar_only_to_after_close_job() -> None:
         market_calendar=market_calendar,
     )
 
+    before_close_job = fake_scheduler.jobs[scheduler.MARKET_BEFORE_CLOSE_JOB_ID]
     after_close_job = fake_scheduler.jobs[scheduler.MARKET_AFTER_CLOSE_JOB_ID]
     dca_job = fake_scheduler.jobs[scheduler.DCA_MORNING_JOB_ID]
 
+    assert before_close_job["func"] is scheduler.run_scheduled_before_close_check
+    assert before_close_job["kwargs"]["market_calendar"] is market_calendar
+    assert before_close_job["kwargs"]["market_data_provider"] is provider
     assert after_close_job["func"] is scheduler.run_scheduled_market_check
     assert after_close_job["kwargs"]["market_calendar"] is market_calendar
     assert after_close_job["kwargs"]["market_data_provider"] is provider
     assert "market_calendar" not in dca_job["kwargs"]
+
+
+def test_scheduled_before_close_check_uses_latest_drawdown_price(
+    tmp_path: Path,
+) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    _add_drawdown_rule(sqlite_path)
+    application = FakeApplication()
+    provider = FakeProvider(
+        _history(["2024-01-01", "2024-01-02"], [100.0, 95.0]),
+        latest={"date": "2024-01-02", "close": 89.0, "source": "test"},
+    )
+    market_calendar = FakeMarketCalendar(is_trading_day=True)
+
+    asyncio.run(
+        scheduler.run_scheduled_before_close_check(
+            application=application,
+            sqlite_path=sqlite_path,
+            allowed_user_ids={123},
+            market_data_provider=provider,
+            market_calendar=market_calendar,
+            timezone="Asia/Shanghai",
+            run_date=date(2024, 1, 2),
+        )
+    )
+
+    assert [call.asset_type for call in provider.latest_calls] == [AssetType.CN_INDEX]
+    assert application.bot.messages == [
+        {"chat_id": 123, "text": "399006 is down 11.0% from its 365-day high."}
+    ]
+
+
+def test_scheduled_before_close_check_skips_stale_latest_data(
+    tmp_path: Path,
+) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    _add_drawdown_rule(sqlite_path)
+    application = FakeApplication()
+    provider = FakeProvider(
+        _history(["2024-01-01"], [90.0]),
+        latest={"date": "2024-01-01", "close": 89.0, "source": "test"},
+    )
+    market_calendar = FakeMarketCalendar(is_trading_day=True)
+
+    asyncio.run(
+        scheduler.run_scheduled_before_close_check(
+            application=application,
+            sqlite_path=sqlite_path,
+            allowed_user_ids={123},
+            market_data_provider=provider,
+            market_calendar=market_calendar,
+            timezone="Asia/Shanghai",
+            run_date=date(2024, 1, 2),
+        )
+    )
+
+    assert [call.asset_type for call in provider.latest_calls] == [AssetType.CN_INDEX]
+    assert application.bot.messages == []
 
 
 def test_scheduled_market_check_evaluates_profit_rules(

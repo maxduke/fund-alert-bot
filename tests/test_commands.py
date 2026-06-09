@@ -18,6 +18,8 @@ from fund_alert_bot.commands import (
     dca_params,
     drawdown_params,
     evaluate_drawdown_rules,
+    evaluate_profit_rules,
+    format_check_summary,
     format_rules_list,
     parse_add_dca_args,
     parse_add_drawdown_args,
@@ -136,6 +138,85 @@ def test_check_prevents_duplicate_alert_notifications() -> None:
     ]
 
 
+def test_manual_check_summary_shows_current_drawdown_percent() -> None:
+    connection = connect(":memory:")
+    try:
+        init_db(connection)
+        add_rule(
+            connection,
+            type=DRAW_DOWN_RULE_TYPE,
+            symbol="399006",
+            name="创业板指",
+            asset_type=AssetType.CN_INDEX.value,
+            params={
+                "lookback_days": 365,
+                "thresholds": [0.20],
+                "price_field": "close",
+            },
+        )
+        provider = FakeProvider(_history(["2024-01-01", "2024-01-02"], [100, 90]))
+
+        result = evaluate_drawdown_rules(
+            connection,
+            provider,
+            today=date(2024, 1, 2),
+        )
+        response = format_check_summary(result)
+    finally:
+        connection.close()
+
+    assert "Current drawdowns:" in response
+    assert "Rule 1 399006 创业板指: 10.0% from high 100 on 2024-01-01" in response
+
+
+def test_drawdown_check_reuses_history_for_same_code_ranges() -> None:
+    connection = connect(":memory:")
+    try:
+        init_db(connection)
+        add_rule(
+            connection,
+            type=DRAW_DOWN_RULE_TYPE,
+            symbol="399006",
+            name="创业板指",
+            asset_type=AssetType.CN_INDEX.value,
+            params={
+                "lookback_days": 30,
+                "thresholds": [0.10],
+                "price_field": "close",
+            },
+        )
+        add_rule(
+            connection,
+            type=DRAW_DOWN_RULE_TYPE,
+            symbol="399006",
+            name="创业板指-alt",
+            asset_type=AssetType.CN_INDEX.value,
+            params={
+                "lookback_days": 365,
+                "thresholds": [0.15],
+                "price_field": "close",
+            },
+        )
+        provider = FakeProvider(
+            _history(["2023-01-02", "2024-01-02"], [100.0, 85.0]),
+            latest={"date": "2024-01-02", "close": 84.0, "source": "test"},
+        )
+
+        evaluate_drawdown_rules(
+            connection,
+            provider,
+            today=date(2024, 1, 2),
+            include_latest=True,
+        )
+    finally:
+        connection.close()
+
+    assert len(provider.calls) == 1
+    assert provider.calls[0][1] == date(2023, 1, 2)
+    assert provider.calls[0][2] == date(2024, 1, 2)
+    assert len(provider.latest_calls) == 1
+
+
 def test_check_retries_alert_after_delivery_failure(tmp_path) -> None:
     sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
     with open_connection(sqlite_path) as connection:
@@ -205,6 +286,38 @@ def test_check_retries_alert_after_delivery_failure(tmp_path) -> None:
     assert success_context.bot.messages == [
         {"chat_id": 456, "text": "399006 is down 10.0% from its 365-day high."}
     ]
+
+
+def test_profit_check_reuses_latest_for_same_code() -> None:
+    connection = connect(":memory:")
+    try:
+        init_db(connection)
+        add_rule(
+            connection,
+            type=PROFIT_RULE_TYPE,
+            symbol="159915",
+            name="ChiNext ETF",
+            asset_type=AssetType.CN_ETF.value,
+            params={"cost": 1.85, "thresholds": [0.25]},
+        )
+        add_rule(
+            connection,
+            type=PROFIT_RULE_TYPE,
+            symbol="159915",
+            name="ChiNext ETF alt",
+            asset_type=AssetType.CN_ETF.value,
+            params={"cost": 1.90, "thresholds": [0.20]},
+        )
+        provider = FakeProvider(
+            _history(["2024-01-01"], [100.0]),
+            latest={"date": "2024-01-02", "close": 2.4, "source": "test"},
+        )
+
+        evaluate_profit_rules(connection, provider)
+    finally:
+        connection.close()
+
+    assert len(provider.latest_calls) == 1
 
 
 def test_list_shows_asset_type() -> None:
