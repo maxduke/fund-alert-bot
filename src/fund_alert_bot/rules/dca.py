@@ -75,7 +75,7 @@ def build_dca_reminder_alert(
     due_date = today.isoformat()
     return {
         "alert_key": alert_key,
-        "title": "💰 DCA reminder",
+        "title": "DCA reminder",
         "message": "\n".join(
             (
                 "💰 DCA reminder",

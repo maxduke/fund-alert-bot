@@ -105,7 +105,7 @@ def build_drawdown_alerts(
         alerts.append(
             {
                 "alert_key": alert_key,
-                "title": "📉 Drawdown reminder",
+                "title": "Drawdown reminder",
                 "message": _build_message(
                     symbol=symbol,
                     name=name,

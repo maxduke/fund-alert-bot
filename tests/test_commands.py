@@ -654,7 +654,7 @@ def test_test_notify_sends_to_enabled_channels(monkeypatch) -> None:
         {
             "url": "https://hooks.example.test/secret",
             "json": {
-                "title": "🧪 fund-alert-bot test",
+                "title": "fund-alert-bot test",
                 "body": TEST_NOTIFICATION_MESSAGE,
             },
             "timeout": 10,

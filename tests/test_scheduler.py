@@ -195,7 +195,7 @@ def test_scheduled_check_prevents_duplicate_alerts_by_alert_key(
         {
             "url": "https://hooks.example.test/secret",
             "json": {
-                "title": "📉 Drawdown reminder",
+                "title": "Drawdown reminder",
                 "body": EXPECTED_DRAWDOWN_10_MESSAGE,
             },
             "timeout": 10,
@@ -450,7 +450,7 @@ def test_scheduled_dca_check_prevents_duplicate_alerts_by_alert_key(
         {
             "url": "https://hooks.example.test/secret",
             "json": {
-                "title": "💰 DCA reminder",
+                "title": "DCA reminder",
                 "body": expected_message,
             },
             "timeout": 10,

@@ -71,7 +71,7 @@ NO_DRAWDOWN_RULES_TO_CHECK_MESSAGE = "No enabled drawdown_from_high rules to che
 NO_RULES_TO_CHECK_MESSAGE = (
     "No enabled drawdown_from_high, profit_reminder, or dca_reminder rules to check"
 )
-TEST_NOTIFICATION_TITLE = "🧪 fund-alert-bot test"
+TEST_NOTIFICATION_TITLE = "fund-alert-bot test"
 TEST_NOTIFICATION_MESSAGE = "\n".join(
     (
         "🧪 Test notification",

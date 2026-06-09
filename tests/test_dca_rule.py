@@ -55,7 +55,7 @@ def test_dca_rule_builds_due_alert() -> None:
 
     assert alert is not None
     assert alert["alert_key"] == "dca:7:2024-01-04"
-    assert alert["title"] == "💰 DCA reminder"
+    assert alert["title"] == "DCA reminder"
     assert alert["message"] == "\n".join(
         (
             "💰 DCA reminder",

@@ -66,7 +66,7 @@ def build_profit_alerts(
         alerts.append(
             {
                 "alert_key": alert_key,
-                "title": "💵 Profit-taking reminder",
+                "title": "Profit-taking reminder",
                 "message": _build_message(
                     symbol=symbol,
                     name=name,

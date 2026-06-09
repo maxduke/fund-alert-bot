@@ -27,7 +27,7 @@ def test_profit_rule_triggers_crossed_thresholds() -> None:
     assert len(alerts) == 1
     alert = alerts[0]
     assert alert["alert_key"] == "159915:profit:cost:1.85:threshold:0.25"
-    assert alert["title"] == "💵 Profit-taking reminder"
+    assert alert["title"] == "Profit-taking reminder"
     assert alert["payload"] == {
         "symbol": "159915",
         "name": "ChiNext ETF",
