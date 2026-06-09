@@ -317,6 +317,7 @@ def format_check_summary(
     ]
     if alert_count == 0:
         parts.append("No alerts triggered.")
+    _append_drawdown_statuses(parts, result)
     if result.skipped_duplicates:
         parts.append(f"Duplicate alerts skipped: {result.skipped_duplicates}.")
     if result.no_data_skips:
@@ -356,6 +357,7 @@ def _format_combined_check_summary(
     ]
     if alert_count == 0:
         parts.append("No alerts triggered.")
+    _append_drawdown_statuses(parts, drawdown_result)
 
     dca_duplicates = 0 if dca_result is None else dca_result.skipped_duplicates
     profit_duplicates = 0 if profit_result is None else profit_result.skipped_duplicates
@@ -381,6 +383,24 @@ def _format_combined_check_summary(
             parts.append(f"Rule {error.rule_id} {error.symbol}: {error.message}")
 
     return "\n".join(parts)
+
+
+def _append_drawdown_statuses(
+    parts: list[str],
+    result: DrawdownCheckResult,
+) -> None:
+    if not result.statuses:
+        return
+
+    parts.append("Current drawdowns:")
+    for status in result.statuses:
+        name = f" {status.name}" if status.name else ""
+        parts.append(
+            f"Rule {status.rule_id} {status.symbol}{name}: "
+            f"{status.drawdown:.1%} from high "
+            f"{status.peak_price:.4g} on {status.peak_date}; "
+            f"latest {status.latest_price:.4g} on {status.latest_date}."
+        )
 
 
 def get_start_message() -> str:
@@ -632,7 +652,11 @@ def build_command_handlers(
 
         with open_connection(sqlite_path) as connection:
             initialize_database(connection)
-            result = evaluate_drawdown_rules(connection, market_data_provider)
+            result = evaluate_drawdown_rules(
+                connection,
+                market_data_provider,
+                include_latest=True,
+            )
             profit_result = evaluate_profit_rules(connection, market_data_provider)
             dca_result = evaluate_dca_rules(connection)
 

@@ -218,6 +218,86 @@ def test_etf_history_falls_back_to_sina_when_eastmoney_fails() -> None:
     ]
 
 
+def test_get_latest_prefers_realtime_spot_data_for_etf() -> None:
+    class RealtimeAkshare(FakeAkshare):
+        def fund_etf_spot_em(self, **kwargs: Any) -> pd.DataFrame:
+            self.calls.append(("fund_etf_spot_em", kwargs))
+            return pd.DataFrame(
+                {
+                    "代码": ["510300"],
+                    "最新价": ["1.25"],
+                    "今开": ["1.20"],
+                    "最高": ["1.30"],
+                    "最低": ["1.19"],
+                    "成交量": ["1200"],
+                    "成交额": ["15000"],
+                }
+            )
+
+    fake_ak = RealtimeAkshare()
+    provider = AkshareMarketDataProvider(
+        ak_module=fake_ak,
+        retry_delay_seconds=0,
+        today_factory=lambda: date(2024, 1, 4),
+    )
+    instrument = Instrument(
+        symbol="510300",
+        name="CSI 300 ETF",
+        asset_type=AssetType.CN_ETF,
+    )
+
+    latest = provider.get_latest(instrument)
+
+    assert latest == {
+        "date": pd.Timestamp("2024-01-04"),
+        "open": 1.2,
+        "high": 1.3,
+        "low": 1.19,
+        "close": 1.25,
+        "volume": 1200.0,
+        "amount": 15000.0,
+        "source": "akshare_realtime",
+    }
+    assert fake_ak.calls == [("fund_etf_spot_em", {})]
+
+
+def test_get_latest_reuses_realtime_spot_data_within_ttl() -> None:
+    class RealtimeAkshare(FakeAkshare):
+        def fund_etf_spot_em(self, **kwargs: Any) -> pd.DataFrame:
+            self.calls.append(("fund_etf_spot_em", kwargs))
+            return pd.DataFrame(
+                {
+                    "代码": ["510300", "159915"],
+                    "最新价": ["1.25", "2.35"],
+                    "今开": ["1.20", "2.30"],
+                    "最高": ["1.30", "2.40"],
+                    "最低": ["1.19", "2.29"],
+                    "成交量": ["1200", "2300"],
+                    "成交额": ["15000", "54000"],
+                }
+            )
+
+    fake_ak = RealtimeAkshare()
+    provider = AkshareMarketDataProvider(
+        ak_module=fake_ak,
+        retry_delay_seconds=0,
+        today_factory=lambda: date(2024, 1, 4),
+    )
+
+    first = provider.get_latest(
+        Instrument("510300", "CSI 300 ETF", AssetType.CN_ETF)
+    )
+    second = provider.get_latest(
+        Instrument("159915", "ChiNext ETF", AssetType.CN_ETF)
+    )
+
+    assert first is not None
+    assert first["close"] == 1.25
+    assert second is not None
+    assert second["close"] == 2.35
+    assert fake_ak.calls == [("fund_etf_spot_em", {})]
+
+
 def test_get_latest_returns_last_normalized_row() -> None:
     fake_ak = FakeAkshare()
     provider = AkshareMarketDataProvider(

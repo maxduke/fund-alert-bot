@@ -32,8 +32,10 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 
 DEFAULT_AFTER_CLOSE_CHECK_TIME = "17:10"
+DEFAULT_BEFORE_CLOSE_CHECK_TIME = "14:50"
 DEFAULT_DCA_REMINDER_TIME = "09:30"
 MARKET_AFTER_CLOSE_JOB_ID = "market-after-close-check"
+MARKET_BEFORE_CLOSE_JOB_ID = "market-before-close-check"
 DRAW_DOWN_AFTER_CLOSE_JOB_ID = MARKET_AFTER_CLOSE_JOB_ID
 DCA_MORNING_JOB_ID = "dca-morning-reminder-check"
 WEEKDAY_CRON_FILTER = "mon-fri"
@@ -50,6 +52,12 @@ def parse_after_close_check_time(raw_value: str) -> time:
     """Parse AFTER_CLOSE_CHECK_TIME as HH:MM."""
 
     return _parse_hhmm_time(raw_value, name="AFTER_CLOSE_CHECK_TIME")
+
+
+def parse_before_close_check_time(raw_value: str) -> time:
+    """Parse BEFORE_CLOSE_CHECK_TIME as HH:MM."""
+
+    return _parse_hhmm_time(raw_value, name="BEFORE_CLOSE_CHECK_TIME")
 
 
 def parse_dca_reminder_time(raw_value: str) -> time:
@@ -115,6 +123,7 @@ def register_jobs(
     allowed_user_ids: Collection[int],
     timezone: str,
     check_time: str = DEFAULT_AFTER_CLOSE_CHECK_TIME,
+    before_close_check_time: str = DEFAULT_BEFORE_CLOSE_CHECK_TIME,
     dca_reminder_time: str = DEFAULT_DCA_REMINDER_TIME,
     market_data_provider: MarketDataProvider | None = None,
     market_calendar: MarketCalendar | None = None,
@@ -123,6 +132,7 @@ def register_jobs(
     """Register scheduled alert jobs."""
 
     parsed_time = parse_after_close_check_time(check_time)
+    parsed_before_close_time = parse_before_close_check_time(before_close_check_time)
     parsed_dca_time = parse_dca_reminder_time(dca_reminder_time)
     if market_data_provider is None:
         market_data_provider = AkshareMarketDataProvider()
@@ -159,6 +169,35 @@ def register_jobs(
     )
 
     scheduler.add_job(
+        run_scheduled_before_close_check,
+        trigger=create_weekday_after_close_trigger(
+            check_time=parsed_before_close_time,
+            timezone=timezone,
+        ),
+        id=MARKET_BEFORE_CLOSE_JOB_ID,
+        name="Market before-close realtime drawdown check",
+        kwargs={
+            "application": application,
+            "sqlite_path": sqlite_path,
+            "allowed_user_ids": frozenset(allowed_user_ids),
+            "market_data_provider": market_data_provider,
+            "market_calendar": market_calendar,
+            "timezone": timezone,
+            "notification_settings": notification_settings,
+        },
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        misfire_grace_time=1800,
+    )
+    LOGGER.info(
+        "Registered scheduled realtime drawdown check for %s at %s %s",
+        WEEKDAY_CRON_FILTER,
+        parsed_before_close_time.strftime("%H:%M"),
+        timezone,
+    )
+
+    scheduler.add_job(
         run_scheduled_dca_check,
         trigger=create_daily_dca_trigger(
             reminder_time=parsed_dca_time,
@@ -183,6 +222,98 @@ def register_jobs(
         parsed_dca_time.strftime("%H:%M"),
         timezone,
     )
+
+
+async def run_scheduled_before_close_check(
+    *,
+    application: Application[Any, Any, Any, Any, Any, Any],
+    sqlite_path: str | Path,
+    allowed_user_ids: Collection[int],
+    market_data_provider: MarketDataProvider,
+    timezone: str | tzinfo,
+    market_calendar: MarketCalendar | None = None,
+    run_date: date | None = None,
+    notification_settings: NotificationSettings | None = None,
+) -> None:
+    """Run a before-close realtime drawdown check and send notifications."""
+
+    check_date = run_date or _current_date(timezone)
+    LOGGER.info(
+        "Scheduled realtime drawdown check started date=%s",
+        check_date.isoformat(),
+    )
+    result = None
+    try:
+        if market_calendar is None:
+            market_calendar = CNMarketCalendar()
+        if not market_calendar.is_trading_day(check_date):
+            LOGGER.info(
+                "Scheduled realtime drawdown check skipped date=%s "
+                "reason=market_closed",
+                check_date.isoformat(),
+            )
+            return
+
+        with open_connection(sqlite_path) as connection:
+            initialize_database(connection)
+            result = evaluate_drawdown_rules(
+                connection,
+                market_data_provider,
+                today=check_date,
+                require_new_data_date=check_date,
+                include_latest=True,
+            )
+
+        for status in result.statuses:
+            LOGGER.info(
+                "Realtime drawdown status rule_id=%s symbol=%s drawdown=%.2f%% "
+                "latest_price=%s latest_date=%s peak_price=%s peak_date=%s",
+                status.rule_id,
+                status.symbol,
+                status.drawdown * 100,
+                status.latest_price,
+                status.latest_date,
+                status.peak_price,
+                status.peak_date,
+            )
+        for skip in result.no_data_skips:
+            LOGGER.info(
+                "Scheduled realtime drawdown check skipped rule_id=%s symbol=%s: %s",
+                skip.rule_id,
+                skip.symbol,
+                skip.message,
+            )
+        for error in result.errors:
+            LOGGER.warning(
+                "Scheduled realtime drawdown check error rule_id=%s symbol=%s: %s",
+                error.rule_id,
+                error.symbol,
+                error.message,
+            )
+
+        await send_scheduled_notifications(
+            application=application,
+            sqlite_path=sqlite_path,
+            allowed_user_ids=allowed_user_ids,
+            notifications=result.notifications,
+            notification_settings=notification_settings,
+        )
+    except Exception:
+        LOGGER.exception("Scheduled realtime drawdown check failed")
+        raise
+    finally:
+        if result is None:
+            LOGGER.info("Scheduled realtime drawdown check ended")
+        else:
+            LOGGER.info(
+                "Scheduled realtime drawdown check ended: checked_rules=%d "
+                "new_alerts=%d duplicate_alerts=%d no_data_skips=%d errors=%d",
+                result.checked_rules,
+                len(result.notifications),
+                result.skipped_duplicates,
+                len(result.no_data_skips),
+                len(result.errors),
+            )
 
 
 async def run_scheduled_market_check(

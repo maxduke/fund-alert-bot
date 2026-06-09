@@ -22,7 +22,10 @@ from fund_alert_bot.market_data import (
     MarketDataProvider,
 )
 from fund_alert_bot.rules.dca import build_dca_reminder_alert
-from fund_alert_bot.rules.drawdown import build_drawdown_alerts
+from fund_alert_bot.rules.drawdown import (
+    build_drawdown_alerts,
+    calculate_drawdown_from_high,
+)
 from fund_alert_bot.rules.profit import (
     LatestDataUnavailableError,
     build_profit_alerts,
@@ -32,6 +35,26 @@ from fund_alert_bot.rules.profit import (
 DCA_RULE_TYPE = "dca_reminder"
 DRAW_DOWN_RULE_TYPE = "drawdown_from_high"
 PROFIT_RULE_TYPE = "profit_reminder"
+
+
+@dataclass(frozen=True, slots=True)
+class MarketDataCacheKey:
+    """Market data identity shared by rules for the same instrument code."""
+
+    symbol: str
+    asset_type: AssetType
+
+
+@dataclass(frozen=True, slots=True)
+class DrawdownRuleContext:
+    """Parsed drawdown rule fields used during one evaluator run."""
+
+    row: Any
+    params: dict[str, Any]
+    lookback_days: int
+    start_date: date
+    instrument: Instrument
+    cache_key: MarketDataCacheKey
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +85,20 @@ class RuleCheckError:
 
 
 @dataclass(frozen=True, slots=True)
+class DrawdownRuleStatus:
+    """Current drawdown snapshot for a checked rule."""
+
+    rule_id: int
+    symbol: str
+    name: str
+    latest_date: str
+    latest_price: float
+    peak_date: str
+    peak_price: float
+    drawdown: float
+
+
+@dataclass(frozen=True, slots=True)
 class DrawdownCheckResult:
     """Summary of one drawdown check run."""
 
@@ -70,6 +107,7 @@ class DrawdownCheckResult:
     skipped_duplicates: int
     no_data_skips: list[RuleNoDataSkip]
     errors: list[RuleCheckError]
+    statuses: list[DrawdownRuleStatus]
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +137,7 @@ def evaluate_drawdown_rules(
     *,
     today: date | None = None,
     require_new_data_date: date | None = None,
+    include_latest: bool = False,
 ) -> DrawdownCheckResult:
     """Evaluate all enabled drawdown rules and store new alert events."""
 
@@ -113,26 +152,52 @@ def evaluate_drawdown_rules(
     errors: list[RuleCheckError] = []
     no_data_skips: list[RuleNoDataSkip] = []
     skipped_duplicates = 0
-    history_cache: dict[tuple[Instrument, date, date], pd.DataFrame] = {}
+    statuses: list[DrawdownRuleStatus] = []
+    contexts: list[DrawdownRuleContext] = []
+    market_data_cache = DrawdownMarketDataCache(
+        market_data_provider=market_data_provider,
+        end_date=end_date,
+        include_latest=include_latest,
+    )
 
     for row in rules:
         try:
             params = _load_params(row["params_json"])
             lookback_days = int(params["lookback_days"])
             start_date = end_date - timedelta(days=lookback_days)
+            asset_type = AssetType(row["asset_type"])
             instrument = Instrument(
                 symbol=row["symbol"],
                 name=row["name"],
-                asset_type=AssetType(row["asset_type"]),
+                asset_type=asset_type,
             )
-            history_key = (instrument, start_date, end_date)
-            if history_key not in history_cache:
-                history_cache[history_key] = market_data_provider.get_history(
-                    instrument,
-                    start_date,
-                    end_date,
+            cache_key = MarketDataCacheKey(
+                symbol=str(row["symbol"]),
+                asset_type=asset_type,
+            )
+            context = DrawdownRuleContext(
+                row=row,
+                params=params,
+                lookback_days=lookback_days,
+                start_date=start_date,
+                instrument=instrument,
+                cache_key=cache_key,
+            )
+            contexts.append(context)
+            market_data_cache.register_context(context)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(
+                RuleCheckError(
+                    rule_id=int(row["id"]),
+                    symbol=str(row["symbol"]),
+                    message=str(exc),
                 )
-            history = history_cache[history_key]
+            )
+
+    for context in contexts:
+        row = context.row
+        try:
+            history = market_data_cache.history_for(context)
             if require_new_data_date is not None:
                 latest_data_date = _latest_history_date(history)
                 if latest_data_date != require_new_data_date:
@@ -147,6 +212,24 @@ def evaluate_drawdown_rules(
                         )
                     )
                     continue
+
+            current = calculate_drawdown_from_high(
+                history,
+                lookback_days=context.lookback_days,
+                price_field=str(context.params.get("price_field", "close")),
+            )
+            statuses.append(
+                DrawdownRuleStatus(
+                    rule_id=int(row["id"]),
+                    symbol=str(row["symbol"]),
+                    name=str(row["name"]),
+                    latest_date=str(current["latest_date"]),
+                    latest_price=float(current["latest_price"]),
+                    peak_date=str(current["peak_date"]),
+                    peak_price=float(current["peak_price"]),
+                    drawdown=float(current["drawdown"]),
+                )
+            )
 
             alerts = build_drawdown_alerts(
                 row,
@@ -200,6 +283,7 @@ def evaluate_drawdown_rules(
         skipped_duplicates=skipped_duplicates,
         no_data_skips=no_data_skips,
         errors=errors,
+        statuses=statuses,
     )
 
 
@@ -217,18 +301,23 @@ def evaluate_profit_rules(
     errors: list[RuleCheckError] = []
     no_data_skips: list[RuleNoDataSkip] = []
     skipped_duplicates = 0
-    latest_cache: dict[Instrument, dict[str, object] | None] = {}
+    latest_cache: dict[MarketDataCacheKey, dict[str, object] | None] = {}
 
     for row in rules:
         try:
+            asset_type = AssetType(row["asset_type"])
             instrument = Instrument(
                 symbol=row["symbol"],
                 name=row["name"],
-                asset_type=AssetType(row["asset_type"]),
+                asset_type=asset_type,
             )
-            if instrument not in latest_cache:
-                latest_cache[instrument] = market_data_provider.get_latest(instrument)
-            latest = latest_cache[instrument]
+            cache_key = MarketDataCacheKey(
+                symbol=str(row["symbol"]),
+                asset_type=asset_type,
+            )
+            if cache_key not in latest_cache:
+                latest_cache[cache_key] = market_data_provider.get_latest(instrument)
+            latest = latest_cache[cache_key]
             if latest is None:
                 no_data_skips.append(
                     RuleNoDataSkip(
@@ -362,6 +451,73 @@ def evaluate_dca_rules(
     )
 
 
+class DrawdownMarketDataCache:
+    """Per-run market data cache for drawdown rule evaluation."""
+
+    def __init__(
+        self,
+        *,
+        market_data_provider: MarketDataProvider,
+        end_date: date,
+        include_latest: bool,
+    ) -> None:
+        self._market_data_provider = market_data_provider
+        self._end_date = end_date
+        self._include_latest = include_latest
+        self._earliest_start_by_instrument: dict[MarketDataCacheKey, date] = {}
+        self._history_cache: dict[MarketDataCacheKey, pd.DataFrame] = {}
+        self._history_errors: dict[MarketDataCacheKey, EmptyMarketDataError] = {}
+        self._latest_cache: dict[MarketDataCacheKey, dict[str, object] | None] = {}
+        self._combined_history_cache: dict[MarketDataCacheKey, pd.DataFrame] = {}
+
+    def register_context(self, context: DrawdownRuleContext) -> None:
+        """Record the widest required range for one instrument."""
+
+        earliest_start = self._earliest_start_by_instrument.get(context.cache_key)
+        if earliest_start is None or context.start_date < earliest_start:
+            self._earliest_start_by_instrument[context.cache_key] = context.start_date
+
+    def history_for(self, context: DrawdownRuleContext) -> pd.DataFrame:
+        """Return cached history, optionally merged with cached latest data."""
+
+        history = self._history_for(context)
+        if not self._include_latest:
+            return history
+
+        if context.cache_key in self._combined_history_cache:
+            return self._combined_history_cache[context.cache_key]
+
+        if context.cache_key not in self._latest_cache:
+            self._latest_cache[context.cache_key] = (
+                self._market_data_provider.get_latest(context.instrument)
+            )
+        self._combined_history_cache[context.cache_key] = _append_latest_row(
+            history,
+            self._latest_cache[context.cache_key],
+        )
+        return self._combined_history_cache[context.cache_key]
+
+    def _history_for(self, context: DrawdownRuleContext) -> pd.DataFrame:
+        if context.cache_key in self._history_cache:
+            return self._history_cache[context.cache_key]
+        if context.cache_key in self._history_errors:
+            raise self._history_errors[context.cache_key]
+
+        start_date = self._earliest_start_by_instrument[context.cache_key]
+        try:
+            self._history_cache[context.cache_key] = (
+                self._market_data_provider.get_history(
+                    context.instrument,
+                    start_date,
+                    self._end_date,
+                )
+            )
+        except EmptyMarketDataError as exc:
+            self._history_errors[context.cache_key] = exc
+            raise
+        return self._history_cache[context.cache_key]
+
+
 def _load_params(params_json: str) -> dict[str, Any]:
     params = json.loads(params_json)
     if not isinstance(params, dict):
@@ -389,4 +545,29 @@ def _format_no_data_message(
     return (
         f"No market data available for {expected_date.isoformat()}; "
         f"latest data date is {latest_data_date.isoformat()}."
+    )
+
+
+def _append_latest_row(
+    history: pd.DataFrame,
+    latest: dict[str, object] | None,
+) -> pd.DataFrame:
+    if latest is None:
+        return history
+    if "date" not in latest or "close" not in latest:
+        return history
+
+    latest_date = pd.to_datetime(latest["date"], errors="coerce")
+    if pd.isna(latest_date):
+        return history
+
+    latest_row = {column: latest.get(column) for column in history.columns}
+    latest_row["date"] = latest_date.normalize()
+    frame = pd.concat([history, pd.DataFrame([latest_row])], ignore_index=True)
+    frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+    frame = frame.dropna(subset=["date"])
+    return (
+        frame.sort_values("date", ascending=True)
+        .drop_duplicates(subset=["date"], keep="last")
+        .reset_index(drop=True)
     )

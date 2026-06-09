@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Callable
 from datetime import date, timedelta
@@ -29,18 +30,26 @@ class AkshareMarketDataProvider(MarketDataProvider):
         retries: int = 3,
         retry_delay_seconds: float = 0.5,
         latest_lookback_days: int = 45,
+        realtime_spot_ttl_seconds: float = 30.0,
         today_factory: Callable[[], date] = date.today,
     ) -> None:
         if retries < 1:
             raise ValueError("retries must be at least 1")
         if latest_lookback_days < 1:
             raise ValueError("latest_lookback_days must be at least 1")
+        if (
+            not math.isfinite(realtime_spot_ttl_seconds)
+            or realtime_spot_ttl_seconds < 0
+        ):
+            raise ValueError("realtime_spot_ttl_seconds must be non-negative")
 
         self._ak_module = ak_module
         self._retries = retries
         self._retry_delay_seconds = retry_delay_seconds
         self._latest_lookback_days = latest_lookback_days
+        self._realtime_spot_ttl_seconds = realtime_spot_ttl_seconds
         self._today_factory = today_factory
+        self._realtime_spot_cache: dict[AssetType, tuple[float, pd.DataFrame]] = {}
 
     def get_history(
         self,
@@ -63,7 +72,11 @@ class AkshareMarketDataProvider(MarketDataProvider):
         return history[NORMALIZED_COLUMNS]
 
     def get_latest(self, instrument: Instrument) -> dict[str, object] | None:
-        """Return the last normalized historical row for now."""
+        """Return the latest normalized row, preferring realtime spot data."""
+
+        realtime = self._get_realtime_latest(instrument)
+        if realtime is not None:
+            return realtime
 
         end_date = self._today_factory()
         start_date = end_date - timedelta(days=self._latest_lookback_days)
@@ -76,6 +89,87 @@ class AkshareMarketDataProvider(MarketDataProvider):
         return {
             key: None if pd.isna(value) else value for key, value in latest_row.items()
         }
+
+    def _get_realtime_latest(
+        self,
+        instrument: Instrument,
+    ) -> dict[str, object] | None:
+        asset_type = self._resolve_asset_type(instrument.asset_type)
+        if asset_type is AssetType.CN_OPEN_FUND:
+            return None
+
+        raw_data = self._fetch_raw_realtime(asset_type)
+        if raw_data is None or raw_data.empty or "代码" not in raw_data.columns:
+            return None
+
+        symbol = _strip_exchange_prefix(instrument.symbol)
+        matched = raw_data.loc[raw_data["代码"].astype(str) == symbol]
+        if matched.empty:
+            return None
+
+        row = matched.iloc[0]
+        close = _read_realtime_float(row, "最新价")
+        if close is None:
+            return None
+
+        return {
+            "date": pd.Timestamp(self._today_factory()),
+            "open": _read_realtime_float(row, "今开"),
+            "high": _read_realtime_float(row, "最高"),
+            "low": _read_realtime_float(row, "最低"),
+            "close": close,
+            "volume": _read_realtime_float(row, "成交量"),
+            "amount": _read_realtime_float(row, "成交额"),
+            "source": "akshare_realtime",
+        }
+
+    def _fetch_raw_realtime(self, asset_type: AssetType) -> pd.DataFrame | None:
+        cached = self._read_realtime_spot_cache(asset_type)
+        if cached is not None:
+            return cached
+
+        ak_module = self._akshare
+        try:
+            if asset_type is AssetType.CN_INDEX:
+                raw_data = self._call_with_retry(ak_module.stock_zh_index_spot_em)
+            elif asset_type is AssetType.CN_ETF:
+                raw_data = self._call_with_retry(ak_module.fund_etf_spot_em)
+            elif asset_type is AssetType.CN_STOCK:
+                raw_data = self._call_with_retry(ak_module.stock_zh_a_spot_em)
+            else:
+                return None
+        except (AttributeError, MarketDataFetchError):
+            return None
+
+        self._write_realtime_spot_cache(asset_type, raw_data)
+        return raw_data
+
+    def _read_realtime_spot_cache(
+        self,
+        asset_type: AssetType,
+    ) -> pd.DataFrame | None:
+        if self._realtime_spot_ttl_seconds <= 0:
+            return None
+
+        cached = self._realtime_spot_cache.get(asset_type)
+        if cached is None:
+            return None
+
+        cached_at, raw_data = cached
+        if time.monotonic() - cached_at <= self._realtime_spot_ttl_seconds:
+            return raw_data
+
+        self._realtime_spot_cache.pop(asset_type, None)
+        return None
+
+    def _write_realtime_spot_cache(
+        self,
+        asset_type: AssetType,
+        raw_data: pd.DataFrame,
+    ) -> None:
+        if self._realtime_spot_ttl_seconds <= 0:
+            return
+        self._realtime_spot_cache[asset_type] = (time.monotonic(), raw_data)
 
     def _fetch_raw_history(
         self,
@@ -214,3 +308,19 @@ def _format_cn_index_symbol(symbol: str) -> str:
     if normalized.startswith("399"):
         return f"sz{normalized}"
     return f"sh{normalized}"
+
+
+def _strip_exchange_prefix(symbol: str) -> str:
+    normalized = symbol.lower()
+    if normalized.startswith(("sh", "sz")):
+        return normalized[2:]
+    return symbol
+
+
+def _read_realtime_float(row: pd.Series, column: str) -> float | None:
+    if column not in row:
+        return None
+    value = pd.to_numeric(row[column], errors="coerce")
+    if pd.isna(value):
+        return None
+    return float(value)
