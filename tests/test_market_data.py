@@ -284,12 +284,8 @@ def test_get_latest_reuses_realtime_spot_data_within_ttl() -> None:
         today_factory=lambda: date(2024, 1, 4),
     )
 
-    first = provider.get_latest(
-        Instrument("510300", "CSI 300 ETF", AssetType.CN_ETF)
-    )
-    second = provider.get_latest(
-        Instrument("159915", "ChiNext ETF", AssetType.CN_ETF)
-    )
+    first = provider.get_latest(Instrument("510300", "CSI 300 ETF", AssetType.CN_ETF))
+    second = provider.get_latest(Instrument("159915", "ChiNext ETF", AssetType.CN_ETF))
 
     assert first is not None
     assert first["close"] == 1.25
