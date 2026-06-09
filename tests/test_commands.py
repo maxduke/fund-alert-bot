@@ -32,6 +32,51 @@ from fund_alert_bot.db import add_rule, connect, init_db, list_rules, open_conne
 from fund_alert_bot.market_data import AssetType, Instrument
 from fund_alert_bot.rules.dca import weekday_for_date
 
+EXPECTED_DRAWDOWN_10_MESSAGE = "\n".join(
+    (
+        "📉 Drawdown reminder",
+        "",
+        "• Symbol: 399006",
+        "• Name: 创业板指",
+        "• Asset type: cn_index",
+        "• Lookback: 365 days",
+        "• Drawdown: 10.0%",
+        "• Triggered threshold: 10.0%",
+        "• Peak: 100 on 2024-01-01",
+        "• Latest: 90 on 2024-01-02",
+        "",
+        "Reminder: this is not automatic trading and no orders will be placed.",
+    )
+)
+
+EXPECTED_DCA_MESSAGE = "\n".join(
+    (
+        "💰 DCA reminder",
+        "",
+        "• 标的：创业板",
+        "• 日期：2024-01-04",
+        "• 计划金额：1000 元",
+        "",
+        "提醒：这是纪律提醒，不会自动交易。",
+    )
+)
+
+EXPECTED_PROFIT_MESSAGE = "\n".join(
+    (
+        "💵 Profit-taking reminder",
+        "",
+        "• Symbol: 159915",
+        "• Name: ChiNext ETF",
+        "• Asset type: cn_etf",
+        "• Cost: 1.85",
+        "• Latest price: 2.4",
+        "• Profit rate: 29.7%",
+        "• Triggered threshold: 25.0%",
+        "",
+        "Reminder: this is not automatic trading and no orders will be placed.",
+    )
+)
+
 
 def test_parse_valid_drawdown_command() -> None:
     command = parse_add_drawdown_args(
@@ -165,8 +210,8 @@ def test_manual_check_summary_shows_current_drawdown_percent() -> None:
     finally:
         connection.close()
 
-    assert "Current drawdowns:" in response
-    assert "Rule 1 399006 创业板指: 10.0% from high 100 on 2024-01-01" in response
+    assert "📉 Current drawdowns" in response
+    assert "Rule 1 399006 · 创业板指: 10.0% from high 100 on 2024-01-01" in response
 
 
 def test_drawdown_check_reuses_history_for_same_code_ranges() -> None:
@@ -284,7 +329,7 @@ def test_check_retries_alert_after_delivery_failure(tmp_path) -> None:
     assert "Notification delivery failures: 1." in failing_message.replies[0]
     assert sent_status == "sent"
     assert success_context.bot.messages == [
-        {"chat_id": 456, "text": "399006 is down 10.0% from its 365-day high."}
+        {"chat_id": 456, "text": EXPECTED_DRAWDOWN_10_MESSAGE}
     ]
 
 
@@ -483,13 +528,14 @@ def test_check_sends_due_dca_without_market_data_fetch(tmp_path) -> None:
     asyncio.run(_handler_by_command(handlers, "check").callback(update, context))
 
     assert provider.calls == []
+    expected_dca_message = EXPECTED_DCA_MESSAGE.replace(
+        "2024-01-04",
+        date.today().isoformat(),
+    )
     assert context.bot.messages == [
         {
             "chat_id": 456,
-            "text": (
-                "今天是 创业板 定投日，计划定投 1000 元。\n"
-                "提醒：这是纪律提醒，不会自动交易。"
-            ),
+            "text": expected_dca_message,
         }
     ]
     assert "Checked 1 dca_reminder rule(s)." in message.replies[0]
@@ -531,17 +577,7 @@ def test_check_evaluates_profit_rules_with_latest_data(tmp_path) -> None:
     assert context.bot.messages == [
         {
             "chat_id": 456,
-            "text": (
-                "Profit-taking reminder\n"
-                "Symbol: 159915\n"
-                "Name: ChiNext ETF\n"
-                "Asset type: cn_etf\n"
-                "Cost: 1.85\n"
-                "Latest price: 2.4\n"
-                "Profit rate: 29.7%\n"
-                "Triggered threshold: 25.0%\n"
-                "Reminder: this is not automatic trading and no orders will be placed."
-            ),
+            "text": EXPECTED_PROFIT_MESSAGE,
         }
     ]
     assert "Checked 1 profit_reminder rule(s)." in message.replies[0]
@@ -618,7 +654,7 @@ def test_test_notify_sends_to_enabled_channels(monkeypatch) -> None:
         {
             "url": "https://hooks.example.test/secret",
             "json": {
-                "title": "fund-alert-bot test",
+                "title": "🧪 fund-alert-bot test",
                 "body": TEST_NOTIFICATION_MESSAGE,
             },
             "timeout": 10,

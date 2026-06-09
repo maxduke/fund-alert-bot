@@ -15,6 +15,68 @@ from fund_alert_bot.config import NotificationSettings
 from fund_alert_bot.db import add_rule, initialize_database, open_connection
 from fund_alert_bot.market_data import AssetType, Instrument
 
+EXPECTED_DRAWDOWN_10_MESSAGE = "\n".join(
+    (
+        "📉 Drawdown reminder",
+        "",
+        "• Symbol: 399006",
+        "• Name: ChiNext Index",
+        "• Asset type: cn_index",
+        "• Lookback: 365 days",
+        "• Drawdown: 10.0%",
+        "• Triggered threshold: 10.0%",
+        "• Peak: 100 on 2024-01-01",
+        "• Latest: 90 on 2024-01-02",
+        "",
+        "Reminder: this is not automatic trading and no orders will be placed.",
+    )
+)
+
+EXPECTED_DRAWDOWN_11_MESSAGE = "\n".join(
+    (
+        "📉 Drawdown reminder",
+        "",
+        "• Symbol: 399006",
+        "• Name: ChiNext Index",
+        "• Asset type: cn_index",
+        "• Lookback: 365 days",
+        "• Drawdown: 11.0%",
+        "• Triggered threshold: 10.0%",
+        "• Peak: 100 on 2024-01-01",
+        "• Latest: 89 on 2024-01-02",
+        "",
+        "Reminder: this is not automatic trading and no orders will be placed.",
+    )
+)
+
+EXPECTED_DCA_MESSAGE = "\n".join(
+    (
+        "💰 DCA reminder",
+        "",
+        "• 标的：创业板",
+        "• 日期：2024-01-04",
+        "• 计划金额：1000 元",
+        "",
+        "提醒：这是纪律提醒，不会自动交易。",
+    )
+)
+
+EXPECTED_PROFIT_MESSAGE = "\n".join(
+    (
+        "💵 Profit-taking reminder",
+        "",
+        "• Symbol: 159915",
+        "• Name: ChiNext ETF",
+        "• Asset type: cn_etf",
+        "• Cost: 1.85",
+        "• Latest price: 2.4",
+        "• Profit rate: 29.7%",
+        "• Triggered threshold: 25.0%",
+        "",
+        "Reminder: this is not automatic trading and no orders will be placed.",
+    )
+)
+
 
 def test_scheduler_time_parsing() -> None:
     parsed_time = scheduler.parse_after_close_check_time("17:10")
@@ -127,14 +189,14 @@ def test_scheduled_check_prevents_duplicate_alerts_by_alert_key(
 
     assert event_row["notification_status"] == "sent"
     assert application.bot.messages == [
-        {"chat_id": 123, "text": "399006 is down 10.0% from its 365-day high."}
+        {"chat_id": 123, "text": EXPECTED_DRAWDOWN_10_MESSAGE}
     ]
     assert webhook_calls == [
         {
             "url": "https://hooks.example.test/secret",
             "json": {
-                "title": "Drawdown reminder",
-                "body": "399006 is down 10.0% from its 365-day high.",
+                "title": "📉 Drawdown reminder",
+                "body": EXPECTED_DRAWDOWN_10_MESSAGE,
             },
             "timeout": 10,
         }
@@ -261,7 +323,7 @@ def test_scheduled_before_close_check_uses_latest_drawdown_price(
 
     assert [call.asset_type for call in provider.latest_calls] == [AssetType.CN_INDEX]
     assert application.bot.messages == [
-        {"chat_id": 123, "text": "399006 is down 11.0% from its 365-day high."}
+        {"chat_id": 123, "text": EXPECTED_DRAWDOWN_11_MESSAGE}
     ]
 
 
@@ -334,17 +396,7 @@ def test_scheduled_market_check_evaluates_profit_rules(
     assert application.bot.messages == [
         {
             "chat_id": 123,
-            "text": (
-                "Profit-taking reminder\n"
-                "Symbol: 159915\n"
-                "Name: ChiNext ETF\n"
-                "Asset type: cn_etf\n"
-                "Cost: 1.85\n"
-                "Latest price: 2.4\n"
-                "Profit rate: 29.7%\n"
-                "Triggered threshold: 25.0%\n"
-                "Reminder: this is not automatic trading and no orders will be placed."
-            ),
+            "text": EXPECTED_PROFIT_MESSAGE,
         }
     ]
 
@@ -391,16 +443,14 @@ def test_scheduled_dca_check_prevents_duplicate_alerts_by_alert_key(
             """
         ).fetchall()
 
-    expected_message = (
-        "今天是 创业板 定投日，计划定投 1000 元。\n提醒：这是纪律提醒，不会自动交易。"
-    )
+    expected_message = EXPECTED_DCA_MESSAGE
     assert [row["alert_key"] for row in event_rows] == ["dca:1:2024-01-04"]
     assert application.bot.messages == [{"chat_id": 123, "text": expected_message}]
     assert webhook_calls == [
         {
             "url": "https://hooks.example.test/secret",
             "json": {
-                "title": "DCA reminder",
+                "title": "💰 DCA reminder",
                 "body": expected_message,
             },
             "timeout": 10,

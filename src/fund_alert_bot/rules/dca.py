@@ -75,10 +75,17 @@ def build_dca_reminder_alert(
     due_date = today.isoformat()
     return {
         "alert_key": alert_key,
-        "title": "DCA reminder",
-        "message": (
-            f"今天是 {name} 定投日，计划定投 {_format_amount(amount)} 元。\n"
-            "提醒：这是纪律提醒，不会自动交易。"
+        "title": "💰 DCA reminder",
+        "message": "\n".join(
+            (
+                "💰 DCA reminder",
+                "",
+                f"• 标的：{name}",
+                f"• 日期：{due_date}",
+                f"• 计划金额：{_format_amount(amount)} 元",
+                "",
+                "提醒：这是纪律提醒，不会自动交易。",
+            )
         ),
         "payload": {
             "rule_id": rule_id,

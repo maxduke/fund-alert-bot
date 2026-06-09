@@ -105,10 +105,18 @@ def build_drawdown_alerts(
         alerts.append(
             {
                 "alert_key": alert_key,
-                "title": "Drawdown reminder",
-                "message": (
-                    f"{symbol} is down {drawdown:.1%} from its "
-                    f"{lookback_days}-day high."
+                "title": "📉 Drawdown reminder",
+                "message": _build_message(
+                    symbol=symbol,
+                    name=name,
+                    asset_type=asset_type,
+                    lookback_days=lookback_days,
+                    latest_date=str(result["latest_date"]),
+                    latest_price=float(result["latest_price"]),
+                    peak_date=str(result["peak_date"]),
+                    peak_price=float(result["peak_price"]),
+                    drawdown=drawdown,
+                    threshold=threshold,
                 ),
                 "payload": {
                     "symbol": symbol,
@@ -126,6 +134,41 @@ def build_drawdown_alerts(
         )
 
     return alerts
+
+
+def _build_message(
+    *,
+    symbol: str,
+    name: str,
+    asset_type: str,
+    lookback_days: int,
+    latest_date: str,
+    latest_price: float,
+    peak_date: str,
+    peak_price: float,
+    drawdown: float,
+    threshold: float,
+) -> str:
+    return "\n".join(
+        (
+            "📉 Drawdown reminder",
+            "",
+            f"• Symbol: {symbol}",
+            f"• Name: {name}",
+            f"• Asset type: {asset_type}",
+            f"• Lookback: {lookback_days} days",
+            f"• Drawdown: {drawdown:.1%}",
+            f"• Triggered threshold: {threshold:.1%}",
+            f"• Peak: {_format_price(peak_price)} on {peak_date}",
+            f"• Latest: {_format_price(latest_price)} on {latest_date}",
+            "",
+            "Reminder: this is not automatic trading and no orders will be placed.",
+        )
+    )
+
+
+def _format_price(value: float) -> str:
+    return f"{value:.12g}"
 
 
 def _read_params(rule: Any) -> dict[str, Any]:
