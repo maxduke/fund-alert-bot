@@ -19,8 +19,7 @@ def configure_logging() -> None:
     logging.basicConfig(
         level=logging.INFO,
         format=(
-            "%(asctime)s %(levelname)s [%(name)s] "
-            "%(filename)s:%(lineno)d %(message)s"
+            "%(asctime)s %(levelname)s [%(name)s] %(filename)s:%(lineno)d %(message)s"
         ),
         stream=sys.stdout,
         force=True,
