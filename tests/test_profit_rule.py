@@ -39,8 +39,8 @@ def test_profit_rule_triggers_crossed_thresholds() -> None:
         "threshold": 0.25,
         "source": "test",
     }
-    assert "Symbol: 159915" in str(alert["message"])
-    assert "Latest price: 2.4" in str(alert["message"])
+    assert "• Symbol: 159915" in str(alert["message"])
+    assert "• Latest price: 2.4" in str(alert["message"])
     assert "Profit rate: 29.7%" in str(alert["message"])
     assert "Triggered threshold: 25.0%" in str(alert["message"])
     assert "not automatic trading" in str(alert["message"])

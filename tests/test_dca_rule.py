@@ -56,8 +56,16 @@ def test_dca_rule_builds_due_alert() -> None:
     assert alert is not None
     assert alert["alert_key"] == "dca:7:2024-01-04"
     assert alert["title"] == "DCA reminder"
-    assert alert["message"] == (
-        "今天是 创业板 定投日，计划定投 1000 元。\n提醒：这是纪律提醒，不会自动交易。"
+    assert alert["message"] == "\n".join(
+        (
+            "💰 DCA reminder",
+            "",
+            "• 标的：创业板",
+            "• 日期：2024-01-04",
+            "• 计划金额：1000 元",
+            "",
+            "提醒：这是纪律提醒，不会自动交易。",
+        )
     )
     assert alert["payload"] == {
         "rule_id": 7,
@@ -124,8 +132,16 @@ def test_evaluate_dca_rules_sends_once_per_day() -> None:
     assert len(first_result.notifications) == 1
     assert len(second_result.notifications) == 0
     assert [row["alert_key"] for row in event_rows] == [f"dca:{rule_id}:2024-01-04"]
-    assert event_rows[0]["message"] == (
-        "今天是 创业板 定投日，计划定投 1000 元。\n提醒：这是纪律提醒，不会自动交易。"
+    assert event_rows[0]["message"] == "\n".join(
+        (
+            "💰 DCA reminder",
+            "",
+            "• 标的：创业板",
+            "• 日期：2024-01-04",
+            "• 计划金额：1000 元",
+            "",
+            "提醒：这是纪律提醒，不会自动交易。",
+        )
     )
 
 

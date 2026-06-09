@@ -72,7 +72,14 @@ NO_RULES_TO_CHECK_MESSAGE = (
     "No enabled drawdown_from_high, profit_reminder, or dca_reminder rules to check"
 )
 TEST_NOTIFICATION_TITLE = "fund-alert-bot test"
-TEST_NOTIFICATION_MESSAGE = "Test notification from fund-alert-bot."
+TEST_NOTIFICATION_MESSAGE = "\n".join(
+    (
+        "🧪 Test notification",
+        "",
+        "• Source: fund-alert-bot",
+        "• Purpose: channel connectivity check",
+    )
+)
 UNAUTHORIZED_MESSAGE = "You are not allowed to use this bot."
 
 
@@ -312,22 +319,26 @@ def format_check_summary(
 
     alert_count = len(result.notifications)
     parts = [
-        f"Checked {result.checked_rules} drawdown_from_high rule(s).",
-        f"New alerts: {alert_count}.",
+        "📋 Check summary",
+        "",
+        f"✅ Checked {result.checked_rules} drawdown_from_high rule(s).",
+        f"🔔 New alerts: {alert_count}.",
     ]
     if alert_count == 0:
-        parts.append("No alerts triggered.")
+        parts.append("👌 No alerts triggered.")
     _append_drawdown_statuses(parts, result)
     if result.skipped_duplicates:
-        parts.append(f"Duplicate alerts skipped: {result.skipped_duplicates}.")
+        parts.append(f"♻️ Duplicate alerts skipped: {result.skipped_duplicates}.")
     if result.no_data_skips:
-        parts.append(f"No-data skips: {len(result.no_data_skips)}.")
+        parts.append("")
+        parts.append(f"⚠️ No-data skips: {len(result.no_data_skips)}.")
         for skip in result.no_data_skips:
-            parts.append(f"Rule {skip.rule_id} {skip.symbol}: {skip.message}")
+            parts.append(f"• Rule {skip.rule_id} {skip.symbol}: {skip.message}")
     if result.errors:
-        parts.append(f"Errors: {len(result.errors)}.")
+        parts.append("")
+        parts.append(f"❌ Errors: {len(result.errors)}.")
         for error in result.errors:
-            parts.append(f"Rule {error.rule_id} {error.symbol}: {error.message}")
+            parts.append(f"• Rule {error.rule_id} {error.symbol}: {error.message}")
     return "\n".join(parts)
 
 
@@ -350,13 +361,15 @@ def _format_combined_check_summary(
         + len(dca_notifications)
     )
     parts = [
-        f"Checked {drawdown_result.checked_rules} drawdown_from_high rule(s).",
-        f"Checked {profit_checked} profit_reminder rule(s).",
-        f"Checked {dca_checked} dca_reminder rule(s).",
-        f"New alerts: {alert_count}.",
+        "📋 Check summary",
+        "",
+        f"✅ Checked {drawdown_result.checked_rules} drawdown_from_high rule(s).",
+        f"✅ Checked {profit_checked} profit_reminder rule(s).",
+        f"✅ Checked {dca_checked} dca_reminder rule(s).",
+        f"🔔 New alerts: {alert_count}.",
     ]
     if alert_count == 0:
-        parts.append("No alerts triggered.")
+        parts.append("👌 No alerts triggered.")
     _append_drawdown_statuses(parts, drawdown_result)
 
     dca_duplicates = 0 if dca_result is None else dca_result.skipped_duplicates
@@ -365,22 +378,24 @@ def _format_combined_check_summary(
         drawdown_result.skipped_duplicates + profit_duplicates + dca_duplicates
     )
     if skipped_duplicates:
-        parts.append(f"Duplicate alerts skipped: {skipped_duplicates}.")
+        parts.append(f"♻️ Duplicate alerts skipped: {skipped_duplicates}.")
 
     profit_no_data_skips = [] if profit_result is None else profit_result.no_data_skips
     no_data_skips = [*drawdown_result.no_data_skips, *profit_no_data_skips]
     if no_data_skips:
-        parts.append(f"No-data skips: {len(no_data_skips)}.")
+        parts.append("")
+        parts.append(f"⚠️ No-data skips: {len(no_data_skips)}.")
         for skip in no_data_skips:
-            parts.append(f"Rule {skip.rule_id} {skip.symbol}: {skip.message}")
+            parts.append(f"• Rule {skip.rule_id} {skip.symbol}: {skip.message}")
 
     dca_errors = [] if dca_result is None else dca_result.errors
     profit_errors = [] if profit_result is None else profit_result.errors
     errors = [*drawdown_result.errors, *profit_errors, *dca_errors]
     if errors:
-        parts.append(f"Errors: {len(errors)}.")
+        parts.append("")
+        parts.append(f"❌ Errors: {len(errors)}.")
         for error in errors:
-            parts.append(f"Rule {error.rule_id} {error.symbol}: {error.message}")
+            parts.append(f"• Rule {error.rule_id} {error.symbol}: {error.message}")
 
     return "\n".join(parts)
 
@@ -392,11 +407,12 @@ def _append_drawdown_statuses(
     if not result.statuses:
         return
 
-    parts.append("Current drawdowns:")
+    parts.append("")
+    parts.append("📉 Current drawdowns")
     for status in result.statuses:
-        name = f" {status.name}" if status.name else ""
+        name = f" · {status.name}" if status.name else ""
         parts.append(
-            f"Rule {status.rule_id} {status.symbol}{name}: "
+            f"• Rule {status.rule_id} {status.symbol}{name}: "
             f"{status.drawdown:.1%} from high "
             f"{status.peak_price:.4g} on {status.peak_date}; "
             f"latest {status.latest_price:.4g} on {status.latest_date}."

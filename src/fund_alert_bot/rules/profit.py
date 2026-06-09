@@ -220,14 +220,16 @@ def _build_message(
 ) -> str:
     return "\n".join(
         (
-            "Profit-taking reminder",
-            f"Symbol: {symbol}",
-            f"Name: {name}",
-            f"Asset type: {asset_type}",
-            f"Cost: {_format_number(cost)}",
-            f"{_price_label(asset_type)}: {_format_number(current_price)}",
-            f"Profit rate: {profit_rate:.1%}",
-            f"Triggered threshold: {threshold:.1%}",
+            "💵 Profit-taking reminder",
+            "",
+            f"• Symbol: {symbol}",
+            f"• Name: {name}",
+            f"• Asset type: {asset_type}",
+            f"• Cost: {_format_number(cost)}",
+            f"• {_price_label(asset_type)}: {_format_number(current_price)}",
+            f"• Profit rate: {profit_rate:.1%}",
+            f"• Triggered threshold: {threshold:.1%}",
+            "",
             "Reminder: this is not automatic trading and no orders will be placed.",
         )
     )
