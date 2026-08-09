@@ -4,6 +4,11 @@ from fund_alert_bot.rules.drawdown import (
     build_drawdown_alerts,
     calculate_drawdown_from_high,
 )
+from fund_alert_bot.rules.drawdown_plan import (
+    calculate_sma,
+    calculate_sma_distance,
+    calculate_sma_slope,
+)
 from fund_alert_bot.rules.profit import (
     build_profit_alert_key,
     build_profit_alerts,
@@ -16,4 +21,7 @@ __all__ = [
     "build_profit_alerts",
     "calculate_drawdown_from_high",
     "calculate_profit_rate",
+    "calculate_sma",
+    "calculate_sma_distance",
+    "calculate_sma_slope",
 ]
