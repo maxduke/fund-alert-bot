@@ -4,7 +4,9 @@ from datetime import date
 from typing import Any
 
 import pandas as pd
+import pytest
 
+from fund_alert_bot.market_data import MarketCalendarUnavailableError
 from fund_alert_bot.market_data.calendar import CNMarketCalendar
 
 
@@ -88,3 +90,25 @@ def test_cn_market_calendar_handles_dataframe_like_payloads() -> None:
     calendar = CNMarketCalendar(ak_module=fake_ak)
 
     assert calendar.is_trading_day(date(2024, 1, 2)) is True
+
+
+def test_confirmed_calendar_status_requires_date_inside_provider_coverage() -> None:
+    calendar = CNMarketCalendar(
+        ak_module=FakeAkshareCalendar(
+            pd.DataFrame({"trade_date": ["2024-01-02", "2024-01-04"]})
+        )
+    )
+
+    assert calendar.confirmed_status(date(2024, 1, 2)) is True
+    assert calendar.confirmed_status(date(2024, 1, 3)) is False
+    with pytest.raises(MarketCalendarUnavailableError, match="does not cover"):
+        calendar.confirmed_status(date(2024, 1, 5))
+
+
+def test_confirmed_calendar_status_never_uses_weekday_fallback() -> None:
+    calendar = CNMarketCalendar(
+        ak_module=FakeAkshareCalendar(error=RuntimeError("unavailable"))
+    )
+
+    with pytest.raises(MarketCalendarUnavailableError, match="unavailable"):
+        calendar.confirmed_status(date(2024, 1, 2))

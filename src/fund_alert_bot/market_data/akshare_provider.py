@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import time
 from collections.abc import Callable
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import pandas as pd
@@ -15,7 +15,12 @@ from fund_alert_bot.market_data.exceptions import (
     MarketDataFetchError,
     UnsupportedAssetTypeError,
 )
-from fund_alert_bot.market_data.models import AssetType, Instrument
+from fund_alert_bot.market_data.models import (
+    AssetType,
+    Instrument,
+    PriceBasis,
+    RealtimeQuote,
+)
 from fund_alert_bot.market_data.normalize import NORMALIZED_COLUMNS, normalize_history
 from fund_alert_bot.market_data.provider import DateLike, MarketDataProvider
 
@@ -32,6 +37,7 @@ class AkshareMarketDataProvider(MarketDataProvider):
         latest_lookback_days: int = 45,
         realtime_spot_ttl_seconds: float = 30.0,
         today_factory: Callable[[], date] = date.today,
+        now_factory: Callable[[], datetime] | None = None,
     ) -> None:
         if retries < 1:
             raise ValueError("retries must be at least 1")
@@ -49,19 +55,30 @@ class AkshareMarketDataProvider(MarketDataProvider):
         self._latest_lookback_days = latest_lookback_days
         self._realtime_spot_ttl_seconds = realtime_spot_ttl_seconds
         self._today_factory = today_factory
+        self._now_factory = now_factory or (lambda: datetime.now(UTC))
         self._realtime_spot_cache: dict[AssetType, tuple[float, pd.DataFrame]] = {}
+        self._sina_etf_spot_cache: tuple[float, pd.DataFrame] | None = None
 
     def get_history(
         self,
         instrument: Instrument,
         start_date: DateLike,
         end_date: DateLike,
+        *,
+        price_basis: PriceBasis = PriceBasis.UNADJUSTED,
     ) -> pd.DataFrame:
         """Return normalized daily history for an instrument."""
 
         asset_type = self._resolve_asset_type(instrument.asset_type)
-        raw_data = self._fetch_raw_history(instrument, asset_type, start_date, end_date)
-        history = normalize_history(raw_data, asset_type, source="akshare")
+        basis = self._resolve_price_basis(price_basis)
+        raw_data, source = self._fetch_raw_history(
+            instrument,
+            asset_type,
+            start_date,
+            end_date,
+            basis,
+        )
+        history = normalize_history(raw_data, asset_type, source=source)
         history = self._filter_by_date(history, start_date, end_date)
 
         if history.empty:
@@ -69,7 +86,49 @@ class AkshareMarketDataProvider(MarketDataProvider):
                 f"No market data returned for {instrument.symbol} "
                 f"between {start_date} and {end_date}."
             )
-        return history[NORMALIZED_COLUMNS]
+        result = history[NORMALIZED_COLUMNS].copy()
+        result.attrs.update(
+            {
+                "symbol": _strip_exchange_prefix(instrument.symbol),
+                "source": source,
+                "price_basis": basis.value,
+                "frequency": "daily",
+            }
+        )
+        return result
+
+    def get_etf_realtime_quote(self, instrument: Instrument) -> RealtimeQuote:
+        """Return an ETF quote from Eastmoney or the Sina pre-alert fallback."""
+
+        if self._resolve_asset_type(instrument.asset_type) is not AssetType.CN_ETF:
+            raise UnsupportedAssetTypeError("Realtime plan quotes require cn_etf.")
+
+        symbol = _strip_exchange_prefix(instrument.symbol)
+        raw_data = self._fetch_raw_realtime(AssetType.CN_ETF)
+        row = _find_realtime_row(raw_data, symbol)
+        if row is not None and _read_realtime_float(row, "最新价") is not None:
+            return self._build_etf_quote(row, symbol=symbol, source="eastmoney")
+
+        return self.get_sina_etf_realtime_quote(instrument)
+
+    def get_sina_etf_realtime_quote(self, instrument: Instrument) -> RealtimeQuote:
+        """Return the Sina fallback separately after Eastmoney validation fails."""
+
+        if self._resolve_asset_type(instrument.asset_type) is not AssetType.CN_ETF:
+            raise UnsupportedAssetTypeError("Realtime plan quotes require cn_etf.")
+        symbol = _strip_exchange_prefix(instrument.symbol)
+        sina_data = self._fetch_sina_etf_realtime()
+        sina_row = _find_realtime_row(
+            sina_data,
+            _format_sina_etf_symbol(symbol),
+        )
+        if sina_row is None:
+            raise EmptyMarketDataError(f"No realtime ETF quote returned for {symbol}.")
+        return self._build_etf_quote(
+            sina_row,
+            symbol=symbol,
+            source="sina_fallback",
+        )
 
     def get_latest(self, instrument: Instrument) -> dict[str, object] | None:
         """Return the latest normalized row, preferring realtime spot data."""
@@ -114,14 +173,31 @@ class AkshareMarketDataProvider(MarketDataProvider):
 
         return {
             "date": pd.Timestamp(self._today_factory()),
-            "open": _read_realtime_float(row, "今开"),
-            "high": _read_realtime_float(row, "最高"),
-            "low": _read_realtime_float(row, "最低"),
+            "open": _read_first_realtime_float(row, "开盘价", "今开"),
+            "high": _read_first_realtime_float(row, "最高价", "最高"),
+            "low": _read_first_realtime_float(row, "最低价", "最低"),
             "close": close,
             "volume": _read_realtime_float(row, "成交量"),
             "amount": _read_realtime_float(row, "成交额"),
             "source": "akshare_realtime",
         }
+
+    def _build_etf_quote(
+        self,
+        row: pd.Series,
+        *,
+        symbol: str,
+        source: str,
+    ) -> RealtimeQuote:
+        return RealtimeQuote(
+            symbol=symbol,
+            price=_read_realtime_float(row, "最新价"),
+            previous_close=_read_realtime_float(row, "昨收"),
+            volume=_read_realtime_float(row, "成交量"),
+            amount=_read_realtime_float(row, "成交额"),
+            source=source,
+            fetched_at=self._now_factory(),
+        )
 
     def _fetch_raw_realtime(self, asset_type: AssetType) -> pd.DataFrame | None:
         cached = self._read_realtime_spot_cache(asset_type)
@@ -177,32 +253,55 @@ class AkshareMarketDataProvider(MarketDataProvider):
         asset_type: AssetType,
         start_date: DateLike,
         end_date: DateLike,
-    ) -> pd.DataFrame:
+        price_basis: PriceBasis,
+    ) -> tuple[pd.DataFrame, str]:
         start = _format_akshare_date(start_date)
         end = _format_akshare_date(end_date)
         ak_module = self._akshare
 
+        if (
+            asset_type is not AssetType.CN_ETF
+            and price_basis is not PriceBasis.UNADJUSTED
+        ):
+            raise UnsupportedAssetTypeError(
+                "Adjusted price history is currently supported only for cn_etf."
+            )
+
         if asset_type is AssetType.CN_INDEX:
-            return self._call_with_retry(
-                ak_module.stock_zh_index_daily_em,
-                symbol=_format_cn_index_symbol(instrument.symbol),
+            return (
+                self._call_with_retry(
+                    ak_module.stock_zh_index_daily_em,
+                    symbol=_format_cn_index_symbol(instrument.symbol),
+                ),
+                "akshare",
             )
         if asset_type is AssetType.CN_ETF:
-            return self._fetch_cn_etf_history(instrument, start, end)
+            return self._fetch_cn_etf_history(
+                instrument,
+                start,
+                end,
+                price_basis=price_basis,
+            )
         if asset_type is AssetType.CN_STOCK:
-            return self._call_with_retry(
-                ak_module.stock_zh_a_hist,
-                symbol=instrument.symbol,
-                period="daily",
-                start_date=start,
-                end_date=end,
-                adjust="",
+            return (
+                self._call_with_retry(
+                    ak_module.stock_zh_a_hist,
+                    symbol=instrument.symbol,
+                    period="daily",
+                    start_date=start,
+                    end_date=end,
+                    adjust="",
+                ),
+                "akshare",
             )
         if asset_type is AssetType.CN_OPEN_FUND:
-            return self._call_with_retry(
-                ak_module.fund_open_fund_info_em,
-                symbol=instrument.symbol,
-                indicator="\u5355\u4f4d\u51c0\u503c\u8d70\u52bf",
+            return (
+                self._call_with_retry(
+                    ak_module.fund_open_fund_info_em,
+                    symbol=instrument.symbol,
+                    indicator="\u5355\u4f4d\u51c0\u503c\u8d70\u52bf",
+                ),
+                "akshare",
             )
 
         raise UnsupportedAssetTypeError(f"Unsupported asset type: {asset_type!r}")
@@ -212,8 +311,24 @@ class AkshareMarketDataProvider(MarketDataProvider):
         instrument: Instrument,
         start_date: str,
         end_date: str,
-    ) -> pd.DataFrame:
+        *,
+        price_basis: PriceBasis,
+    ) -> tuple[pd.DataFrame, str]:
         ak_module = self._akshare
+        adjust = "qfq" if price_basis is PriceBasis.QFQ else ""
+        if price_basis is PriceBasis.QFQ:
+            return (
+                self._call_with_retry(
+                    ak_module.fund_etf_hist_em,
+                    symbol=instrument.symbol,
+                    period="daily",
+                    start_date=start_date,
+                    end_date=end_date,
+                    adjust=adjust,
+                ),
+                "akshare_eastmoney",
+            )
+
         try:
             raw_data = self._call_with_retry(
                 ak_module.fund_etf_hist_em,
@@ -221,18 +336,35 @@ class AkshareMarketDataProvider(MarketDataProvider):
                 period="daily",
                 start_date=start_date,
                 end_date=end_date,
-                adjust="",
+                adjust=adjust,
             )
         except MarketDataFetchError:
             raw_data = pd.DataFrame()
 
         if raw_data is not None and not raw_data.empty:
-            return raw_data
+            return raw_data, "akshare"
 
-        return self._call_with_retry(
-            ak_module.fund_etf_hist_sina,
-            symbol=_format_sina_etf_symbol(instrument.symbol),
+        return (
+            self._call_with_retry(
+                ak_module.fund_etf_hist_sina,
+                symbol=_format_sina_etf_symbol(instrument.symbol),
+            ),
+            "akshare",
         )
+
+    def _fetch_sina_etf_realtime(self) -> pd.DataFrame:
+        if self._sina_etf_spot_cache is not None:
+            cached_at, raw_data = self._sina_etf_spot_cache
+            if time.monotonic() - cached_at <= self._realtime_spot_ttl_seconds:
+                return raw_data
+
+        raw_data = self._call_with_retry(
+            self._akshare.fund_etf_category_sina,
+            symbol="ETF\u57fa\u91d1",
+        )
+        if self._realtime_spot_ttl_seconds > 0:
+            self._sina_etf_spot_cache = (time.monotonic(), raw_data)
+        return raw_data
 
     def _call_with_retry(
         self,
@@ -272,6 +404,12 @@ class AkshareMarketDataProvider(MarketDataProvider):
             raise UnsupportedAssetTypeError(
                 f"Unsupported asset type: {asset_type!r}"
             ) from exc
+
+    def _resolve_price_basis(self, price_basis: PriceBasis | str) -> PriceBasis:
+        try:
+            return PriceBasis(price_basis)
+        except ValueError as exc:
+            raise ValueError(f"Unsupported price basis: {price_basis!r}") from exc
 
     @property
     def _akshare(self) -> Any:
@@ -324,3 +462,22 @@ def _read_realtime_float(row: pd.Series, column: str) -> float | None:
     if pd.isna(value):
         return None
     return float(value)
+
+
+def _read_first_realtime_float(row: pd.Series, *columns: str) -> float | None:
+    for column in columns:
+        value = _read_realtime_float(row, column)
+        if value is not None:
+            return value
+    return None
+
+
+def _find_realtime_row(raw_data: pd.DataFrame | None, symbol: str) -> pd.Series | None:
+    if raw_data is None or raw_data.empty or "\u4ee3\u7801" not in raw_data.columns:
+        return None
+    normalized = symbol.lower()
+    symbols = raw_data["\u4ee3\u7801"].astype(str).str.lower()
+    matched = raw_data.loc[symbols == normalized]
+    if matched.empty:
+        return None
+    return matched.iloc[0]

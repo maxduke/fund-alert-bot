@@ -8,6 +8,8 @@ from typing import Any, Protocol
 
 import pandas as pd
 
+from fund_alert_bot.market_data.exceptions import MarketCalendarUnavailableError
+
 LOGGER = logging.getLogger(__name__)
 
 AKSHARE_TRADE_DATE_COLUMNS = ("trade_date", "\u65e5\u671f")
@@ -18,6 +20,10 @@ class MarketCalendar(Protocol):
 
     def is_trading_day(self, check_date: date) -> bool:
         """Return whether the market is expected to trade on check_date."""
+        ...
+
+    def confirmed_status(self, check_date: date) -> bool:
+        """Return provider-confirmed status or fail when coverage is unavailable."""
         ...
 
 
@@ -34,6 +40,18 @@ class CNMarketCalendar:
         trade_days = self._load_trade_days()
         if trade_days is None:
             return is_cn_market_weekday(check_date)
+        return check_date in trade_days
+
+    def confirmed_status(self, check_date: date) -> bool:
+        """Return status only when the loaded calendar covers check_date."""
+
+        trade_days = self._load_trade_days()
+        if trade_days is None:
+            raise MarketCalendarUnavailableError("CN trade calendar is unavailable.")
+        if check_date < min(trade_days) or check_date > max(trade_days):
+            raise MarketCalendarUnavailableError(
+                f"CN trade calendar does not cover {check_date.isoformat()}."
+            )
         return check_date in trade_days
 
     def _load_trade_days(self) -> set[date] | None:
