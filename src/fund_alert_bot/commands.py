@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 from collections.abc import Awaitable, Callable, Collection, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +28,9 @@ from fund_alert_bot.db import (
     delete_rule,
     initialize_database,
     open_connection,
+    upsert_fund_cutoff,
+    upsert_fund_fee,
+    upsert_position_snapshot,
 )
 from fund_alert_bot.db import (
     list_rules as db_list_rules,
@@ -34,7 +38,10 @@ from fund_alert_bot.db import (
 from fund_alert_bot.market_data import (
     AkshareMarketDataProvider,
     AssetType,
+    FundNav,
+    Instrument,
     MarketDataProvider,
+    MarketDataProviderError,
 )
 from fund_alert_bot.notifications.dispatch import send_alert_notifications
 from fund_alert_bot.notifications.service import build_notification_service
@@ -51,6 +58,9 @@ ADD_DRAWDOWN_USAGE = (
 )
 ADD_DCA_USAGE = "Usage: /add_dca <name> <weekday> <amount>"
 ADD_PROFIT_USAGE = "Usage: /add_profit <asset_type> <symbol> <name> <cost> <thresholds>"
+SET_FUND_FEE_USAGE = "Usage: /set_fund_fee <fund_symbol> <rate:<percent>%|fixed:<RMB>>"
+SET_FUND_CUTOFF_USAGE = "Usage: /set_fund_cutoff <fund_symbol> <HH:MM>"
+SYNC_POSITION_USAGE = "Usage: /sync_position <fund_symbol> <units> <average_unit_cost>"
 START_MESSAGE = "fund-alert-bot is running. Use /help to see available commands."
 HELP_MESSAGE = "\n".join(
     (
@@ -60,6 +70,9 @@ HELP_MESSAGE = "\n".join(
         "/add_drawdown <asset_type> <symbol> <name> <lookback_days> <thresholds>",
         "/add_profit <asset_type> <symbol> <name> <cost> <thresholds>",
         "/add_dca <name> <weekday> <amount>",
+        "/set_fund_fee <fund_symbol> <rate:<percent>%|fixed:<RMB>>",
+        "/set_fund_cutoff <fund_symbol> <HH:MM>",
+        "/sync_position <fund_symbol> <units> <average_unit_cost>",
         "/list - List configured rules",
         "/del <id> - Remove a configured rule",
         "/check - Run a manual check",
@@ -116,6 +129,32 @@ class ProfitCommand:
     name: str
     cost: float
     thresholds: list[float]
+
+
+@dataclass(frozen=True, slots=True)
+class FundFeeCommand:
+    """Parsed /set_fund_fee command fields."""
+
+    fund_symbol: str
+    fee_mode: str
+    fee_value: float
+
+
+@dataclass(frozen=True, slots=True)
+class FundCutoffCommand:
+    """Parsed /set_fund_cutoff command fields."""
+
+    fund_symbol: str
+    subscription_cutoff: str
+
+
+@dataclass(frozen=True, slots=True)
+class SyncPositionCommand:
+    """Parsed /sync_position command fields."""
+
+    fund_symbol: str
+    units: float
+    average_unit_cost: float
 
 
 def parse_add_drawdown_args(args: Sequence[str]) -> DrawdownCommand:
@@ -224,6 +263,81 @@ def parse_profit_cost(raw_cost: str) -> float:
         raise CommandParseError("cost must be a positive number")
 
     return cost
+
+
+def parse_set_fund_fee_args(args: Sequence[str]) -> FundFeeCommand:
+    """Parse a shared feeder-fund subscription fee."""
+
+    if len(args) != 2:
+        raise CommandParseError(SET_FUND_FEE_USAGE)
+    fund_symbol = _parse_fund_symbol(args[0])
+    raw_fee = args[1].strip().lower()
+    if raw_fee.startswith("rate:") and raw_fee.endswith("%"):
+        fee_mode = "rate"
+        raw_value = raw_fee[5:-1]
+        divisor = 100
+    elif raw_fee.startswith("fixed:"):
+        fee_mode = "fixed"
+        raw_value = raw_fee[6:]
+        divisor = 1
+    else:
+        raise CommandParseError("fee must use rate:<percent>% or fixed:<RMB>")
+
+    try:
+        value = float(raw_value)
+    except ValueError as exc:
+        raise CommandParseError("fee must be a finite non-negative number") from exc
+    if not math.isfinite(value) or value < 0:
+        raise CommandParseError("fee must be a finite non-negative number")
+    return FundFeeCommand(fund_symbol, fee_mode, value / divisor)
+
+
+def parse_set_fund_cutoff_args(args: Sequence[str]) -> FundCutoffCommand:
+    """Parse a feeder-fund subscription cutoff in 24-hour time."""
+
+    if len(args) != 2:
+        raise CommandParseError(SET_FUND_CUTOFF_USAGE)
+    fund_symbol = _parse_fund_symbol(args[0])
+    cutoff = args[1].strip()
+    if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", cutoff):
+        raise CommandParseError("cutoff must use 24-hour HH:MM format")
+    return FundCutoffCommand(fund_symbol, cutoff)
+
+
+def parse_sync_position_args(args: Sequence[str]) -> SyncPositionCommand:
+    """Parse an exact sales-platform position snapshot."""
+
+    if len(args) != 3:
+        raise CommandParseError(SYNC_POSITION_USAGE)
+    fund_symbol = _parse_fund_symbol(args[0])
+    try:
+        units = float(args[1])
+        average_unit_cost = float(args[2])
+    except ValueError as exc:
+        raise CommandParseError(
+            "units and average_unit_cost must be finite non-negative numbers"
+        ) from exc
+    if (
+        not math.isfinite(units)
+        or not math.isfinite(average_unit_cost)
+        or units < 0
+        or average_unit_cost < 0
+    ):
+        raise CommandParseError(
+            "units and average_unit_cost must be finite non-negative numbers"
+        )
+    if (units == 0) != (average_unit_cost == 0):
+        raise CommandParseError(
+            "use positive units with positive cost, or exact 0 0 for a closed position"
+        )
+    return SyncPositionCommand(fund_symbol, units, average_unit_cost)
+
+
+def _parse_fund_symbol(raw_symbol: str) -> str:
+    symbol = raw_symbol.strip()
+    if not re.fullmatch(r"\d{6}", symbol):
+        raise CommandParseError("fund_symbol must be exactly 6 digits")
+    return symbol
 
 
 def parse_add_dca_args(args: Sequence[str]) -> DcaCommand:
@@ -417,6 +531,52 @@ def _append_drawdown_statuses(
             f"{status.peak_price:.4g} on {status.peak_date}; "
             f"latest {status.latest_price:.4g} on {status.latest_date}."
         )
+
+
+def format_position_snapshot(row: Any, nav: FundNav | None) -> str:
+    """Format an exact platform position and its latest dated fund value."""
+
+    units = float(row["units"])
+    lines = [
+        f"Position synced for fund {row['fund_symbol']}.",
+        f"Units: {units:.12g}",
+        f"Average unit cost: {float(row['average_unit_cost']):.12g}",
+        "Accuracy: exact (sales-platform sync)",
+        f"Last sync: {row['last_synced_at']}",
+        f"Applied estimates since sync: {int(row['estimates_since_sync'])}",
+    ]
+    if units == 0:
+        lines.extend(("Position value: ¥0.00 (closed)", "Unit NAV was not requested."))
+    elif nav is None:
+        lines.append("Position value: unavailable (unit NAV could not be fetched)")
+    else:
+        lines.extend(
+            (
+                f"Latest unit NAV: {nav.value:.12g} on {nav.date} ({nav.source})",
+                f"Position value: ¥{units * nav.value:,.2f}",
+            )
+        )
+    lines.append(
+        "Reminder: sync again after any redemption, distribution, unrecorded "
+        "purchase, fee mismatch, or visible platform difference."
+    )
+    return "\n".join(lines)
+
+
+def format_fund_fee(row: Any) -> str:
+    """Format one stored feeder-fund fee setting."""
+
+    value = float(row["fee_value"])
+    fee = (
+        f"rate:{value * 100:.12g}%"
+        if row["fee_mode"] == "rate"
+        else f"fixed:{value:.12g} RMB"
+    )
+    return (
+        f"Updated fund {row['fund_symbol']} fee to {fee}. "
+        f"Subscription cutoff: {row['subscription_cutoff']}. "
+        "The change applies only to future estimates."
+    )
 
 
 def get_start_message() -> str:
@@ -629,6 +789,94 @@ def build_command_handlers(
             ),
         )
 
+    async def set_fund_fee(
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        if await reject_if_unauthorized(update, allowed_user_ids):
+            return
+        try:
+            command = parse_set_fund_fee_args(getattr(context, "args", ()))
+        except CommandParseError as exc:
+            await _reply_text(update, str(exc))
+            return
+
+        with open_connection(sqlite_path) as connection:
+            initialize_database(connection)
+            row = upsert_fund_fee(
+                connection,
+                fund_symbol=command.fund_symbol,
+                fee_mode=command.fee_mode,
+                fee_value=command.fee_value,
+            )
+        await _reply_text(update, format_fund_fee(row))
+
+    async def set_fund_cutoff(
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        if await reject_if_unauthorized(update, allowed_user_ids):
+            return
+        try:
+            command = parse_set_fund_cutoff_args(getattr(context, "args", ()))
+        except CommandParseError as exc:
+            await _reply_text(update, str(exc))
+            return
+
+        with open_connection(sqlite_path) as connection:
+            initialize_database(connection)
+            row = upsert_fund_cutoff(
+                connection,
+                fund_symbol=command.fund_symbol,
+                subscription_cutoff=command.subscription_cutoff,
+            )
+        await _reply_text(
+            update,
+            (
+                f"Updated fund {row['fund_symbol']} subscription cutoff to "
+                f"{row['subscription_cutoff']}. The change applies only to future "
+                "manual confirmations."
+            ),
+        )
+
+    async def sync_position(
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        if await reject_if_unauthorized(update, allowed_user_ids):
+            return
+        try:
+            command = parse_sync_position_args(getattr(context, "args", ()))
+        except CommandParseError as exc:
+            await _reply_text(update, str(exc))
+            return
+
+        with open_connection(sqlite_path) as connection:
+            initialize_database(connection)
+            row = upsert_position_snapshot(
+                connection,
+                fund_symbol=command.fund_symbol,
+                units=command.units,
+                average_unit_cost=command.average_unit_cost,
+            )
+
+        nav = None
+        if command.units > 0:
+            try:
+                nav = market_data_provider.get_fund_nav(
+                    Instrument(
+                        command.fund_symbol,
+                        command.fund_symbol,
+                        AssetType.CN_OPEN_FUND,
+                    )
+                )
+            except MarketDataProviderError:
+                LOGGER.warning(
+                    "Unable to fetch latest feeder-fund NAV symbol=%s",
+                    command.fund_symbol,
+                )
+        await _reply_text(update, format_position_snapshot(row, nav))
+
     async def list_rules(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context
         if await reject_if_unauthorized(update, allowed_user_ids):
@@ -753,6 +1001,9 @@ def build_command_handlers(
         CommandHandler("add_drawdown", add_drawdown),
         CommandHandler("add_profit", add_profit),
         CommandHandler("add_dca", add_dca),
+        CommandHandler("set_fund_fee", set_fund_fee),
+        CommandHandler("set_fund_cutoff", set_fund_cutoff),
+        CommandHandler("sync_position", sync_position),
         CommandHandler("list", list_rules),
         CommandHandler("del", delete_rule_command),
         CommandHandler("check", check),

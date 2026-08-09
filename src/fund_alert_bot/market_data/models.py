@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from enum import StrEnum
 
 
@@ -43,3 +43,13 @@ class RealtimeQuote:
     amount: float | None
     source: str
     fetched_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class FundNav:
+    """A validated Investment Feeder Fund unit NAV with its published date."""
+
+    symbol: str
+    date: date
+    value: float
+    source: str
