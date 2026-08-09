@@ -330,24 +330,28 @@ def test_get_etf_realtime_quote_uses_eastmoney_contract() -> None:
             self.calls.append(("fund_etf_spot_em", kwargs))
             return pd.DataFrame(
                 {
-                    "代码": ["510300"],
-                    "最新价": ["1.25"],
-                    "昨收": ["1.24"],
-                    "成交量": ["1200"],
-                    "成交额": ["15000"],
+                    "代码": ["510300", "159915"],
+                    "最新价": ["1.25", "2.35"],
+                    "昨收": ["1.24", "2.34"],
+                    "成交量": ["1200", "2300"],
+                    "成交额": ["15000", "54000"],
                 }
             )
 
     fetched_at = datetime(2024, 1, 4, 6, 50, tzinfo=UTC)
+    fetch_times = iter([fetched_at])
     fake_ak = RealtimeAkshare()
     provider = AkshareMarketDataProvider(
         ak_module=fake_ak,
         retry_delay_seconds=0,
-        now_factory=lambda: fetched_at,
+        now_factory=lambda: next(fetch_times),
     )
 
     quote = provider.get_etf_realtime_quote(
         Instrument("510300", "CSI 300 ETF", AssetType.CN_ETF)
+    )
+    second_quote = provider.get_etf_realtime_quote(
+        Instrument("159915", "ChiNext ETF", AssetType.CN_ETF)
     )
 
     assert quote.symbol == "510300"
@@ -357,6 +361,9 @@ def test_get_etf_realtime_quote_uses_eastmoney_contract() -> None:
     assert quote.amount == 15000
     assert quote.source == "eastmoney"
     assert quote.fetched_at == fetched_at
+    assert second_quote.symbol == "159915"
+    assert second_quote.price == 2.35
+    assert second_quote.fetched_at == fetched_at
     assert fake_ak.calls == [("fund_etf_spot_em", {})]
 
 
@@ -428,6 +435,53 @@ def test_get_latest_reuses_realtime_spot_data_within_ttl() -> None:
     assert second is not None
     assert second["close"] == 2.35
     assert fake_ak.calls == [("fund_etf_spot_em", {})]
+
+
+def test_etf_quotes_cache_failed_eastmoney_and_sina_snapshot_time() -> None:
+    class RealtimeAkshare(FakeAkshare):
+        def fund_etf_spot_em(self, **kwargs: Any) -> pd.DataFrame:
+            self.calls.append(("fund_etf_spot_em", kwargs))
+            raise RuntimeError("Eastmoney rate limited")
+
+        def fund_etf_category_sina(self, **kwargs: Any) -> pd.DataFrame:
+            self.calls.append(("fund_etf_category_sina", kwargs))
+            return pd.DataFrame(
+                {
+                    "代码": ["sh510300", "sz159915"],
+                    "最新价": ["1.25", "2.35"],
+                    "昨收": ["1.24", "2.34"],
+                    "成交量": ["1200", "2300"],
+                    "成交额": ["15000", "54000"],
+                }
+            )
+
+    fetch_times = iter(
+        [
+            datetime(2024, 1, 4, 6, 50, tzinfo=UTC),
+            datetime(2024, 1, 4, 6, 51, tzinfo=UTC),
+        ]
+    )
+    fake_ak = RealtimeAkshare()
+    provider = AkshareMarketDataProvider(
+        ak_module=fake_ak,
+        retries=1,
+        retry_delay_seconds=0,
+        now_factory=lambda: next(fetch_times),
+    )
+
+    first = provider.get_etf_realtime_quote(
+        Instrument("510300", "CSI 300 ETF", AssetType.CN_ETF)
+    )
+    second = provider.get_etf_realtime_quote(
+        Instrument("159915", "ChiNext ETF", AssetType.CN_ETF)
+    )
+
+    assert first.fetched_at == datetime(2024, 1, 4, 6, 51, tzinfo=UTC)
+    assert second.fetched_at == first.fetched_at
+    assert fake_ak.calls == [
+        ("fund_etf_spot_em", {}),
+        ("fund_etf_category_sina", {"symbol": "ETF\u57fa\u91d1"}),
+    ]
 
 
 def test_get_latest_returns_last_normalized_row() -> None:
