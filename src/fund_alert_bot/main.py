@@ -9,7 +9,11 @@ from fund_alert_bot.commands import create_application
 from fund_alert_bot.config import load_settings
 from fund_alert_bot.db import initialize_database, open_connection
 from fund_alert_bot.market_data import AkshareMarketDataProvider
-from fund_alert_bot.scheduler import create_scheduler, register_jobs
+from fund_alert_bot.scheduler import (
+    create_scheduler,
+    register_jobs,
+    retry_pending_drawdown_plan_notifications,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -54,6 +58,12 @@ def run() -> None:
             before_close_check_time=settings.before_close_check_time,
             dca_reminder_time=settings.dca_reminder_time,
             market_data_provider=market_data_provider,
+            notification_settings=settings.notifications,
+        )
+        await retry_pending_drawdown_plan_notifications(
+            application=application,
+            sqlite_path=settings.sqlite_path,
+            allowed_user_ids=settings.telegram_allowed_user_ids,
             notification_settings=settings.notifications,
         )
         scheduler.start()

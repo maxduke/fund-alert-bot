@@ -39,6 +39,7 @@ from fund_alert_bot.db import (
     init_db,
     list_rules,
     open_connection,
+    upsert_position_snapshot,
 )
 from fund_alert_bot.market_data import AssetType, FundNav, Instrument, PriceBasis
 from fund_alert_bot.rules.dca import weekday_for_date
@@ -891,6 +892,52 @@ def test_plans_and_check_show_plan_state_without_mutation(tmp_path) -> None:
     assert "No enabled drawdown_from_high" not in message.replies[1]
     assert "• -15% / ¥5,000.00: open" in message.replies[1]
     assert counts == [0, 0, 0]
+
+
+def test_plans_keeps_position_linked_when_plan_market_data_fails(tmp_path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    with open_connection(sqlite_path) as connection:
+        init_db(connection)
+        add_rule(
+            connection,
+            type="drawdown_plan",
+            symbol="510300",
+            name="A500",
+            asset_type="cn_etf",
+            params={
+                "investment_fund_symbol": "000001",
+                "tiers": [{"drawdown": 0.15, "amount": 5000}],
+            },
+        )
+        upsert_position_snapshot(
+            connection,
+            fund_symbol="000001",
+            units=0,
+            average_unit_cost=0,
+        )
+    handlers = build_command_handlers(
+        {123},
+        sqlite_path=sqlite_path,
+        market_data_provider=FakeProvider(_history(["2024-01-02"], [100])),
+        now_factory=lambda: datetime(2024, 1, 2, 9, 0, tzinfo=UTC),
+    )
+    message = FakeMessage()
+
+    asyncio.run(
+        _handler_by_command(handlers, "plans").callback(
+            SimpleNamespace(
+                effective_user=SimpleNamespace(id=123),
+                effective_chat=SimpleNamespace(id=456),
+                effective_message=message,
+            ),
+            SimpleNamespace(bot=FakeBot(), args=[]),
+        )
+    )
+
+    assert (
+        "Drawdown Add Plan configured; market status unavailable" in message.replies[0]
+    )
+    assert "no enabled Drawdown Add Plan" not in message.replies[0]
 
 
 def test_add_profit_command_persists_rule(tmp_path) -> None:

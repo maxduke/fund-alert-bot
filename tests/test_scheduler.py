@@ -437,6 +437,48 @@ def test_scheduled_market_check_confirms_drawdown_plan_once(tmp_path: Path) -> N
     assert provider.price_bases == [PriceBasis.QFQ, PriceBasis.QFQ]
 
 
+def test_failed_plan_notification_retries_even_when_market_is_closed(
+    tmp_path: Path,
+) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    _add_drawdown_plan(sqlite_path)
+    provider = FakeProvider(_plan_history([100, 80]))
+
+    asyncio.run(
+        scheduler.run_scheduled_market_check(
+            application=SimpleNamespace(bot=FakeFailingBot()),
+            sqlite_path=sqlite_path,
+            allowed_user_ids={123},
+            market_data_provider=provider,
+            market_calendar=FakeMarketCalendar(is_trading_day=True),
+            timezone="Asia/Shanghai",
+            run_date=date(2024, 1, 2),
+        )
+    )
+    success_application = FakeApplication()
+    asyncio.run(
+        scheduler.run_scheduled_market_check(
+            application=success_application,
+            sqlite_path=sqlite_path,
+            allowed_user_ids={123},
+            market_data_provider=provider,
+            market_calendar=FakeMarketCalendar(is_trading_day=False),
+            timezone="Asia/Shanghai",
+            run_date=date(2024, 1, 3),
+        )
+    )
+
+    with open_connection(sqlite_path) as connection:
+        status = connection.execute(
+            "SELECT notification_status FROM alert_events"
+        ).fetchone()["notification_status"]
+
+    assert status == "sent"
+    assert len(success_application.bot.messages) == 1
+    assert "Buy-plan reminder — A500" in success_application.bot.messages[0]["text"]
+    assert provider.price_bases == [PriceBasis.QFQ]
+
+
 def test_scheduled_dca_check_prevents_duplicate_alerts_by_alert_key(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -549,6 +591,12 @@ class FakeBot:
 
     async def send_message(self, *, chat_id: int, text: str) -> None:
         self.messages.append({"chat_id": chat_id, "text": text})
+
+
+class FakeFailingBot:
+    async def send_message(self, *, chat_id: int, text: str) -> None:
+        del chat_id, text
+        raise RuntimeError("telegram unavailable")
 
 
 class FakeApplication(SimpleNamespace):

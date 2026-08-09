@@ -268,6 +268,25 @@ def find_enabled_drawdown_plan_conflict(
     ).fetchone()
 
 
+def list_enabled_drawdown_plan_fund_symbols(
+    connection: sqlite3.Connection,
+) -> list[str]:
+    """Return feeder-fund symbols owned by all enabled plan configurations."""
+
+    return [
+        str(row["fund_symbol"])
+        for row in connection.execute(
+            """
+            SELECT json_extract(params_json, '$.investment_fund_symbol') AS fund_symbol
+            FROM rules
+            WHERE type = 'drawdown_plan' AND enabled = 1
+            ORDER BY id
+            """
+        ).fetchall()
+        if row["fund_symbol"] is not None
+    ]
+
+
 def list_rules(connection: sqlite3.Connection) -> list[sqlite3.Row]:
     """Return all rules in insertion order."""
     return list(

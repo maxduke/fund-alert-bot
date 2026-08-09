@@ -38,6 +38,7 @@ from fund_alert_bot.db import (
     delete_rule,
     find_enabled_drawdown_plan_conflict,
     initialize_database,
+    list_enabled_drawdown_plan_fund_symbols,
     list_position_snapshots,
     open_connection,
     upsert_fund_cutoff,
@@ -803,13 +804,13 @@ def build_drawdown_plan_preview(
 
 def format_plan_overview(
     result: DrawdownPlanStatusResult,
-    standalone_positions: Sequence[tuple[Any, FundNav | None]] = (),
+    unmatched_positions: Sequence[tuple[Any, FundNav | None, str]] = (),
 ) -> str:
     """Format concise `/plans` output."""
 
     if (
         not result.statuses
-        and not standalone_positions
+        and not unmatched_positions
         and not result.no_data_skips
         and not result.errors
     ):
@@ -834,13 +835,13 @@ def format_plan_overview(
                 *_format_position_lines(status),
             )
         )
-    for position, nav in standalone_positions:
+    for position, nav, ownership in unmatched_positions:
         units = float(position["units"])
         accuracy = "estimated" if position["is_estimated"] else "exact"
         lines.extend(
             (
                 "",
-                f"Fund {position['fund_symbol']} — no Drawdown Add Plan",
+                f"Fund {position['fund_symbol']} — {ownership}",
                 f"Position: {accuracy}; last sync {position['last_synced_at']}; "
                 f"later estimates {position['estimates_since_sync']}",
             )
@@ -1441,16 +1442,17 @@ def build_command_handlers(
                 market_data_provider,
                 end_date=_clock_now(clock).astimezone(timezone_info).date(),
             )
-            planned_funds = {
+            planned_funds = set(list_enabled_drawdown_plan_fund_symbols(connection))
+            evaluated_funds = {
                 status.config.investment_fund_symbol for status in result.statuses
             }
-            standalone_rows = [
+            unmatched_rows = [
                 row
                 for row in list_position_snapshots(connection)
-                if row["fund_symbol"] not in planned_funds
+                if row["fund_symbol"] not in evaluated_funds
             ]
-            standalone_positions = []
-            for row in standalone_rows:
+            unmatched_positions = []
+            for row in unmatched_rows:
                 nav = None
                 if float(row["units"]) > 0:
                     try:
@@ -1466,10 +1468,15 @@ def build_command_handlers(
                             "Unable to fetch standalone position NAV symbol=%s",
                             row["fund_symbol"],
                         )
-                standalone_positions.append((row, nav))
+                ownership = (
+                    "Drawdown Add Plan configured; market status unavailable"
+                    if row["fund_symbol"] in planned_funds
+                    else "no enabled Drawdown Add Plan"
+                )
+                unmatched_positions.append((row, nav, ownership))
         await _reply_text(
             update,
-            format_plan_overview(result, standalone_positions),
+            format_plan_overview(result, unmatched_positions),
         )
 
     async def delete_rule_command(
