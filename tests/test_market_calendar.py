@@ -123,6 +123,19 @@ def test_calendar_refreshes_when_cached_coverage_ends() -> None:
     assert fake_ak.calls == 2
 
 
+def test_calendar_uses_weekday_fallback_when_refresh_fails() -> None:
+    fake_ak = FakeAkshareCalendar(
+        pd.DataFrame({"trade_date": ["2024-01-02", "2024-01-04"]})
+    )
+    calendar = CNMarketCalendar(ak_module=fake_ak)
+
+    assert calendar.is_trading_day(date(2024, 1, 2)) is True
+    fake_ak.error = RuntimeError("refresh unavailable")
+
+    assert calendar.is_trading_day(date(2024, 1, 5)) is True
+    assert fake_ak.calls == 2
+
+
 def test_confirmed_calendar_status_never_uses_weekday_fallback() -> None:
     calendar = CNMarketCalendar(
         ak_module=FakeAkshareCalendar(error=RuntimeError("unavailable"))

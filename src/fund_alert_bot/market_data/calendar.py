@@ -40,9 +40,7 @@ class CNMarketCalendar:
         was_cached = self._trade_days is not None
         trade_days = self._load_trade_days()
         if was_cached and trade_days is not None and check_date > max(trade_days):
-            refreshed_trade_days = self._load_trade_days(refresh=True)
-            if refreshed_trade_days is not None:
-                trade_days = refreshed_trade_days
+            trade_days = self._load_trade_days(refresh=True)
         if trade_days is None:
             return is_cn_market_weekday(check_date)
         return check_date in trade_days
