@@ -470,6 +470,13 @@ def persist_drawdown_plan_evaluation(
 
     connection.execute("BEGIN IMMEDIATE")
     try:
+        rule = connection.execute(
+            "SELECT enabled FROM rules WHERE id = ?",
+            (rule_id,),
+        ).fetchone()
+        if rule is None or not bool(rule["enabled"]):
+            raise sqlite3.IntegrityError("Drawdown plan is no longer enabled.")
+
         active = get_active_drawdown_cycle(connection, rule_id)
         active_id = None if active is None else int(active["id"])
         active_evaluation_date = (

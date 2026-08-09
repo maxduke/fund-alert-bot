@@ -160,6 +160,33 @@ def test_delete_soft_disables_plan_and_preserves_cycle_state(tmp_path: Path) -> 
     assert [row["tier_key"] for row in tiers] == ["0.15"]
 
 
+def test_evaluation_selected_before_disable_cannot_persist(tmp_path: Path) -> None:
+    sqlite_path = tmp_path / "bot.sqlite3"
+    rule_id = _add_plan(sqlite_path)
+
+    with open_connection(sqlite_path) as connection:
+        selected_rule = list_rules(connection)[0]
+        assert delete_rule(connection, rule_id) is True
+
+        with pytest.raises(sqlite3.IntegrityError, match="no longer enabled"):
+            evaluate_drawdown_plan_rule(
+                connection,
+                selected_rule,
+                _history([100, 84]),
+                expected_date=date(2024, 1, 2),
+            )
+
+        cycle_count = connection.execute(
+            "SELECT COUNT(*) FROM drawdown_cycles"
+        ).fetchone()[0]
+        event_count = connection.execute(
+            "SELECT COUNT(*) FROM alert_events"
+        ).fetchone()[0]
+
+    assert cycle_count == 0
+    assert event_count == 0
+
+
 def test_failed_or_interrupted_plan_notifications_are_retryable(
     tmp_path: Path,
 ) -> None:
