@@ -11,6 +11,7 @@ import pytest
 from fund_alert_bot.checks import evaluate_drawdown_plan_rule
 from fund_alert_bot.db import (
     add_rule,
+    delete_rule,
     get_active_drawdown_cycle,
     initialize_database,
     list_drawdown_tier_records,
@@ -134,6 +135,29 @@ def test_confirmed_evaluation_rejects_empty_plan_name(tmp_path: Path) -> None:
             )
 
         assert get_active_drawdown_cycle(connection, 1) is None
+
+
+def test_delete_soft_disables_plan_and_preserves_cycle_state(tmp_path: Path) -> None:
+    sqlite_path = tmp_path / "bot.sqlite3"
+    rule_id = _add_plan(sqlite_path)
+
+    with open_connection(sqlite_path) as connection:
+        result = evaluate_drawdown_plan_rule(
+            connection,
+            list_rules(connection)[0],
+            _history([100, 84]),
+            expected_date=date(2024, 1, 2),
+        )
+
+        removal = delete_rule(connection, rule_id)
+        rule = list_rules(connection)[0]
+        cycle = get_active_drawdown_cycle(connection, rule_id)
+        tiers = list_drawdown_tier_records(connection, result.cycle_id)
+
+    assert removal is True
+    assert rule["enabled"] == 0
+    assert cycle is not None
+    assert [row["tier_key"] for row in tiers] == ["0.15"]
 
 
 def test_failed_or_interrupted_plan_notifications_are_retryable(

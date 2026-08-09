@@ -498,6 +498,37 @@ def test_add_profit_command_persists_rule(tmp_path) -> None:
     ]
 
 
+def test_delete_command_reports_disabled_drawdown_plan(tmp_path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    with open_connection(sqlite_path) as connection:
+        init_db(connection)
+        rule_id = add_rule(
+            connection,
+            type="drawdown_plan",
+            symbol="510300",
+            name="A500",
+            asset_type=AssetType.CN_ETF.value,
+            params={"investment_fund_symbol": "000001", "tiers": []},
+        )
+
+    handlers = build_command_handlers({123}, sqlite_path=sqlite_path)
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        effective_message=message,
+    )
+    context = SimpleNamespace(bot=FakeBot(), args=[str(rule_id)])
+
+    asyncio.run(_handler_by_command(handlers, "del").callback(update, context))
+
+    with open_connection(sqlite_path) as connection:
+        rule = list_rules(connection)[0]
+
+    assert rule["enabled"] == 0
+    assert message.replies == [f"Disabled drawdown plan id={rule_id}"]
+
+
 def test_check_sends_due_dca_without_market_data_fetch(tmp_path) -> None:
     sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
     with open_connection(sqlite_path) as connection:
