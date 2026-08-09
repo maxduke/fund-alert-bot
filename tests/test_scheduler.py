@@ -13,7 +13,12 @@ import pytest
 from fund_alert_bot import commands, scheduler
 from fund_alert_bot.config import NotificationSettings
 from fund_alert_bot.db import add_rule, initialize_database, open_connection
-from fund_alert_bot.market_data import AssetType, Instrument, PriceBasis
+from fund_alert_bot.market_data import (
+    AssetType,
+    Instrument,
+    MarketCalendarUnavailableError,
+    PriceBasis,
+)
 
 EXPECTED_DRAWDOWN_10_MESSAGE = "\n".join(
     (
@@ -437,6 +442,80 @@ def test_scheduled_market_check_confirms_drawdown_plan_once(tmp_path: Path) -> N
     assert provider.price_bases == [PriceBasis.QFQ, PriceBasis.QFQ]
 
 
+def test_scheduled_market_check_notifies_once_when_plan_close_is_missing(
+    tmp_path: Path,
+) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    _add_drawdown_plan(sqlite_path)
+    application = FakeApplication()
+    provider = FakeProvider(_plan_history([100]))
+    market_calendar = FakeMarketCalendar(is_trading_day=True)
+
+    for _ in range(2):
+        asyncio.run(
+            scheduler.run_scheduled_market_check(
+                application=application,
+                sqlite_path=sqlite_path,
+                allowed_user_ids={123},
+                market_data_provider=provider,
+                market_calendar=market_calendar,
+                timezone="Asia/Shanghai",
+                run_date=date(2024, 1, 2),
+            )
+        )
+
+    with open_connection(sqlite_path) as connection:
+        event = connection.execute(
+            "SELECT alert_key, notification_status FROM alert_events"
+        ).fetchone()
+
+    assert event["alert_key"] == "data_unavailable:after_close:2024-01-02"
+    assert event["notification_status"] == "sent"
+    assert len(application.bot.messages) == 1
+    assert "Drawdown plan data unavailable" in application.bot.messages[0]["text"]
+    assert "No tier decision was made" in application.bot.messages[0]["text"]
+
+
+def test_plan_close_does_not_mutate_state_without_confirmed_calendar(
+    tmp_path: Path,
+) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    _add_drawdown_plan(sqlite_path)
+    application = FakeApplication()
+    provider = FakeProvider(_plan_history([100, 80]))
+    market_calendar = FakeMarketCalendar(
+        is_trading_day=True,
+        confirmed_error=MarketCalendarUnavailableError("calendar unavailable"),
+    )
+
+    asyncio.run(
+        scheduler.run_scheduled_market_check(
+            application=application,
+            sqlite_path=sqlite_path,
+            allowed_user_ids={123},
+            market_data_provider=provider,
+            market_calendar=market_calendar,
+            timezone="Asia/Shanghai",
+            run_date=date(2024, 1, 2),
+        )
+    )
+
+    with open_connection(sqlite_path) as connection:
+        cycles = connection.execute("SELECT COUNT(*) FROM drawdown_cycles").fetchone()[
+            0
+        ]
+        tiers = connection.execute(
+            "SELECT COUNT(*) FROM drawdown_tier_records"
+        ).fetchone()[0]
+
+    assert provider.calls == []
+    assert cycles == 0
+    assert tiers == 0
+    assert market_calendar.confirmed_dates == [date(2024, 1, 2)]
+    assert len(application.bot.messages) == 1
+    assert "calendar unavailable" in application.bot.messages[0]["text"]
+
+
 def test_failed_plan_notification_retries_even_when_market_is_closed(
     tmp_path: Path,
 ) -> None:
@@ -567,12 +646,25 @@ class FakeProvider:
 
 
 class FakeMarketCalendar:
-    def __init__(self, *, is_trading_day: bool) -> None:
+    def __init__(
+        self,
+        *,
+        is_trading_day: bool,
+        confirmed_error: Exception | None = None,
+    ) -> None:
         self._is_trading_day = is_trading_day
+        self._confirmed_error = confirmed_error
         self.checked_dates: list[date] = []
+        self.confirmed_dates: list[date] = []
 
     def is_trading_day(self, check_date: date) -> bool:
         self.checked_dates.append(check_date)
+        return self._is_trading_day
+
+    def confirmed_status(self, check_date: date) -> bool:
+        self.confirmed_dates.append(check_date)
+        if self._confirmed_error is not None:
+            raise self._confirmed_error
         return self._is_trading_day
 
 

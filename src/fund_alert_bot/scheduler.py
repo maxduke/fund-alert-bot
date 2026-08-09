@@ -11,14 +11,18 @@ from zoneinfo import ZoneInfo
 
 from fund_alert_bot.checks import (
     AlertNotification,
+    DrawdownPlanCheckResult,
+    RuleNoDataSkip,
     evaluate_dca_rules,
     evaluate_drawdown_plan_rules,
     evaluate_drawdown_rules,
     evaluate_profit_rules,
+    reserve_drawdown_plan_data_unavailable_notice,
 )
 from fund_alert_bot.config import NotificationSettings
 from fund_alert_bot.db import (
     initialize_database,
+    list_enabled_rules,
     list_retryable_drawdown_plan_alert_events,
     open_connection,
 )
@@ -26,6 +30,7 @@ from fund_alert_bot.market_data import (
     AkshareMarketDataProvider,
     CNMarketCalendar,
     MarketCalendar,
+    MarketCalendarUnavailableError,
     MarketDataProvider,
 )
 from fund_alert_bot.notifications.dispatch import send_alert_notifications
@@ -367,12 +372,45 @@ async def run_scheduled_market_check(
                 today=check_date,
                 require_new_data_date=check_date,
             )
-            plan_result = evaluate_drawdown_plan_rules(
-                connection,
-                market_data_provider,
-                expected_date=check_date,
-            )
+            plan_rules = [
+                row
+                for row in list_enabled_rules(connection)
+                if row["type"] == "drawdown_plan"
+            ]
+            try:
+                confirmed_plan_day = bool(
+                    plan_rules
+                ) and market_calendar.confirmed_status(check_date)
+            except MarketCalendarUnavailableError as exc:
+                plan_result = DrawdownPlanCheckResult(
+                    checked_rules=len(plan_rules),
+                    notifications=[],
+                    no_data_skips=[
+                        RuleNoDataSkip(
+                            rule_id=int(row["id"]),
+                            symbol=str(row["symbol"]),
+                            message=str(exc),
+                        )
+                        for row in plan_rules
+                    ],
+                    errors=[],
+                )
+            else:
+                plan_result = (
+                    evaluate_drawdown_plan_rules(
+                        connection,
+                        market_data_provider,
+                        expected_date=check_date,
+                    )
+                    if confirmed_plan_day
+                    else DrawdownPlanCheckResult(len(plan_rules), [], [], [])
+                )
             profit_result = evaluate_profit_rules(connection, market_data_provider)
+            data_notice = reserve_drawdown_plan_data_unavailable_notice(
+                connection,
+                evaluation_date=check_date,
+                result=plan_result,
+            )
 
         for skip in [
             *drawdown_result.no_data_skips,
@@ -405,6 +443,7 @@ async def run_scheduled_market_check(
                 *drawdown_result.notifications,
                 *plan_result.notifications,
                 *profit_result.notifications,
+                *([] if data_notice is None else [data_notice]),
             ],
             notification_settings=notification_settings,
         )

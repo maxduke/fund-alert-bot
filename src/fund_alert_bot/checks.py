@@ -11,6 +11,7 @@ from typing import Any
 import pandas as pd
 
 from fund_alert_bot.db import (
+    add_alert_event,
     alert_exists,
     get_active_drawdown_cycle,
     get_fund_settings,
@@ -167,6 +168,57 @@ class DrawdownPlanCheckResult:
     notifications: list[AlertNotification]
     no_data_skips: list[RuleNoDataSkip]
     errors: list[RuleCheckError]
+
+
+def reserve_drawdown_plan_data_unavailable_notice(
+    connection: Any,
+    *,
+    evaluation_date: date,
+    result: DrawdownPlanCheckResult,
+) -> AlertNotification | None:
+    """Reserve one after-close notice for plans that could not be evaluated."""
+
+    affected = [*result.no_data_skips, *result.errors]
+    if not affected:
+        return None
+
+    alert_key = f"data_unavailable:after_close:{evaluation_date.isoformat()}"
+    lines = [
+        "⚠️ Drawdown plan data unavailable",
+        "",
+        f"Data date: {evaluation_date.isoformat()}",
+        "After-close confirmation could not evaluate:",
+        *(f"• {item.symbol}: {item.message}" for item in affected),
+        "",
+        "No tier decision was made for these plans.",
+        "Please check your own platform.",
+        "",
+        "This is a reminder only. No trade has been placed.",
+    ]
+    message = "\n".join(lines)
+    try:
+        event_id = add_alert_event(
+            connection,
+            rule_id=affected[0].rule_id,
+            alert_key=alert_key,
+            title="Drawdown plan data unavailable",
+            message=message,
+            payload={
+                "phase": "after_close",
+                "data_date": evaluation_date.isoformat(),
+                "affected_plans": [
+                    {
+                        "rule_id": item.rule_id,
+                        "symbol": item.symbol,
+                        "reason": item.message,
+                    }
+                    for item in affected
+                ],
+            },
+        )
+    except sqlite3.IntegrityError:
+        return None
+    return AlertNotification(event_id=event_id, title="Data unavailable", text=message)
 
 
 @dataclass(frozen=True, slots=True)
