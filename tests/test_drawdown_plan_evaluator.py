@@ -90,6 +90,15 @@ def test_required_history_range_covers_trend_and_locked_peak() -> None:
         (
             {
                 "tiers": [
+                    {"drawdown": 0.1, "amount": 1e308},
+                    {"drawdown": 0.2, "amount": 1e308},
+                ]
+            },
+            "finite total",
+        ),
+        (
+            {
+                "tiers": [
                     {"drawdown": 0.2, "amount": 1},
                     {"drawdown": 0.1, "amount": 1},
                 ]

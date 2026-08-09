@@ -12,11 +12,16 @@ from zoneinfo import ZoneInfo
 from fund_alert_bot.checks import (
     AlertNotification,
     evaluate_dca_rules,
+    evaluate_drawdown_plan_rules,
     evaluate_drawdown_rules,
     evaluate_profit_rules,
 )
 from fund_alert_bot.config import NotificationSettings
-from fund_alert_bot.db import initialize_database, open_connection
+from fund_alert_bot.db import (
+    initialize_database,
+    list_retryable_drawdown_plan_alert_events,
+    open_connection,
+)
 from fund_alert_bot.market_data import (
     AkshareMarketDataProvider,
     CNMarketCalendar,
@@ -335,7 +340,9 @@ async def run_scheduled_market_check(
         check_date.isoformat(),
     )
     drawdown_result = None
+    plan_result = None
     profit_result = None
+    plan_notifications: list[AlertNotification] = []
     try:
         if market_calendar is None:
             market_calendar = CNMarketCalendar()
@@ -355,16 +362,37 @@ async def run_scheduled_market_check(
                 today=check_date,
                 require_new_data_date=check_date,
             )
+            plan_result = evaluate_drawdown_plan_rules(
+                connection,
+                market_data_provider,
+                expected_date=check_date,
+            )
             profit_result = evaluate_profit_rules(connection, market_data_provider)
+            plan_notifications = [
+                AlertNotification(
+                    event_id=int(row["id"]),
+                    title=str(row["title"]),
+                    text=str(row["message"]),
+                )
+                for row in list_retryable_drawdown_plan_alert_events(connection)
+            ]
 
-        for skip in [*drawdown_result.no_data_skips, *profit_result.no_data_skips]:
+        for skip in [
+            *drawdown_result.no_data_skips,
+            *plan_result.no_data_skips,
+            *profit_result.no_data_skips,
+        ]:
             LOGGER.info(
                 "Scheduled market reminder check skipped rule_id=%s symbol=%s: %s",
                 skip.rule_id,
                 skip.symbol,
                 skip.message,
             )
-        for error in [*drawdown_result.errors, *profit_result.errors]:
+        for error in [
+            *drawdown_result.errors,
+            *plan_result.errors,
+            *profit_result.errors,
+        ]:
             LOGGER.warning(
                 "Scheduled market reminder check error rule_id=%s symbol=%s: %s",
                 error.rule_id,
@@ -378,6 +406,7 @@ async def run_scheduled_market_check(
             allowed_user_ids=allowed_user_ids,
             notifications=[
                 *drawdown_result.notifications,
+                *plan_notifications,
                 *profit_result.notifications,
             ],
             notification_settings=notification_settings,
@@ -386,19 +415,26 @@ async def run_scheduled_market_check(
         LOGGER.exception("Scheduled market reminder check failed")
         raise
     finally:
-        if drawdown_result is None or profit_result is None:
+        if drawdown_result is None or plan_result is None or profit_result is None:
             LOGGER.info("Scheduled market reminder check ended")
         else:
             LOGGER.info(
                 "Scheduled market reminder check ended: "
-                "drawdown_rules=%d profit_rules=%d new_alerts=%d "
+                "drawdown_rules=%d plan_rules=%d profit_rules=%d new_alerts=%d "
                 "duplicate_alerts=%d no_data_skips=%d errors=%d",
                 drawdown_result.checked_rules,
+                plan_result.checked_rules,
                 profit_result.checked_rules,
-                len(drawdown_result.notifications) + len(profit_result.notifications),
+                len(drawdown_result.notifications)
+                + len(plan_notifications)
+                + len(profit_result.notifications),
                 drawdown_result.skipped_duplicates + profit_result.skipped_duplicates,
-                len(drawdown_result.no_data_skips) + len(profit_result.no_data_skips),
-                len(drawdown_result.errors) + len(profit_result.errors),
+                len(drawdown_result.no_data_skips)
+                + len(plan_result.no_data_skips)
+                + len(profit_result.no_data_skips),
+                len(drawdown_result.errors)
+                + len(plan_result.errors)
+                + len(profit_result.errors),
             )
 
 

@@ -71,6 +71,7 @@ def run() -> None:
         sqlite_path=settings.sqlite_path,
         market_data_provider=market_data_provider,
         notification_settings=settings.notifications,
+        timezone=settings.timezone,
         post_init=start_scheduler,
         post_shutdown=stop_scheduler,
     )

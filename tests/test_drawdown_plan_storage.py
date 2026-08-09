@@ -8,7 +8,11 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from fund_alert_bot.checks import evaluate_drawdown_plan_rule
+from fund_alert_bot.checks import (
+    evaluate_drawdown_plan_rule,
+    evaluate_drawdown_plan_rules,
+    read_drawdown_plan_statuses,
+)
 from fund_alert_bot.db import (
     add_rule,
     delete_rule,
@@ -20,8 +24,10 @@ from fund_alert_bot.db import (
     open_connection,
     persist_drawdown_plan_evaluation,
     record_alert_notification_result,
+    upsert_fund_fee,
+    upsert_position_snapshot,
 )
-from fund_alert_bot.market_data import AssetType
+from fund_alert_bot.market_data import AssetType, Instrument, PriceBasis
 from fund_alert_bot.rules.drawdown_plan import DrawdownTier
 
 
@@ -50,6 +56,111 @@ def test_confirmed_evaluation_persists_one_cycle_tiers_and_aggregate_event(
     assert len(events) == 1
     assert result.notification is not None
     assert json.loads(events[0]["payload_json"])["total_amount"] == 30000
+
+
+def test_batch_confirmed_close_fetches_qfq_once_and_persists_plan(
+    tmp_path: Path,
+) -> None:
+    sqlite_path = tmp_path / "bot.sqlite3"
+    _add_plan(sqlite_path)
+    provider = FakePlanProvider(_history([100, 80]))
+
+    with open_connection(sqlite_path) as connection:
+        result = evaluate_drawdown_plan_rules(
+            connection,
+            provider,
+            expected_date=date(2024, 1, 2),
+        )
+        cycle_count = connection.execute(
+            "SELECT COUNT(*) FROM drawdown_cycles"
+        ).fetchone()[0]
+        tier_count = connection.execute(
+            "SELECT COUNT(*) FROM drawdown_tier_records"
+        ).fetchone()[0]
+
+    assert result.checked_rules == 1
+    assert len(result.notifications) == 1
+    assert result.errors == []
+    assert provider.calls[0][0].symbol == "510300"
+    assert provider.calls[0][3] is PriceBasis.QFQ
+    assert cycle_count == 1
+    assert tier_count == 2
+
+
+def test_batch_confirmed_close_rejects_stale_history_without_state(
+    tmp_path: Path,
+) -> None:
+    sqlite_path = tmp_path / "bot.sqlite3"
+    _add_plan(sqlite_path)
+
+    with open_connection(sqlite_path) as connection:
+        result = evaluate_drawdown_plan_rules(
+            connection,
+            FakePlanProvider(_history([80])),
+            expected_date=date(2024, 1, 2),
+        )
+        counts = [
+            connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in ("drawdown_cycles", "drawdown_tier_records", "alert_events")
+        ]
+
+    assert len(result.errors) == 1
+    assert "does not contain closing data for 2024-01-02" in result.errors[0].message
+    assert counts == [0, 0, 0]
+
+
+def test_read_plan_status_is_pure_and_reports_open_tiers(tmp_path: Path) -> None:
+    sqlite_path = tmp_path / "bot.sqlite3"
+    _add_plan(sqlite_path)
+    provider = FakePlanProvider(_history([100, 80]))
+
+    with open_connection(sqlite_path) as connection:
+        result = read_drawdown_plan_statuses(
+            connection,
+            provider,
+            end_date=date(2024, 1, 2),
+        )
+        counts = [
+            connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in ("drawdown_cycles", "drawdown_tier_records", "alert_events")
+        ]
+
+    assert len(result.statuses) == 1
+    status = result.statuses[0]
+    assert status.evaluation.drawdown == pytest.approx(0.20)
+    assert status.recorded_tier_keys == frozenset()
+    assert status.readiness == "SETUP_REQUIRED"
+    assert status.missing_setup == ("fund fee", "position snapshot")
+    assert counts == [0, 0, 0]
+
+
+def test_plan_readiness_is_derived_from_fee_and_even_closed_position(
+    tmp_path: Path,
+) -> None:
+    sqlite_path = tmp_path / "bot.sqlite3"
+    _add_plan(sqlite_path)
+    with open_connection(sqlite_path) as connection:
+        upsert_fund_fee(
+            connection,
+            fund_symbol="000001",
+            fee_mode="rate",
+            fee_value=0,
+        )
+        upsert_position_snapshot(
+            connection,
+            fund_symbol="000001",
+            units=0,
+            average_unit_cost=0,
+        )
+        result = read_drawdown_plan_statuses(
+            connection,
+            FakePlanProvider(_history([100, 90])),
+            end_date=date(2024, 1, 2),
+        )
+
+    assert result.statuses[0].readiness == "READY"
+    assert result.statuses[0].missing_setup == ()
+    assert result.statuses[0].fund_nav is None
 
 
 def test_restart_preserves_tier_deduplication_and_allows_next_level(
@@ -339,3 +450,20 @@ def _history(closes: list[float]) -> pd.DataFrame:
         }
     )
     return frame
+
+
+class FakePlanProvider:
+    def __init__(self, history: pd.DataFrame) -> None:
+        self.history = history
+        self.calls: list[tuple[Instrument, object, object, PriceBasis]] = []
+
+    def get_history(
+        self,
+        instrument: Instrument,
+        start_date: object,
+        end_date: object,
+        *,
+        price_basis: PriceBasis = PriceBasis.UNADJUSTED,
+    ) -> pd.DataFrame:
+        self.calls.append((instrument, start_date, end_date, price_basis))
+        return self.history

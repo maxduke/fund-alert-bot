@@ -27,6 +27,8 @@ Implemented Telegram commands:
 - `/set_fund_fee <fund_symbol> <rate:<percent>%|fixed:<RMB>>`
 - `/set_fund_cutoff <fund_symbol> <HH:MM>`
 - `/sync_position <fund_symbol> <units> <average_unit_cost>`
+- `/add_drawdown_plan <reference_etf> <feeder_fund> <name> <tiers> [lookback:<days>]`
+- `/plans`
 - `/list`
 - `/del <id>`
 - `/check`
@@ -94,6 +96,39 @@ value. It never substitutes the Reference ETF's realtime price.
 Remember to run `/sync_position` again after any redemption, distribution or
 reinvestment, unrecorded purchase, fee mismatch, or visible difference from the
 sales platform. The Bot cannot discover those account changes itself.
+
+### Drawdown Add Plans
+
+A Drawdown Add Plan watches a listed ETF as the market reference while keeping
+the ETF feeder fund you actually own as a separate position identity:
+
+```text
+/add_drawdown_plan 510300 000001 "Core index" 15:5000,20:10000,25:15000
+```
+
+An optional `lookback:<days>` token may appear only at the end. The default is
+365 calendar days; MA250 and its 20-session slope are always informational.
+Every tier amount is incremental, so the example's maximum one-cycle total is
+¥30,000. The Bot shows that total before saving.
+
+The command first produces a read-only preview and saves nothing. Check both
+six-digit codes, the tiers, the setup state, and any available market-data
+preview. Press **Confirm pair + domestic calendar** only when the two codes are
+the intended ETF/feeder pair and the fund follows the domestic A-share valuation
+calendar. The confirmation expires after 10 minutes and is tied to the current
+Telegram user and chat.
+
+Confirmed-close checks use only the Reference ETF's forward-adjusted (`qfq`)
+daily history. The feeder fund's NAV is never substituted for ETF drawdown, and
+the ETF realtime price is never used as exact position value. Several newly
+reached tiers produce one aggregated reminder; each tier is remembered within
+its peak cycle. A reminder does not mean that a purchase happened.
+
+Use `/plans` for a concise overview and `/check` for detailed plan state. Both
+are read-only for Drawdown Add Plans: they do not consume a tier or create an
+alert. Before-close plan pre-alerts and explicit `/mark_added` recording are
+implemented in the following phase; until then, only confirmed-close plan
+reminders are emitted.
 
 Telegram remains the command channel and default notification channel; optional
 Bark, ntfy, and webhook channels can be enabled with environment variables.

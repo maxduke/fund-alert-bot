@@ -203,6 +203,71 @@ def add_rule(
     return int(cursor.lastrowid)
 
 
+def add_drawdown_plan_rule(
+    connection: sqlite3.Connection,
+    *,
+    reference_symbol: str,
+    investment_fund_symbol: str,
+    name: str,
+    params: Any,
+) -> int:
+    """Insert one enabled one-to-one ETF/feeder-fund plan atomically."""
+
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        conflict = find_enabled_drawdown_plan_conflict(
+            connection,
+            reference_symbol=reference_symbol,
+            investment_fund_symbol=investment_fund_symbol,
+        )
+        if conflict is not None:
+            raise sqlite3.IntegrityError(
+                "An enabled drawdown plan already uses the reference ETF or fund."
+            )
+        now = _utc_now_text()
+        cursor = connection.execute(
+            """
+            INSERT INTO rules (
+                type, symbol, name, asset_type, params_json,
+                enabled, created_at, updated_at
+            )
+            VALUES ('drawdown_plan', ?, ?, 'cn_etf', ?, 1, ?, ?)
+            """,
+            (reference_symbol, name, _json_text(params), now, now),
+        )
+        connection.commit()
+        return int(cursor.lastrowid)
+    except Exception:
+        connection.rollback()
+        raise
+
+
+def find_enabled_drawdown_plan_conflict(
+    connection: sqlite3.Connection,
+    *,
+    reference_symbol: str,
+    investment_fund_symbol: str,
+) -> sqlite3.Row | None:
+    """Return a plan already using either side of a proposed pair."""
+
+    return connection.execute(
+        """
+        SELECT id, symbol, name, params_json
+        FROM rules
+        WHERE
+            type = 'drawdown_plan'
+            AND enabled = 1
+            AND (
+                symbol = ?
+                OR json_extract(params_json, '$.investment_fund_symbol') = ?
+            )
+        ORDER BY id
+        LIMIT 1
+        """,
+        (reference_symbol, investment_fund_symbol),
+    ).fetchone()
+
+
 def list_rules(connection: sqlite3.Connection) -> list[sqlite3.Row]:
     """Return all rules in insertion order."""
     return list(
@@ -423,6 +488,29 @@ def get_position_snapshot(
         """,
         (fund_symbol,),
     ).fetchone()
+
+
+def list_position_snapshots(connection: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Return all current feeder-fund position snapshots."""
+
+    return list(
+        connection.execute(
+            """
+            SELECT
+                fund_symbol,
+                units,
+                average_unit_cost,
+                is_estimated,
+                last_synced_at,
+                estimates_since_sync,
+                position_sync_required_since,
+                created_at,
+                updated_at
+            FROM position_snapshots
+            ORDER BY fund_symbol
+            """
+        ).fetchall()
+    )
 
 
 def alert_exists(connection: sqlite3.Connection, alert_key: str) -> bool:

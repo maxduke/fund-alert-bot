@@ -6,10 +6,15 @@ import json
 import logging
 import math
 import re
+import secrets
+import shlex
+import sqlite3
 from collections.abc import Awaitable, Callable, Collection, Sequence
 from dataclasses import dataclass
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from zoneinfo import ZoneInfo
 
 from fund_alert_bot.checks import (
     DCA_RULE_TYPE,
@@ -17,16 +22,23 @@ from fund_alert_bot.checks import (
     PROFIT_RULE_TYPE,
     DcaCheckResult,
     DrawdownCheckResult,
+    DrawdownPlanStatus,
+    DrawdownPlanStatusResult,
     ProfitCheckResult,
+    derive_plan_readiness,
     evaluate_dca_rules,
     evaluate_drawdown_rules,
     evaluate_profit_rules,
+    read_drawdown_plan_statuses,
 )
 from fund_alert_bot.config import NotificationSettings
 from fund_alert_bot.db import (
+    add_drawdown_plan_rule,
     add_rule,
     delete_rule,
+    find_enabled_drawdown_plan_conflict,
     initialize_database,
+    list_position_snapshots,
     open_connection,
     upsert_fund_cutoff,
     upsert_fund_fee,
@@ -42,14 +54,21 @@ from fund_alert_bot.market_data import (
     Instrument,
     MarketDataProvider,
     MarketDataProviderError,
+    PriceBasis,
 )
 from fund_alert_bot.notifications.dispatch import send_alert_notifications
 from fund_alert_bot.notifications.service import build_notification_service
 from fund_alert_bot.rules.dca import normalize_weekday
+from fund_alert_bot.rules.drawdown_plan import (
+    DrawdownPlanConfig,
+    evaluate_drawdown_plan,
+    parse_drawdown_plan_config,
+    required_history_start,
+)
 
 if TYPE_CHECKING:
     from telegram import Update
-    from telegram.ext import Application, CommandHandler, ContextTypes
+    from telegram.ext import Application, ContextTypes
 
 LOGGER = logging.getLogger(__name__)
 
@@ -61,6 +80,10 @@ ADD_PROFIT_USAGE = "Usage: /add_profit <asset_type> <symbol> <name> <cost> <thre
 SET_FUND_FEE_USAGE = "Usage: /set_fund_fee <fund_symbol> <rate:<percent>%|fixed:<RMB>>"
 SET_FUND_CUTOFF_USAGE = "Usage: /set_fund_cutoff <fund_symbol> <HH:MM>"
 SYNC_POSITION_USAGE = "Usage: /sync_position <fund_symbol> <units> <average_unit_cost>"
+ADD_DRAWDOWN_PLAN_USAGE = (
+    "Usage: /add_drawdown_plan <reference_etf_symbol> <feeder_fund_symbol> "
+    "<name> <tiers> [lookback:<calendar_days>]"
+)
 START_MESSAGE = "fund-alert-bot is running. Use /help to see available commands."
 HELP_MESSAGE = "\n".join(
     (
@@ -73,6 +96,9 @@ HELP_MESSAGE = "\n".join(
         "/set_fund_fee <fund_symbol> <rate:<percent>%|fixed:<RMB>>",
         "/set_fund_cutoff <fund_symbol> <HH:MM>",
         "/sync_position <fund_symbol> <units> <average_unit_cost>",
+        "/add_drawdown_plan <reference_etf> <feeder_fund> <name> <tiers> "
+        "[lookback:<days>]",
+        "/plans - Show investment-plan status",
         "/list - List configured rules",
         "/del <id> - Remove a configured rule",
         "/check - Run a manual check",
@@ -155,6 +181,28 @@ class SyncPositionCommand:
     fund_symbol: str
     units: float
     average_unit_cost: float
+
+
+@dataclass(frozen=True, slots=True)
+class DrawdownPlanCommand:
+    """Parsed /add_drawdown_plan command fields."""
+
+    reference_symbol: str
+    investment_fund_symbol: str
+    name: str
+    params: dict[str, object]
+    config: DrawdownPlanConfig
+
+
+@dataclass(slots=True)
+class DrawdownPlanDraft:
+    """Short-lived Telegram pairing confirmation draft."""
+
+    user_id: int
+    chat_id: int
+    expires_at: datetime
+    command: DrawdownPlanCommand
+    created_rule_id: int | None = None
 
 
 def parse_add_drawdown_args(args: Sequence[str]) -> DrawdownCommand:
@@ -331,6 +379,88 @@ def parse_sync_position_args(args: Sequence[str]) -> SyncPositionCommand:
             "use positive units with positive cost, or exact 0 0 for a closed position"
         )
     return SyncPositionCommand(fund_symbol, units, average_unit_cost)
+
+
+def parse_add_drawdown_plan_args(args: Sequence[str]) -> DrawdownPlanCommand:
+    """Parse a Reference ETF / feeder-fund drawdown plan."""
+
+    try:
+        words = shlex.split(" ".join(args))
+    except ValueError as exc:
+        raise CommandParseError(f"{ADD_DRAWDOWN_PLAN_USAGE}\n{exc}") from exc
+    if len(words) not in {4, 5}:
+        raise CommandParseError(ADD_DRAWDOWN_PLAN_USAGE)
+
+    reference_symbol = _parse_fund_symbol(words[0])
+    investment_fund_symbol = _parse_fund_symbol(words[1])
+    name = words[2].strip()
+    if not name:
+        raise CommandParseError("name must not be empty")
+    lookback_days = 365
+    if len(words) == 5:
+        option = words[4]
+        if not option.startswith("lookback:"):
+            raise CommandParseError("only trailing lookback:<calendar_days> is allowed")
+        try:
+            lookback_days = int(option.removeprefix("lookback:"))
+        except ValueError as exc:
+            raise CommandParseError("lookback must be a positive integer") from exc
+        if lookback_days <= 0:
+            raise CommandParseError("lookback must be a positive integer")
+
+    tiers = _parse_drawdown_plan_tiers(words[3])
+    params: dict[str, object] = {
+        "investment_fund_symbol": investment_fund_symbol,
+        "lookback_days": lookback_days,
+        "tiers": tiers,
+        "sma_window": 250,
+        "sma_slope_window": 20,
+    }
+    try:
+        config = parse_drawdown_plan_config(
+            reference_symbol=reference_symbol,
+            asset_type=AssetType.CN_ETF,
+            params=params,
+        )
+    except ValueError as exc:
+        raise CommandParseError(str(exc)) from exc
+    return DrawdownPlanCommand(
+        reference_symbol,
+        investment_fund_symbol,
+        name,
+        params,
+        config,
+    )
+
+
+def _parse_drawdown_plan_tiers(raw_tiers: str) -> list[dict[str, int | float]]:
+    pieces = raw_tiers.split(",")
+    if not pieces or any(not piece for piece in pieces):
+        raise CommandParseError("tiers must use percent:amount separated by commas")
+
+    tiers: list[dict[str, int | float]] = []
+    for piece in pieces:
+        if piece.count(":") != 1:
+            raise CommandParseError("tiers must use percent:amount separated by commas")
+        raw_percent, raw_amount = piece.split(":")
+        try:
+            percent = float(raw_percent)
+            amount = float(raw_amount)
+        except ValueError as exc:
+            raise CommandParseError("tier percent and amount must be numbers") from exc
+        if not math.isfinite(percent) or percent <= 0 or percent >= 100:
+            raise CommandParseError(
+                "tier percent must be greater than 0 and less than 100"
+            )
+        if not math.isfinite(amount) or amount <= 0:
+            raise CommandParseError("tier amount must be a positive finite number")
+        tiers.append(
+            {
+                "drawdown": percent / 100,
+                "amount": int(amount) if amount.is_integer() else amount,
+            }
+        )
+    return tiers
 
 
 def _parse_fund_symbol(raw_symbol: str) -> str:
@@ -579,6 +709,276 @@ def format_fund_fee(row: Any) -> str:
     )
 
 
+def build_drawdown_plan_preview(
+    connection: Any,
+    market_data_provider: MarketDataProvider,
+    command: DrawdownPlanCommand,
+    *,
+    today: date,
+) -> str:
+    """Build a read-only pairing preview without storing plan state."""
+
+    readiness, missing_setup = derive_plan_readiness(
+        connection,
+        command.investment_fund_symbol,
+    )
+    lines = [
+        "📋 Confirm Drawdown Add Plan",
+        "",
+        f"Reference ETF: {command.reference_symbol}",
+        f"Investment feeder fund: {command.investment_fund_symbol}",
+        f"Display name: {command.name}",
+        f"Lookback: {command.config.lookback_days} calendar days",
+        "Tiers (incremental):",
+        *(
+            f"-{tier.drawdown:.0%} → ¥{tier.amount:,.2f}"
+            for tier in command.config.tiers
+        ),
+        "Maximum one-cycle total: "
+        f"¥{sum(tier.amount for tier in command.config.tiers):,.2f}",
+        "MA250 / 20-session slope: context only",
+        f"Plan readiness: {readiness}",
+    ]
+    if missing_setup:
+        lines.append(f"Missing setup: {', '.join(missing_setup)}")
+
+    try:
+        history = market_data_provider.get_history(
+            Instrument(
+                command.reference_symbol,
+                command.name,
+                AssetType.CN_ETF,
+            ),
+            required_history_start(
+                evaluation_date=today,
+                config=command.config,
+            ),
+            today,
+            price_basis=PriceBasis.QFQ,
+        )
+        latest_date = _history_latest_date(history)
+        evaluation = evaluate_drawdown_plan(
+            history,
+            command.config,
+            reference_symbol=command.reference_symbol,
+            expected_date=latest_date,
+        )
+        reached = [f"-{tier.drawdown:.0%}" for tier in evaluation.newly_crossed_tiers]
+        lines.extend(
+            (
+                "",
+                "Reference ETF data: verified as qfq daily history",
+                f"Data date: {evaluation.latest_date}",
+                f"Current drawdown preview: -{evaluation.drawdown:.1%}",
+                "Currently reached tiers: " + (", ".join(reached) or "none"),
+            )
+        )
+    except (MarketDataProviderError, ValueError) as exc:
+        lines.extend(("", f"Reference ETF data: unavailable ({exc})"))
+
+    try:
+        nav = market_data_provider.get_fund_nav(
+            Instrument(
+                command.investment_fund_symbol,
+                command.name,
+                AssetType.CN_OPEN_FUND,
+            )
+        )
+        lines.append(
+            f"Feeder-fund NAV: verified {nav.value:.12g} on {nav.date} ({nav.source})"
+        )
+    except MarketDataProviderError as exc:
+        lines.append(f"Feeder-fund NAV: unavailable ({exc})")
+
+    lines.extend(
+        (
+            "",
+            "Confirm only if these codes are the intended ETF/feeder pair and "
+            "the fund follows the domestic A-share valuation calendar.",
+            "This saves reminder rules only. It never places an order.",
+        )
+    )
+    return "\n".join(lines)
+
+
+def format_plan_overview(
+    result: DrawdownPlanStatusResult,
+    standalone_positions: Sequence[tuple[Any, FundNav | None]] = (),
+) -> str:
+    """Format concise `/plans` output."""
+
+    if (
+        not result.statuses
+        and not standalone_positions
+        and not result.no_data_skips
+        and not result.errors
+    ):
+        return "No investment plans or positions configured."
+    lines = ["📊 Investment Plans"]
+    for status in result.statuses:
+        next_tier = _next_open_tier(status)
+        lines.extend(
+            (
+                "",
+                f"{status.name} (plan {status.rule_id}) — {status.readiness}",
+                f"ETF {status.reference_symbol} → fund "
+                f"{status.config.investment_fund_symbol}",
+                f"Drawdown: -{status.evaluation.drawdown:.1%} "
+                f"({status.evaluation.latest_date}, {status.evaluation.source})",
+                (
+                    "Next open tier: all tiers already reminded"
+                    if next_tier is None
+                    else f"Next open tier: -{next_tier.drawdown:.0%} / "
+                    f"¥{next_tier.amount:,.2f}"
+                ),
+                *_format_position_lines(status),
+            )
+        )
+    for position, nav in standalone_positions:
+        units = float(position["units"])
+        accuracy = "estimated" if position["is_estimated"] else "exact"
+        lines.extend(
+            (
+                "",
+                f"Fund {position['fund_symbol']} — no Drawdown Add Plan",
+                f"Position: {accuracy}; last sync {position['last_synced_at']}; "
+                f"later estimates {position['estimates_since_sync']}",
+            )
+        )
+        if units == 0:
+            lines.append("Position value: ¥0.00 (closed)")
+        elif nav is None:
+            lines.append("Position value: unavailable (dated fund NAV missing)")
+        else:
+            lines.append(
+                f"Position value: ¥{units * nav.value:,.2f} using NAV "
+                f"{nav.value:.12g} on {nav.date}"
+            )
+    _append_plan_failures(lines, result)
+    return "\n".join(lines)
+
+
+def format_plan_details(result: DrawdownPlanStatusResult) -> str:
+    """Format detailed read-only plan state for `/check`."""
+
+    if not result.statuses and not result.no_data_skips and not result.errors:
+        return ""
+    lines = ["", "📉 Drawdown Add Plan status (read-only)"]
+    for status in result.statuses:
+        evaluation = status.evaluation
+        lines.extend(
+            (
+                "",
+                f"{status.name} (plan {status.rule_id})",
+                f"Reference ETF: {status.reference_symbol}",
+                f"Investment fund: {status.config.investment_fund_symbol}",
+                f"Data: {evaluation.latest_date} / {evaluation.source} qfq close",
+                f"Current: {evaluation.latest_price:.6g}",
+                f"Peak: {evaluation.peak_price:.6g} on {evaluation.peak_date}",
+                f"Drawdown: -{evaluation.drawdown:.1%}",
+                *_format_plan_trend(status),
+                f"Readiness: {status.readiness}",
+            )
+        )
+        if status.missing_setup:
+            lines.append(f"Missing setup: {', '.join(status.missing_setup)}")
+        lines.append("Tiers:")
+        for tier in status.config.tiers:
+            state = (
+                "reminded; no add recorded"
+                if tier.key in status.recorded_tier_keys
+                else "open"
+            )
+            lines.append(f"• -{tier.drawdown:.0%} / ¥{tier.amount:,.2f}: {state}")
+        next_tier = _next_open_tier(status)
+        if next_tier is None:
+            lines.append("Next level: all tiers already reminded")
+        else:
+            distance = max(0.0, next_tier.drawdown - evaluation.drawdown)
+            lines.extend(
+                (
+                    f"Next level: -{next_tier.drawdown:.0%}",
+                    f"Distance to next level: {distance * 100:.1f} percentage points",
+                )
+            )
+        lines.extend(_format_position_lines(status))
+    _append_plan_failures(lines, result)
+    return "\n".join(lines)
+
+
+def _history_latest_date(history: Any) -> date:
+    if history.empty or "date" not in history.columns:
+        raise ValueError("Confirmed ETF history has no dated rows.")
+    parsed = history["date"].dropna()
+    if parsed.empty:
+        raise ValueError("Confirmed ETF history has no dated rows.")
+    return date.fromisoformat(str(parsed.max())[:10])
+
+
+def _next_open_tier(status: DrawdownPlanStatus) -> Any | None:
+    return next(
+        (
+            tier
+            for tier in status.config.tiers
+            if tier.key not in status.recorded_tier_keys
+        ),
+        None,
+    )
+
+
+def _format_plan_trend(status: DrawdownPlanStatus) -> tuple[str, ...]:
+    evaluation = status.evaluation
+    label = f"MA{status.config.sma_window}"
+    if evaluation.sma is None:
+        return (f"{label}: unavailable (insufficient history)",)
+    lines = [
+        f"{label}: {evaluation.sma:.6g}",
+        f"Price vs {label}: {evaluation.distance_to_sma:+.1%}",
+    ]
+    if evaluation.sma_slope is None:
+        lines.append(f"{label} slope: unavailable (insufficient history)")
+    else:
+        direction = "rising" if evaluation.sma_slope > 0 else "falling"
+        if math.isclose(evaluation.sma_slope, 0, abs_tol=1e-12):
+            direction = "flat"
+        lines.append(
+            f"{label} {status.config.sma_slope_window}-session slope: "
+            f"{direction} ({evaluation.sma_slope:+.1%})"
+        )
+    return tuple(lines)
+
+
+def _format_position_lines(status: DrawdownPlanStatus) -> tuple[str, ...]:
+    if status.position is None:
+        return ("Position: not synced",)
+    accuracy = "estimated" if status.position["is_estimated"] else "exact"
+    units = float(status.position["units"])
+    lines = [
+        f"Position: {accuracy}; last sync {status.position['last_synced_at']}; "
+        f"later estimates {status.position['estimates_since_sync']}"
+    ]
+    if units == 0:
+        lines.append("Position value: ¥0.00 (closed)")
+    elif status.fund_nav is None:
+        lines.append("Position value: unavailable (dated fund NAV missing)")
+    else:
+        lines.append(
+            f"Position value: ¥{units * status.fund_nav.value:,.2f} using NAV "
+            f"{status.fund_nav.value:.12g} on {status.fund_nav.date}"
+        )
+    return tuple(lines)
+
+
+def _append_plan_failures(
+    lines: list[str],
+    result: DrawdownPlanStatusResult,
+) -> None:
+    for skip in result.no_data_skips:
+        lines.append(f"⚠️ {skip.symbol}: data unavailable — {skip.message}")
+    for error in result.errors:
+        lines.append(f"❌ Plan {error.rule_id} {error.symbol}: {error.message}")
+
+
 def get_start_message() -> str:
     """Return the current start message."""
     return START_MESSAGE
@@ -644,12 +1044,20 @@ def can_use_command(update: object, allowed_user_ids: Collection[int]) -> bool:
     return is_allowed_telegram_user(get_update_user_id(update), allowed_user_ids)
 
 
-async def _reply_text(update: Update, text: str) -> None:
+async def _reply_text(
+    update: Update,
+    text: str,
+    *,
+    reply_markup: object | None = None,
+) -> None:
     if update.effective_message is None:
         LOGGER.warning("Telegram command update has no effective message")
         return
 
-    await update.effective_message.reply_text(text)
+    if reply_markup is None:
+        await update.effective_message.reply_text(text)
+    else:
+        await update.effective_message.reply_text(text, reply_markup=reply_markup)
 
 
 async def reject_if_unauthorized(
@@ -680,14 +1088,19 @@ def build_command_handlers(
     sqlite_path: str | Path = ":memory:",
     market_data_provider: MarketDataProvider | None = None,
     notification_settings: NotificationSettings | None = None,
-) -> list[CommandHandler[Any, ContextTypes.DEFAULT_TYPE]]:
+    timezone: str = "Asia/Shanghai",
+    now_factory: Callable[[], datetime] | None = None,
+) -> list[Any]:
     """Build Telegram command handlers with an allowlist guard."""
-    from telegram.ext import CommandHandler
+    from telegram.ext import CallbackQueryHandler, CommandHandler
 
     allowed_user_ids = frozenset(allowed_user_ids)
     notification_settings = notification_settings or NotificationSettings()
     if market_data_provider is None:
         market_data_provider = AkshareMarketDataProvider()
+    plan_drafts: dict[str, DrawdownPlanDraft] = {}
+    clock = now_factory or (lambda: datetime.now(UTC))
+    timezone_info = ZoneInfo(timezone)
 
     async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context
@@ -789,6 +1202,135 @@ def build_command_handlers(
             ),
         )
 
+    async def add_drawdown_plan(
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        if await reject_if_unauthorized(update, allowed_user_ids):
+            return
+        try:
+            command = parse_add_drawdown_plan_args(getattr(context, "args", ()))
+        except CommandParseError as exc:
+            await _reply_text(update, str(exc))
+            return
+
+        user_id = get_update_user_id(update)
+        chat_id = get_update_chat_id(update)
+        if user_id is None or chat_id is None:
+            await _reply_text(
+                update, "Unable to scope the confirmation; rerun command."
+            )
+            return
+
+        with open_connection(sqlite_path) as connection:
+            initialize_database(connection)
+            conflict = find_enabled_drawdown_plan_conflict(
+                connection,
+                reference_symbol=command.reference_symbol,
+                investment_fund_symbol=command.investment_fund_symbol,
+            )
+            if conflict is not None:
+                await _reply_text(
+                    update,
+                    f"Plan conflict: enabled plan id={conflict['id']} already uses "
+                    "this Reference ETF or Investment Feeder Fund.",
+                )
+                return
+            preview = build_drawdown_plan_preview(
+                connection,
+                market_data_provider,
+                command,
+                today=_clock_now(clock).astimezone(timezone_info).date(),
+            )
+
+        now = _clock_now(clock)
+        for old_token, draft in tuple(plan_drafts.items()):
+            if draft.expires_at <= now:
+                plan_drafts.pop(old_token, None)
+        token = secrets.token_urlsafe(9)
+        plan_drafts[token] = DrawdownPlanDraft(
+            user_id=user_id,
+            chat_id=chat_id,
+            expires_at=now + timedelta(minutes=10),
+            command=command,
+        )
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+        markup = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "Confirm pair + domestic calendar",
+                        callback_data=f"drawdown_plan_confirm:{token}",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "Cancel",
+                        callback_data=f"drawdown_plan_cancel:{token}",
+                    )
+                ],
+            ]
+        )
+        await _reply_text(update, preview, reply_markup=markup)
+
+    async def drawdown_plan_draft_callback(
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        del context
+        query = getattr(update, "callback_query", None)
+        if query is None:
+            return
+        await query.answer()
+        if await reject_if_unauthorized(update, allowed_user_ids):
+            return
+        data = str(getattr(query, "data", ""))
+        action, separator, token = data.partition(":")
+        if not separator or action not in {
+            "drawdown_plan_confirm",
+            "drawdown_plan_cancel",
+        }:
+            return
+        draft = plan_drafts.get(token)
+        now = _clock_now(clock)
+        if (
+            draft is None
+            or draft.expires_at <= now
+            or draft.user_id != get_update_user_id(update)
+            or draft.chat_id != get_update_chat_id(update)
+        ):
+            await query.edit_message_text(
+                "This plan confirmation expired or belongs to another chat. "
+                "Rerun /add_drawdown_plan."
+            )
+            return
+        if action == "drawdown_plan_cancel":
+            plan_drafts.pop(token, None)
+            await query.edit_message_text("Drawdown Add Plan creation cancelled.")
+            return
+        if draft.created_rule_id is None:
+            try:
+                with open_connection(sqlite_path) as connection:
+                    initialize_database(connection)
+                    draft.created_rule_id = add_drawdown_plan_rule(
+                        connection,
+                        reference_symbol=draft.command.reference_symbol,
+                        investment_fund_symbol=(draft.command.investment_fund_symbol),
+                        name=draft.command.name,
+                        params=draft.command.params,
+                    )
+            except sqlite3.IntegrityError as exc:
+                await query.edit_message_text(f"Plan was not saved: {exc}")
+                return
+        await query.edit_message_text(
+            f"Saved Drawdown Add Plan id={draft.created_rule_id}: "
+            f"ETF {draft.command.reference_symbol} → fund "
+            f"{draft.command.investment_fund_symbol}. The first scheduled "
+            "confirmed-close evaluation will initialize its cycle. No order "
+            "has been placed."
+        )
+
     async def set_fund_fee(
         update: Update,
         context: ContextTypes.DEFAULT_TYPE,
@@ -888,6 +1430,48 @@ def build_command_handlers(
 
         await _reply_text(update, response)
 
+    async def plans(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del context
+        if await reject_if_unauthorized(update, allowed_user_ids):
+            return
+        with open_connection(sqlite_path) as connection:
+            initialize_database(connection)
+            result = read_drawdown_plan_statuses(
+                connection,
+                market_data_provider,
+                end_date=_clock_now(clock).astimezone(timezone_info).date(),
+            )
+            planned_funds = {
+                status.config.investment_fund_symbol for status in result.statuses
+            }
+            standalone_rows = [
+                row
+                for row in list_position_snapshots(connection)
+                if row["fund_symbol"] not in planned_funds
+            ]
+            standalone_positions = []
+            for row in standalone_rows:
+                nav = None
+                if float(row["units"]) > 0:
+                    try:
+                        nav = market_data_provider.get_fund_nav(
+                            Instrument(
+                                str(row["fund_symbol"]),
+                                str(row["fund_symbol"]),
+                                AssetType.CN_OPEN_FUND,
+                            )
+                        )
+                    except MarketDataProviderError:
+                        LOGGER.warning(
+                            "Unable to fetch standalone position NAV symbol=%s",
+                            row["fund_symbol"],
+                        )
+                standalone_positions.append((row, nav))
+        await _reply_text(
+            update,
+            format_plan_overview(result, standalone_positions),
+        )
+
     async def delete_rule_command(
         update: Update,
         context: ContextTypes.DEFAULT_TYPE,
@@ -936,6 +1520,11 @@ def build_command_handlers(
             )
             profit_result = evaluate_profit_rules(connection, market_data_provider)
             dca_result = evaluate_dca_rules(connection)
+            plan_status_result = read_drawdown_plan_statuses(
+                connection,
+                market_data_provider,
+                end_date=_clock_now(clock).astimezone(timezone_info).date(),
+            )
 
         notifications = [
             *result.notifications,
@@ -957,6 +1546,22 @@ def build_command_handlers(
             dispatch_summary = None
 
         response = format_check_summary(result, dca_result, profit_result)
+        legacy_checked = (
+            result.checked_rules
+            + dca_result.checked_rules
+            + profit_result.checked_rules
+        )
+        if legacy_checked == 0 and (
+            plan_status_result.statuses
+            or plan_status_result.no_data_skips
+            or plan_status_result.errors
+        ):
+            response = (
+                "📋 Check summary\n\n"
+                f"✅ Read-only Drawdown Add Plans checked: "
+                f"{plan_status_result.checked_rules}."
+            )
+        response += format_plan_details(plan_status_result)
         if dispatch_summary is not None and dispatch_summary.failed:
             response = (
                 f"{response}\n"
@@ -1001,12 +1606,18 @@ def build_command_handlers(
         CommandHandler("add_drawdown", add_drawdown),
         CommandHandler("add_profit", add_profit),
         CommandHandler("add_dca", add_dca),
+        CommandHandler("add_drawdown_plan", add_drawdown_plan),
         CommandHandler("set_fund_fee", set_fund_fee),
         CommandHandler("set_fund_cutoff", set_fund_cutoff),
         CommandHandler("sync_position", sync_position),
         CommandHandler("list", list_rules),
+        CommandHandler("plans", plans),
         CommandHandler("del", delete_rule_command),
         CommandHandler("check", check),
+        CallbackQueryHandler(
+            drawdown_plan_draft_callback,
+            pattern=r"^drawdown_plan_(?:confirm|cancel):",
+        ),
         CommandHandler("test_notify", test_notify),
     ]
 
@@ -1018,6 +1629,7 @@ def register_command_handlers(
     sqlite_path: str | Path = ":memory:",
     market_data_provider: MarketDataProvider | None = None,
     notification_settings: NotificationSettings | None = None,
+    timezone: str = "Asia/Shanghai",
 ) -> None:
     """Register supported Telegram command handlers."""
     for handler in build_command_handlers(
@@ -1025,6 +1637,7 @@ def register_command_handlers(
         sqlite_path=sqlite_path,
         market_data_provider=market_data_provider,
         notification_settings=notification_settings,
+        timezone=timezone,
     ):
         application.add_handler(handler)
 
@@ -1036,6 +1649,7 @@ def create_application(
     sqlite_path: str | Path = ":memory:",
     market_data_provider: MarketDataProvider | None = None,
     notification_settings: NotificationSettings | None = None,
+    timezone: str = "Asia/Shanghai",
     post_init: Callable[
         [Application[Any, Any, Any, Any, Any, Any]],
         Awaitable[None],
@@ -1070,6 +1684,7 @@ def create_application(
         sqlite_path=sqlite_path,
         market_data_provider=market_data_provider,
         notification_settings=notification_settings,
+        timezone=timezone,
     )
     return application
 
@@ -1080,3 +1695,10 @@ def _command_chat_ids(update: object) -> frozenset[int]:
         LOGGER.warning("Telegram command update has no effective chat")
         return frozenset()
     return frozenset({chat_id})
+
+
+def _clock_now(clock: Callable[[], datetime]) -> datetime:
+    now = clock()
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("now_factory must return a timezone-aware datetime")
+    return now.astimezone(UTC)

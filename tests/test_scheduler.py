@@ -13,7 +13,7 @@ import pytest
 from fund_alert_bot import commands, scheduler
 from fund_alert_bot.config import NotificationSettings
 from fund_alert_bot.db import add_rule, initialize_database, open_connection
-from fund_alert_bot.market_data import AssetType, Instrument
+from fund_alert_bot.market_data import AssetType, Instrument, PriceBasis
 
 EXPECTED_DRAWDOWN_10_MESSAGE = "\n".join(
     (
@@ -401,6 +401,42 @@ def test_scheduled_market_check_evaluates_profit_rules(
     ]
 
 
+def test_scheduled_market_check_confirms_drawdown_plan_once(tmp_path: Path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    _add_drawdown_plan(sqlite_path)
+    application = FakeApplication()
+    provider = FakeProvider(_plan_history([100, 80]))
+    market_calendar = FakeMarketCalendar(is_trading_day=True)
+
+    for _ in range(2):
+        asyncio.run(
+            scheduler.run_scheduled_market_check(
+                application=application,
+                sqlite_path=sqlite_path,
+                allowed_user_ids={123},
+                market_data_provider=provider,
+                market_calendar=market_calendar,
+                timezone="Asia/Shanghai",
+                run_date=date(2024, 1, 2),
+            )
+        )
+
+    with open_connection(sqlite_path) as connection:
+        event = connection.execute(
+            "SELECT notification_status FROM alert_events"
+        ).fetchone()
+        tiers = connection.execute(
+            "SELECT tier_key FROM drawdown_tier_records ORDER BY drawdown"
+        ).fetchall()
+
+    assert len(application.bot.messages) == 1
+    assert "Buy-plan reminder — A500" in application.bot.messages[0]["text"]
+    assert "Data date: 2024-01-02" in application.bot.messages[0]["text"]
+    assert [row["tier_key"] for row in tiers] == ["0.15", "0.2"]
+    assert event["notification_status"] == "sent"
+    assert provider.price_bases == [PriceBasis.QFQ, PriceBasis.QFQ]
+
+
 def test_scheduled_dca_check_prevents_duplicate_alerts_by_alert_key(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -469,14 +505,18 @@ class FakeProvider:
         self.latest = latest
         self.calls: list[tuple[Instrument, object, object]] = []
         self.latest_calls: list[Instrument] = []
+        self.price_bases: list[PriceBasis] = []
 
     def get_history(
         self,
         instrument: Instrument,
         start_date: object,
         end_date: object,
+        *,
+        price_basis: PriceBasis = PriceBasis.UNADJUSTED,
     ) -> pd.DataFrame:
         self.calls.append((instrument, start_date, end_date))
+        self.price_bases.append(price_basis)
         return self.history
 
     def get_latest(self, instrument: Instrument) -> dict[str, object] | None:
@@ -536,6 +576,47 @@ def _add_drawdown_rule(sqlite_path: Path) -> None:
                 "price_field": "close",
             },
         )
+
+
+def _add_drawdown_plan(sqlite_path: Path) -> None:
+    with open_connection(sqlite_path) as connection:
+        initialize_database(connection)
+        add_rule(
+            connection,
+            type="drawdown_plan",
+            symbol="510300",
+            name="A500",
+            asset_type="cn_etf",
+            params={
+                "investment_fund_symbol": "000001",
+                "lookback_days": 365,
+                "tiers": [
+                    {"drawdown": 0.15, "amount": 5000},
+                    {"drawdown": 0.20, "amount": 10000},
+                ],
+                "sma_window": 250,
+                "sma_slope_window": 20,
+            },
+        )
+
+
+def _plan_history(closes: list[float]) -> pd.DataFrame:
+    frame = pd.DataFrame(
+        {
+            "date": pd.date_range("2024-01-01", periods=len(closes)),
+            "close": closes,
+            "source": ["akshare_eastmoney"] * len(closes),
+        }
+    )
+    frame.attrs.update(
+        {
+            "symbol": "510300",
+            "source": "akshare_eastmoney",
+            "price_basis": "qfq",
+            "frequency": "daily",
+        }
+    )
+    return frame
 
 
 def _add_dca_rule(sqlite_path: Path) -> None:
