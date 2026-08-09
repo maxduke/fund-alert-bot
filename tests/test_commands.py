@@ -153,6 +153,7 @@ def test_parse_fund_settings_and_position_commands() -> None:
         (parse_sync_position_args, ["110026", "10", "0"], "exact 0 0"),
         (parse_sync_position_args, ["110026", "nan", "1"], "finite"),
         (parse_sync_position_args, ["ABC", "0", "0"], "exactly 6 digits"),
+        (parse_sync_position_args, ["１１００２６", "0", "0"], "exactly 6 digits"),
     ],
 )
 def test_reject_invalid_fund_settings_and_position_commands(

@@ -335,7 +335,7 @@ def parse_sync_position_args(args: Sequence[str]) -> SyncPositionCommand:
 
 def _parse_fund_symbol(raw_symbol: str) -> str:
     symbol = raw_symbol.strip()
-    if not re.fullmatch(r"\d{6}", symbol):
+    if not re.fullmatch(r"[0-9]{6}", symbol):
         raise CommandParseError("fund_symbol must be exactly 6 digits")
     return symbol
 
