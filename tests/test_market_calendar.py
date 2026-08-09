@@ -105,6 +105,24 @@ def test_confirmed_calendar_status_requires_date_inside_provider_coverage() -> N
         calendar.confirmed_status(date(2024, 1, 5))
 
 
+def test_calendar_refreshes_when_cached_coverage_ends() -> None:
+    class GrowingCalendar:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def tool_trade_date_hist_sina(self) -> pd.DataFrame:
+            self.calls += 1
+            end_date = "2024-01-05" if self.calls > 1 else "2024-01-04"
+            return pd.DataFrame({"trade_date": ["2024-01-02", end_date]})
+
+    fake_ak = GrowingCalendar()
+    calendar = CNMarketCalendar(ak_module=fake_ak)
+
+    assert calendar.confirmed_status(date(2024, 1, 2)) is True
+    assert calendar.confirmed_status(date(2024, 1, 5)) is True
+    assert fake_ak.calls == 2
+
+
 def test_confirmed_calendar_status_never_uses_weekday_fallback() -> None:
     calendar = CNMarketCalendar(
         ak_module=FakeAkshareCalendar(error=RuntimeError("unavailable"))

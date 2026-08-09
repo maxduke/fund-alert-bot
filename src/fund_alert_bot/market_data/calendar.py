@@ -37,7 +37,12 @@ class CNMarketCalendar:
     def is_trading_day(self, check_date: date) -> bool:
         """Return True when check_date is a CN trading day."""
 
+        was_cached = self._trade_days is not None
         trade_days = self._load_trade_days()
+        if was_cached and trade_days is not None and check_date > max(trade_days):
+            refreshed_trade_days = self._load_trade_days(refresh=True)
+            if refreshed_trade_days is not None:
+                trade_days = refreshed_trade_days
         if trade_days is None:
             return is_cn_market_weekday(check_date)
         return check_date in trade_days
@@ -45,17 +50,20 @@ class CNMarketCalendar:
     def confirmed_status(self, check_date: date) -> bool:
         """Return status only when the loaded calendar covers check_date."""
 
+        was_cached = self._trade_days is not None
         trade_days = self._load_trade_days()
         if trade_days is None:
             raise MarketCalendarUnavailableError("CN trade calendar is unavailable.")
-        if check_date < min(trade_days) or check_date > max(trade_days):
+        if was_cached and not _covers(trade_days, check_date):
+            trade_days = self._load_trade_days(refresh=True)
+        if trade_days is None or not _covers(trade_days, check_date):
             raise MarketCalendarUnavailableError(
                 f"CN trade calendar does not cover {check_date.isoformat()}."
             )
         return check_date in trade_days
 
-    def _load_trade_days(self) -> set[date] | None:
-        if self._trade_days is not None:
+    def _load_trade_days(self, *, refresh: bool = False) -> set[date] | None:
+        if self._trade_days is not None and not refresh:
             return self._trade_days
 
         try:
@@ -92,6 +100,10 @@ def is_cn_market_weekday(check_date: date) -> bool:
     """Return True for Monday-Friday fallback scheduling."""
 
     return check_date.weekday() < 5
+
+
+def _covers(trade_days: set[date], check_date: date) -> bool:
+    return min(trade_days) <= check_date <= max(trade_days)
 
 
 def _extract_trade_days(raw_data: Any) -> set[date] | None:

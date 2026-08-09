@@ -56,8 +56,10 @@ class AkshareMarketDataProvider(MarketDataProvider):
         self._realtime_spot_ttl_seconds = realtime_spot_ttl_seconds
         self._today_factory = today_factory
         self._now_factory = now_factory or (lambda: datetime.now(UTC))
-        self._realtime_spot_cache: dict[AssetType, tuple[float, pd.DataFrame]] = {}
-        self._sina_etf_spot_cache: tuple[float, pd.DataFrame] | None = None
+        self._realtime_spot_cache: dict[
+            AssetType, tuple[float, datetime, pd.DataFrame]
+        ] = {}
+        self._sina_etf_spot_cache: tuple[float, datetime, pd.DataFrame] | None = None
 
     def get_history(
         self,
@@ -104,10 +106,17 @@ class AkshareMarketDataProvider(MarketDataProvider):
             raise UnsupportedAssetTypeError("Realtime plan quotes require cn_etf.")
 
         symbol = _strip_exchange_prefix(instrument.symbol)
-        raw_data = self._fetch_raw_realtime(AssetType.CN_ETF)
-        row = _find_realtime_row(raw_data, symbol)
-        if row is not None and _read_realtime_float(row, "最新价") is not None:
-            return self._build_etf_quote(row, symbol=symbol, source="eastmoney")
+        snapshot = self._fetch_raw_realtime(AssetType.CN_ETF)
+        if snapshot is not None:
+            raw_data, fetched_at = snapshot
+            row = _find_realtime_row(raw_data, symbol)
+            if row is not None and _read_realtime_float(row, "最新价") is not None:
+                return self._build_etf_quote(
+                    row,
+                    symbol=symbol,
+                    source="eastmoney",
+                    fetched_at=fetched_at,
+                )
 
         return self.get_sina_etf_realtime_quote(instrument)
 
@@ -117,7 +126,7 @@ class AkshareMarketDataProvider(MarketDataProvider):
         if self._resolve_asset_type(instrument.asset_type) is not AssetType.CN_ETF:
             raise UnsupportedAssetTypeError("Realtime plan quotes require cn_etf.")
         symbol = _strip_exchange_prefix(instrument.symbol)
-        sina_data = self._fetch_sina_etf_realtime()
+        sina_data, fetched_at = self._fetch_sina_etf_realtime()
         sina_row = _find_realtime_row(
             sina_data,
             _format_sina_etf_symbol(symbol),
@@ -128,6 +137,7 @@ class AkshareMarketDataProvider(MarketDataProvider):
             sina_row,
             symbol=symbol,
             source="sina_fallback",
+            fetched_at=fetched_at,
         )
 
     def get_latest(self, instrument: Instrument) -> dict[str, object] | None:
@@ -157,8 +167,11 @@ class AkshareMarketDataProvider(MarketDataProvider):
         if asset_type is AssetType.CN_OPEN_FUND:
             return None
 
-        raw_data = self._fetch_raw_realtime(asset_type)
-        if raw_data is None or raw_data.empty or "代码" not in raw_data.columns:
+        snapshot = self._fetch_raw_realtime(asset_type)
+        if snapshot is None:
+            return None
+        raw_data, _fetched_at = snapshot
+        if raw_data.empty or "代码" not in raw_data.columns:
             return None
 
         symbol = _strip_exchange_prefix(instrument.symbol)
@@ -188,6 +201,7 @@ class AkshareMarketDataProvider(MarketDataProvider):
         *,
         symbol: str,
         source: str,
+        fetched_at: datetime,
     ) -> RealtimeQuote:
         return RealtimeQuote(
             symbol=symbol,
@@ -196,10 +210,13 @@ class AkshareMarketDataProvider(MarketDataProvider):
             volume=_read_realtime_float(row, "成交量"),
             amount=_read_realtime_float(row, "成交额"),
             source=source,
-            fetched_at=self._now_factory(),
+            fetched_at=fetched_at,
         )
 
-    def _fetch_raw_realtime(self, asset_type: AssetType) -> pd.DataFrame | None:
+    def _fetch_raw_realtime(
+        self,
+        asset_type: AssetType,
+    ) -> tuple[pd.DataFrame, datetime] | None:
         cached = self._read_realtime_spot_cache(asset_type)
         if cached is not None:
             return cached
@@ -215,15 +232,16 @@ class AkshareMarketDataProvider(MarketDataProvider):
             else:
                 return None
         except (AttributeError, MarketDataFetchError):
-            return None
+            raw_data = pd.DataFrame()
 
-        self._write_realtime_spot_cache(asset_type, raw_data)
-        return raw_data
+        fetched_at = self._now_factory()
+        self._write_realtime_spot_cache(asset_type, raw_data, fetched_at)
+        return raw_data, fetched_at
 
     def _read_realtime_spot_cache(
         self,
         asset_type: AssetType,
-    ) -> pd.DataFrame | None:
+    ) -> tuple[pd.DataFrame, datetime] | None:
         if self._realtime_spot_ttl_seconds <= 0:
             return None
 
@@ -231,9 +249,9 @@ class AkshareMarketDataProvider(MarketDataProvider):
         if cached is None:
             return None
 
-        cached_at, raw_data = cached
+        cached_at, fetched_at, raw_data = cached
         if time.monotonic() - cached_at <= self._realtime_spot_ttl_seconds:
-            return raw_data
+            return raw_data, fetched_at
 
         self._realtime_spot_cache.pop(asset_type, None)
         return None
@@ -242,10 +260,15 @@ class AkshareMarketDataProvider(MarketDataProvider):
         self,
         asset_type: AssetType,
         raw_data: pd.DataFrame,
+        fetched_at: datetime,
     ) -> None:
         if self._realtime_spot_ttl_seconds <= 0:
             return
-        self._realtime_spot_cache[asset_type] = (time.monotonic(), raw_data)
+        self._realtime_spot_cache[asset_type] = (
+            time.monotonic(),
+            fetched_at,
+            raw_data,
+        )
 
     def _fetch_raw_history(
         self,
@@ -352,19 +375,20 @@ class AkshareMarketDataProvider(MarketDataProvider):
             "akshare",
         )
 
-    def _fetch_sina_etf_realtime(self) -> pd.DataFrame:
+    def _fetch_sina_etf_realtime(self) -> tuple[pd.DataFrame, datetime]:
         if self._sina_etf_spot_cache is not None:
-            cached_at, raw_data = self._sina_etf_spot_cache
+            cached_at, fetched_at, raw_data = self._sina_etf_spot_cache
             if time.monotonic() - cached_at <= self._realtime_spot_ttl_seconds:
-                return raw_data
+                return raw_data, fetched_at
 
         raw_data = self._call_with_retry(
             self._akshare.fund_etf_category_sina,
             symbol="ETF\u57fa\u91d1",
         )
+        fetched_at = self._now_factory()
         if self._realtime_spot_ttl_seconds > 0:
-            self._sina_etf_spot_cache = (time.monotonic(), raw_data)
-        return raw_data
+            self._sina_etf_spot_cache = (time.monotonic(), fetched_at, raw_data)
+        return raw_data, fetched_at
 
     def _call_with_retry(
         self,
