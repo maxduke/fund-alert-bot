@@ -394,6 +394,9 @@ def test_confirmed_history_fails_closed_on_stale_or_wrong_basis() -> None:
     stale = _history([100])
     wrong_basis = _history([100])
     wrong_basis.attrs["price_basis"] = "unadjusted"
+    unsupported_source = _history([100])
+    unsupported_source.attrs["source"] = "sina_unadjusted"
+    unsupported_source["source"] = "sina_unadjusted"
 
     with pytest.raises(ValueError, match="does not contain closing data"):
         evaluate_drawdown_plan(
@@ -405,6 +408,13 @@ def test_confirmed_history_fails_closed_on_stale_or_wrong_basis() -> None:
     with pytest.raises(ValueError, match="price_basis"):
         evaluate_drawdown_plan(
             wrong_basis,
+            _config([(0.15, 5000)]),
+            reference_symbol="510300",
+            expected_date=date(2024, 1, 1),
+        )
+    with pytest.raises(ValueError, match="source is unsupported"):
+        evaluate_drawdown_plan(
+            unsupported_source,
             _config([(0.15, 5000)]),
             reference_symbol="510300",
             expected_date=date(2024, 1, 1),

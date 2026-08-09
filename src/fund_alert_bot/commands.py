@@ -432,9 +432,11 @@ def _format_rule_row(row: Any) -> str:
         sort_keys=True,
         separators=(",", ":"),
     )
+    status = "enabled" if bool(row["enabled"]) else "disabled"
     if row["type"] == DCA_RULE_TYPE:
         return (
-            f"id={row['id']} type={row['type']} name={row['name']} params={params_text}"
+            f"id={row['id']} type={row['type']} name={row['name']}"
+            f" status={status} params={params_text}"
         )
 
     return (
@@ -443,6 +445,7 @@ def _format_rule_row(row: Any) -> str:
         f"asset_type={row['asset_type']} "
         f"symbol={row['symbol']} "
         f"name={row['name']} "
+        f"status={status} "
         f"params={params_text}"
     )
 

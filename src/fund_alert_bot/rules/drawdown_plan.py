@@ -19,6 +19,7 @@ _PRICE_RELATIVE_TOLERANCE = 1e-4
 _PRICE_ABSOLUTE_TOLERANCE = 1e-6
 _SYMBOL_PATTERN = re.compile(r"[0-9]{6}")
 _REALTIME_SOURCES = frozenset({"eastmoney", "sina_fallback"})
+_CONFIRMED_HISTORY_SOURCES = frozenset({"akshare_eastmoney"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,8 +215,8 @@ def validate_confirmed_plan_history(
         if history.attrs.get(key) != expected:
             raise ValueError(f"Confirmed history has invalid {key} metadata.")
     source = history.attrs.get("source")
-    if not isinstance(source, str) or not source:
-        raise ValueError("Confirmed history has no source metadata.")
+    if not isinstance(source, str) or source not in _CONFIRMED_HISTORY_SOURCES:
+        raise ValueError("Confirmed history source is unsupported.")
 
     frame = _clean_history(history, "close")
     if frame.empty:

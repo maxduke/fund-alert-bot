@@ -526,6 +526,7 @@ def test_delete_command_reports_disabled_drawdown_plan(tmp_path) -> None:
         rule = list_rules(connection)[0]
 
     assert rule["enabled"] == 0
+    assert "status=disabled" in format_rules_list([rule])
     assert message.replies == [f"Disabled drawdown plan id={rule_id}"]
 
 

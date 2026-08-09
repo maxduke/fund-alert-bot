@@ -213,6 +213,11 @@ def evaluate_drawdown_plan_rule(
         expected_active_cycle_id=(
             None if active_cycle is None else active_cycle.cycle_id
         ),
+        expected_last_evaluated_date=(
+            None
+            if active_cycle is None
+            else active_cycle.last_evaluated_date.isoformat()
+        ),
         start_new_cycle=active_cycle is None or evaluation.cycle_changed,
         peak_date=evaluation.peak_date.isoformat(),
         peak_price=evaluation.peak_price,

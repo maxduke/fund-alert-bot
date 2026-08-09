@@ -450,6 +450,7 @@ def persist_drawdown_plan_evaluation(
     *,
     rule_id: int,
     expected_active_cycle_id: int | None,
+    expected_last_evaluated_date: str | None,
     start_new_cycle: bool,
     peak_date: str,
     peak_price: float,
@@ -471,7 +472,13 @@ def persist_drawdown_plan_evaluation(
     try:
         active = get_active_drawdown_cycle(connection, rule_id)
         active_id = None if active is None else int(active["id"])
-        if active_id != expected_active_cycle_id:
+        active_evaluation_date = (
+            None if active is None else str(active["last_evaluated_date"])
+        )
+        if (
+            active_id != expected_active_cycle_id
+            or active_evaluation_date != expected_last_evaluated_date
+        ):
             raise sqlite3.IntegrityError("Active drawdown cycle changed concurrently.")
 
         now = _utc_now_text()

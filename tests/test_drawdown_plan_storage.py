@@ -212,6 +212,7 @@ def test_cycle_tiers_and_event_roll_back_together_on_constraint_failure(
                 connection,
                 rule_id=rule_id,
                 expected_active_cycle_id=None,
+                expected_last_evaluated_date=None,
                 start_new_cycle=True,
                 peak_date="2024-01-01",
                 peak_price=100,
@@ -229,6 +230,46 @@ def test_cycle_tiers_and_event_roll_back_together_on_constraint_failure(
         ]
 
     assert counts == [0, 0, 0]
+
+
+def test_stale_cycle_version_cannot_regress_evaluation_date(tmp_path: Path) -> None:
+    sqlite_path = tmp_path / "bot.sqlite3"
+    rule_id = _add_plan(sqlite_path)
+
+    with open_connection(sqlite_path) as connection:
+        initial = evaluate_drawdown_plan_rule(
+            connection,
+            list_rules(connection)[0],
+            _history([100, 90]),
+            expected_date=date(2024, 1, 2),
+        )
+        persist_drawdown_plan_evaluation(
+            connection,
+            rule_id=rule_id,
+            expected_active_cycle_id=initial.cycle_id,
+            expected_last_evaluated_date="2024-01-02",
+            start_new_cycle=False,
+            peak_date="2024-01-01",
+            peak_price=100,
+            evaluation_date="2024-01-03",
+        )
+
+        with pytest.raises(sqlite3.IntegrityError, match="changed concurrently"):
+            persist_drawdown_plan_evaluation(
+                connection,
+                rule_id=rule_id,
+                expected_active_cycle_id=initial.cycle_id,
+                expected_last_evaluated_date="2024-01-02",
+                start_new_cycle=False,
+                peak_date="2024-01-01",
+                peak_price=100,
+                evaluation_date="2024-01-02",
+            )
+
+        active = get_active_drawdown_cycle(connection, rule_id)
+
+    assert active is not None
+    assert active["last_evaluated_date"] == "2024-01-03"
 
 
 def _add_plan(sqlite_path: Path) -> int:
