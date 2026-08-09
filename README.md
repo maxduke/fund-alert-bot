@@ -81,7 +81,8 @@ Optional notification channel configuration:
 - `NTFY_TOPIC`
 - `WEBHOOK_URL`
 
-Realtime quotes and RSI/RSI6 alerts are not implemented here.
+Realtime quotes are used only for the existing before-close drawdown estimate.
+RSI and RSI6 alerts are not implemented here.
 
 ## Planned Stack
 
@@ -101,7 +102,7 @@ Do not add Django, FastAPI, PostgreSQL, Redis, Celery, RSI indicators, a web UI,
 
 ## Local Development
 
-After the project skeleton is added in a future PR, the expected local flow will be:
+The local development flow is:
 
 ```powershell
 python -m venv .venv
@@ -139,8 +140,8 @@ especially on Windows workstations.
 
 - `AGENTS.md`: contributor and coding-agent guardrails
 - `docs/architecture.md`: planned module responsibilities
-- `docs/investment-plan-guide.md`: planned Drawdown Buy Plan and allocation usage
-- `docs/investment-plan-implementation.md`: agreed implementation design and PR plan
+- `docs/investment-plan-guide.md`: accepted Drawdown Add Plan and position-usage design
+- `docs/investment-plan-implementation.md`: accepted implementation design and PR plan
 - `docs/roadmap.md`: PR-sized implementation phases
 - `.env.example`: placeholder-only configuration template
 
