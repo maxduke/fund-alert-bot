@@ -11,13 +11,19 @@ from fund_alert_bot.db import (
     add_alert_event,
     add_rule,
     alert_exists,
+    connect,
     delete_rule,
+    get_fund_settings,
+    get_position_snapshot,
     init_db,
     list_enabled_rules,
     list_rules,
     open_connection,
     record_alert_notification_result,
     reserve_alert_event,
+    upsert_fund_cutoff,
+    upsert_fund_fee,
+    upsert_position_snapshot,
 )
 
 
@@ -39,9 +45,143 @@ def test_init_db_creates_storage_tables(tmp_path: Path) -> None:
     assert {
         "alert_events",
         "app_metadata",
+        "fund_settings",
         "notification_channels",
+        "position_snapshots",
         "rules",
     }.issubset(table_names)
+
+
+def test_fund_settings_and_position_snapshot_survive_restart(tmp_path: Path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+
+    with open_connection(sqlite_path) as connection:
+        init_db(connection)
+        upsert_fund_fee(
+            connection,
+            fund_symbol="110026",
+            fee_mode="rate",
+            fee_value=0.0015,
+        )
+        upsert_fund_cutoff(
+            connection,
+            fund_symbol="110026",
+            subscription_cutoff="14:45",
+        )
+        upsert_position_snapshot(
+            connection,
+            fund_symbol="110026",
+            units=1234.5,
+            average_unit_cost=1.234,
+            synced_at="2026-08-09T01:02:03+00:00",
+        )
+
+    with open_connection(sqlite_path) as connection:
+        init_db(connection)
+        settings = get_fund_settings(connection, "110026")
+        position = get_position_snapshot(connection, "110026")
+
+    assert dict(settings) == {
+        "fund_symbol": "110026",
+        "fee_mode": "rate",
+        "fee_value": 0.0015,
+        "subscription_cutoff": "14:45",
+        "created_at": settings["created_at"],
+        "updated_at": settings["updated_at"],
+    }
+    assert position["units"] == 1234.5
+    assert position["average_unit_cost"] == 1.234
+    assert position["is_estimated"] == 0
+    assert position["last_synced_at"] == "2026-08-09T01:02:03+00:00"
+    assert position["estimates_since_sync"] == 0
+
+
+def test_init_adds_position_tables_without_changing_existing_rules(
+    tmp_path: Path,
+) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    with open_connection(sqlite_path) as connection:
+        init_db(connection)
+        rule_id = add_rule(
+            connection,
+            type="dca_reminder",
+            symbol="A500",
+            name="A500",
+            asset_type="dca",
+            params={"weekday": "FRI", "amount": 2000},
+        )
+        connection.execute("DROP TABLE fund_settings")
+        connection.execute("DROP TABLE position_snapshots")
+        connection.commit()
+
+    with open_connection(sqlite_path) as connection:
+        init_db(connection)
+        tables = {
+            row["name"]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        rules = list_rules(connection)
+
+    assert {"fund_settings", "position_snapshots"}.issubset(tables)
+    assert [row["id"] for row in rules] == [rule_id]
+
+
+def test_position_sync_accepts_exact_closed_pair_and_resets_estimate_state() -> None:
+    connection = connect(":memory:")
+    try:
+        init_db(connection)
+        connection.execute(
+            """
+            INSERT INTO position_snapshots (
+                fund_symbol, units, average_unit_cost, is_estimated,
+                last_synced_at, estimates_since_sync,
+                position_sync_required_since, created_at, updated_at
+            ) VALUES (?, ?, ?, 1, ?, 3, ?, ?, ?)
+            """,
+            (
+                "110026",
+                100,
+                1.2,
+                "2026-08-01T00:00:00+00:00",
+                "2026-08-02T00:00:00+00:00",
+                "2026-08-01T00:00:00+00:00",
+                "2026-08-01T00:00:00+00:00",
+            ),
+        )
+        connection.commit()
+
+        row = upsert_position_snapshot(
+            connection,
+            fund_symbol="110026",
+            units=0,
+            average_unit_cost=0,
+            synced_at="2026-08-09T00:00:00+00:00",
+        )
+    finally:
+        connection.close()
+
+    assert row["units"] == 0
+    assert row["average_unit_cost"] == 0
+    assert row["is_estimated"] == 0
+    assert row["estimates_since_sync"] == 0
+    assert row["position_sync_required_since"] is None
+
+
+def test_position_table_rejects_mixed_zero_values() -> None:
+    connection = connect(":memory:")
+    try:
+        init_db(connection)
+        with pytest.raises(sqlite3.IntegrityError):
+            upsert_position_snapshot(
+                connection,
+                fund_symbol="110026",
+                units=10,
+                average_unit_cost=0,
+            )
+    finally:
+        connection.close()
 
 
 def test_init_db_creates_required_rule_columns(tmp_path: Path) -> None:

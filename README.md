@@ -24,6 +24,9 @@ Implemented Telegram commands:
 - `/add_drawdown <asset_type> <symbol> <name> <lookback_days> <thresholds>`
 - `/add_profit <asset_type> <symbol> <name> <cost> <thresholds>`
 - `/add_dca <name> <weekday> <amount>`
+- `/set_fund_fee <fund_symbol> <rate:<percent>%|fixed:<RMB>>`
+- `/set_fund_cutoff <fund_symbol> <HH:MM>`
+- `/sync_position <fund_symbol> <units> <average_unit_cost>`
 - `/list`
 - `/del <id>`
 - `/check`
@@ -56,6 +59,41 @@ DCA reminders are added with `/add_dca`, for example `/add_dca 创业板 周四
 `THU`. `/check` also checks whether DCA reminders are due today. Scheduled DCA
 checks run daily and send at most one reminder per rule per date. DCA reminders
 do not fetch market data and do not trade.
+
+### Feeder-fund setup and position sync
+
+Use the six-digit code of the ETF feeder fund you actually own. Set its known
+sales-platform subscription fee once, for example:
+
+```text
+/set_fund_fee 110026 rate:0.15%
+/set_fund_fee 110026 fixed:1.50
+```
+
+`rate:0%` is valid when the share class has no front-end subscription fee. The
+default subscription cutoff is `15:00`; correct it only when your platform uses
+a different cutoff:
+
+```text
+/set_fund_cutoff 110026 15:00
+```
+
+Copy the current units and average unit cost shown by the sales platform:
+
+```text
+/sync_position 110026 12345.67 1.2345
+```
+
+Both values must be positive. Use the exact pair `/sync_position 110026 0 0`
+only when the position is fully closed. The command replaces the Bot's current
+snapshot and labels it `exact`; it does not import transactions or contact a
+broker. For a positive position, the response fetches the feeder fund's latest
+published unit NAV once and shows both its date and the resulting position
+value. It never substitutes the Reference ETF's realtime price.
+
+Remember to run `/sync_position` again after any redemption, distribution or
+reinvestment, unrecorded purchase, fee mismatch, or visible difference from the
+sales platform. The Bot cannot discover those account changes itself.
 
 Telegram remains the command channel and default notification channel; optional
 Bark, ntfy, and webhook channels can be enabled with environment variables.

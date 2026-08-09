@@ -24,12 +24,15 @@ from fund_alert_bot.commands import (
     parse_add_dca_args,
     parse_add_drawdown_args,
     parse_add_profit_args,
+    parse_set_fund_cutoff_args,
+    parse_set_fund_fee_args,
+    parse_sync_position_args,
     parse_thresholds,
     profit_params,
 )
 from fund_alert_bot.config import NotificationSettings
 from fund_alert_bot.db import add_rule, connect, init_db, list_rules, open_connection
-from fund_alert_bot.market_data import AssetType, Instrument
+from fund_alert_bot.market_data import AssetType, FundNav, Instrument
 from fund_alert_bot.rules.dca import weekday_for_date
 
 EXPECTED_DRAWDOWN_10_MESSAGE = "\n".join(
@@ -125,6 +128,41 @@ def test_parse_valid_dca_command_with_english_weekday() -> None:
     assert command.name == "创业板"
     assert command.weekday == "THU"
     assert command.amount == 1000
+
+
+def test_parse_fund_settings_and_position_commands() -> None:
+    rate = parse_set_fund_fee_args(["110026", "rate:0.15%"])
+    fixed = parse_set_fund_fee_args(["110026", "fixed:1.5"])
+    cutoff = parse_set_fund_cutoff_args(["110026", "15:00"])
+    position = parse_sync_position_args(["110026", "1234.5", "1.234"])
+    closed = parse_sync_position_args(["110026", "0", "0"])
+
+    assert (rate.fee_mode, rate.fee_value) == ("rate", 0.0015)
+    assert (fixed.fee_mode, fixed.fee_value) == ("fixed", 1.5)
+    assert cutoff.subscription_cutoff == "15:00"
+    assert (position.units, position.average_unit_cost) == (1234.5, 1.234)
+    assert (closed.units, closed.average_unit_cost) == (0, 0)
+
+
+@pytest.mark.parametrize(
+    "parser,args,message",
+    [
+        (parse_set_fund_fee_args, ["110026", "0.15%"], "fee must use"),
+        (parse_set_fund_fee_args, ["110026", "rate:nan%"], "finite"),
+        (parse_set_fund_cutoff_args, ["110026", "24:00"], "24-hour"),
+        (parse_sync_position_args, ["110026", "10", "0"], "exact 0 0"),
+        (parse_sync_position_args, ["110026", "nan", "1"], "finite"),
+        (parse_sync_position_args, ["ABC", "0", "0"], "exactly 6 digits"),
+        (parse_sync_position_args, ["１１００２６", "0", "0"], "exactly 6 digits"),
+    ],
+)
+def test_reject_invalid_fund_settings_and_position_commands(
+    parser: object,
+    args: list[str],
+    message: str,
+) -> None:
+    with pytest.raises(CommandParseError, match=message):
+        parser(args)
 
 
 def test_reject_invalid_asset_type() -> None:
@@ -462,6 +500,106 @@ def test_add_dca_command_persists_rule(tmp_path) -> None:
     ]
 
 
+def test_fund_setting_commands_persist_shared_values(tmp_path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    handlers = build_command_handlers({123}, sqlite_path=sqlite_path)
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        effective_message=FakeMessage(),
+    )
+
+    asyncio.run(
+        _handler_by_command(handlers, "set_fund_fee").callback(
+            update,
+            SimpleNamespace(bot=FakeBot(), args=["110026", "rate:0.15%"]),
+        )
+    )
+    asyncio.run(
+        _handler_by_command(handlers, "set_fund_cutoff").callback(
+            update,
+            SimpleNamespace(bot=FakeBot(), args=["110026", "14:45"]),
+        )
+    )
+
+    with open_connection(sqlite_path) as connection:
+        row = connection.execute(
+            "SELECT * FROM fund_settings WHERE fund_symbol = '110026'"
+        ).fetchone()
+
+    assert row["fee_mode"] == "rate"
+    assert row["fee_value"] == 0.0015
+    assert row["subscription_cutoff"] == "14:45"
+    assert "future estimates" in update.effective_message.replies[0]
+    assert "future manual confirmations" in update.effective_message.replies[1]
+
+
+def test_sync_position_persists_exact_snapshot_and_shows_dated_value(tmp_path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    provider = FakeProvider(
+        _history(["2026-08-08"], [1.5]),
+        nav=FundNav("110026", date(2026, 8, 8), 1.5, "akshare_eastmoney"),
+    )
+    handlers = build_command_handlers(
+        {123},
+        sqlite_path=sqlite_path,
+        market_data_provider=provider,
+    )
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        effective_message=message,
+    )
+
+    asyncio.run(
+        _handler_by_command(handlers, "sync_position").callback(
+            update,
+            SimpleNamespace(bot=FakeBot(), args=["110026", "1000", "1.2"]),
+        )
+    )
+
+    with open_connection(sqlite_path) as connection:
+        row = connection.execute(
+            "SELECT * FROM position_snapshots WHERE fund_symbol = '110026'"
+        ).fetchone()
+
+    assert (row["units"], row["average_unit_cost"], row["is_estimated"]) == (
+        1000,
+        1.2,
+        0,
+    )
+    assert provider.nav_calls == ["110026"]
+    assert "Accuracy: exact" in message.replies[0]
+    assert "Latest unit NAV: 1.5 on 2026-08-08" in message.replies[0]
+    assert "Position value: ¥1,500.00" in message.replies[0]
+
+
+def test_closed_position_does_not_request_eastmoney_nav(tmp_path) -> None:
+    provider = FakeProvider(_history(["2026-08-08"], [1.5]))
+    handlers = build_command_handlers(
+        {123},
+        sqlite_path=tmp_path / "fund_alert_bot.sqlite3",
+        market_data_provider=provider,
+    )
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        effective_message=message,
+    )
+
+    asyncio.run(
+        _handler_by_command(handlers, "sync_position").callback(
+            update,
+            SimpleNamespace(bot=FakeBot(), args=["110026", "0", "0"]),
+        )
+    )
+
+    assert provider.nav_calls == []
+    assert "Position value: ¥0.00 (closed)" in message.replies[0]
+
+
 def test_add_profit_command_persists_rule(tmp_path) -> None:
     sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
     handlers = build_command_handlers({123}, sqlite_path=sqlite_path)
@@ -701,11 +839,14 @@ class FakeProvider:
         history: pd.DataFrame,
         *,
         latest: dict[str, object] | None = None,
+        nav: FundNav | None = None,
     ) -> None:
         self.history = history
         self.latest = latest
+        self.nav = nav
         self.calls: list[tuple[Instrument, object, object]] = []
         self.latest_calls: list[Instrument] = []
+        self.nav_calls: list[str] = []
 
     def get_history(
         self,
@@ -719,6 +860,17 @@ class FakeProvider:
     def get_latest(self, instrument: Instrument) -> dict[str, object] | None:
         self.latest_calls.append(instrument)
         return self.latest
+
+    def get_fund_nav(
+        self,
+        instrument: Instrument,
+        nav_date: object | None = None,
+    ) -> FundNav:
+        del nav_date
+        self.nav_calls.append(instrument.symbol)
+        if self.nav is None:
+            raise AssertionError("unexpected fund NAV request")
+        return self.nav
 
 
 class FakeMessage:

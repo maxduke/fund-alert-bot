@@ -174,7 +174,10 @@ def test_open_fund_history_uses_unit_nav_as_close_and_filters_by_date() -> None:
     assert history["close"].tolist() == [1.1, 1.2]
     for column in ["open", "high", "low", "volume", "amount"]:
         assert history[column].tolist() == [None, None]
-    assert history["source"].tolist() == ["akshare", "akshare"]
+    assert history["source"].tolist() == [
+        "akshare_eastmoney",
+        "akshare_eastmoney",
+    ]
     assert fake_ak.calls == [
         (
             "fund_open_fund_info_em",
@@ -507,8 +510,102 @@ def test_get_latest_returns_last_normalized_row() -> None:
         "close": 1.2,
         "volume": None,
         "amount": None,
-        "source": "akshare",
+        "source": "akshare_eastmoney",
     }
+
+
+def test_fund_nav_requires_exact_date_and_reuses_one_eastmoney_response() -> None:
+    fake_ak = FakeAkshare()
+    provider = AkshareMarketDataProvider(ak_module=fake_ak, retry_delay_seconds=0)
+    instrument = Instrument("000001", "Example Open Fund", AssetType.CN_OPEN_FUND)
+
+    exact = provider.get_fund_nav(instrument, "2024-01-02")
+    latest = provider.get_fund_nav(instrument)
+
+    assert (exact.date.isoformat(), exact.value, exact.source) == (
+        "2024-01-02",
+        1.1,
+        "akshare_eastmoney",
+    )
+    assert (latest.date.isoformat(), latest.value) == ("2024-01-03", 1.2)
+    assert fake_ak.calls == [
+        (
+            "fund_open_fund_info_em",
+            {
+                "symbol": "000001",
+                "indicator": "\u5355\u4f4d\u51c0\u503c\u8d70\u52bf",
+            },
+        )
+    ]
+
+
+def test_fund_nav_fails_closed_for_missing_exact_date_or_invalid_value() -> None:
+    class InvalidNavAkshare(FakeAkshare):
+        def fund_open_fund_info_em(self, **kwargs: Any) -> pd.DataFrame:
+            self.calls.append(("fund_open_fund_info_em", kwargs))
+            return pd.DataFrame(
+                {
+                    "\u51c0\u503c\u65e5\u671f": ["2024-01-02"],
+                    "\u5355\u4f4d\u51c0\u503c": ["not-a-number"],
+                }
+            )
+
+    provider = AkshareMarketDataProvider(
+        ak_module=InvalidNavAkshare(),
+        retry_delay_seconds=0,
+    )
+    instrument = Instrument("000001", "Example Open Fund", AssetType.CN_OPEN_FUND)
+
+    with pytest.raises(EmptyMarketDataError):
+        provider.get_fund_nav(instrument, "2024-01-01")
+    with pytest.raises(EmptyMarketDataError):
+        provider.get_fund_nav(instrument, "2024-01-02")
+
+
+def test_fund_nav_failure_is_cached_to_avoid_repeated_eastmoney_requests() -> None:
+    class FailingNavAkshare(FakeAkshare):
+        def fund_open_fund_info_em(self, **kwargs: Any) -> pd.DataFrame:
+            self.calls.append(("fund_open_fund_info_em", kwargs))
+            raise RuntimeError("rate limited")
+
+    fake_ak = FailingNavAkshare()
+    provider = AkshareMarketDataProvider(
+        ak_module=fake_ak,
+        retries=1,
+        retry_delay_seconds=0,
+    )
+    instrument = Instrument("000001", "Example Open Fund", AssetType.CN_OPEN_FUND)
+
+    with pytest.raises(MarketDataFetchError):
+        provider.get_fund_nav(instrument)
+    with pytest.raises(MarketDataFetchError, match="retry suppressed"):
+        provider.get_fund_nav(instrument)
+
+    assert [name for name, _kwargs in fake_ak.calls] == ["fund_open_fund_info_em"]
+
+
+def test_normalization_keeps_last_duplicate_nav_for_a_date() -> None:
+    class DuplicateNavAkshare(FakeAkshare):
+        def fund_open_fund_info_em(self, **kwargs: Any) -> pd.DataFrame:
+            self.calls.append(("fund_open_fund_info_em", kwargs))
+            return pd.DataFrame(
+                {
+                    "\u51c0\u503c\u65e5\u671f": ["2024-01-02", "2024-01-02"],
+                    "\u5355\u4f4d\u51c0\u503c": ["1.10", "1.11"],
+                }
+            )
+
+    provider = AkshareMarketDataProvider(
+        ak_module=DuplicateNavAkshare(),
+        retry_delay_seconds=0,
+    )
+
+    nav = provider.get_fund_nav(
+        Instrument("000001", "Example Open Fund", AssetType.CN_OPEN_FUND),
+        "2024-01-02",
+    )
+
+    assert nav.value == 1.11
 
 
 def test_open_fund_history_empty_after_date_filter_raises() -> None:

@@ -121,6 +121,36 @@ def init_db(connection: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL,
             UNIQUE(cycle_id, tier_key)
         );
+
+        CREATE TABLE IF NOT EXISTS fund_settings (
+            fund_symbol TEXT PRIMARY KEY,
+            fee_mode TEXT CHECK (fee_mode IN ('rate', 'fixed')),
+            fee_value REAL CHECK (fee_value >= 0),
+            subscription_cutoff TEXT NOT NULL DEFAULT '15:00',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            CHECK (
+                (fee_mode IS NULL AND fee_value IS NULL)
+                OR (fee_mode IS NOT NULL AND fee_value IS NOT NULL)
+            )
+        );
+
+        CREATE TABLE IF NOT EXISTS position_snapshots (
+            fund_symbol TEXT PRIMARY KEY,
+            units REAL NOT NULL CHECK (units >= 0),
+            average_unit_cost REAL NOT NULL CHECK (average_unit_cost >= 0),
+            is_estimated INTEGER NOT NULL DEFAULT 0 CHECK (is_estimated IN (0, 1)),
+            last_synced_at TEXT NOT NULL,
+            estimates_since_sync INTEGER NOT NULL DEFAULT 0
+                CHECK (estimates_since_sync >= 0),
+            position_sync_required_since TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            CHECK (
+                (units = 0 AND average_unit_cost = 0)
+                OR (units > 0 AND average_unit_cost > 0)
+            )
+        );
         """
     )
     _ensure_alert_event_delivery_columns(connection)
@@ -237,6 +267,162 @@ def delete_rule(connection: sqlite3.Connection, rule_id: int) -> bool:
         connection.execute("DELETE FROM rules WHERE id = ?", (rule_id,))
     connection.commit()
     return True
+
+
+def upsert_fund_fee(
+    connection: sqlite3.Connection,
+    *,
+    fund_symbol: str,
+    fee_mode: str,
+    fee_value: float,
+) -> sqlite3.Row:
+    """Set the shared future-contribution fee for one feeder fund."""
+
+    now = _utc_now_text()
+    connection.execute(
+        """
+        INSERT INTO fund_settings (
+            fund_symbol, fee_mode, fee_value, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(fund_symbol) DO UPDATE SET
+            fee_mode = excluded.fee_mode,
+            fee_value = excluded.fee_value,
+            updated_at = excluded.updated_at
+        """,
+        (fund_symbol, fee_mode, fee_value, now, now),
+    )
+    connection.commit()
+    row = get_fund_settings(connection, fund_symbol)
+    if row is None:
+        raise RuntimeError("Fund settings upsert did not persist a row.")
+    return row
+
+
+def upsert_fund_cutoff(
+    connection: sqlite3.Connection,
+    *,
+    fund_symbol: str,
+    subscription_cutoff: str,
+) -> sqlite3.Row:
+    """Set the future manual-subscription cutoff for one feeder fund."""
+
+    now = _utc_now_text()
+    connection.execute(
+        """
+        INSERT INTO fund_settings (
+            fund_symbol, subscription_cutoff, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(fund_symbol) DO UPDATE SET
+            subscription_cutoff = excluded.subscription_cutoff,
+            updated_at = excluded.updated_at
+        """,
+        (fund_symbol, subscription_cutoff, now, now),
+    )
+    connection.commit()
+    row = get_fund_settings(connection, fund_symbol)
+    if row is None:
+        raise RuntimeError("Fund settings upsert did not persist a row.")
+    return row
+
+
+def get_fund_settings(
+    connection: sqlite3.Connection,
+    fund_symbol: str,
+) -> sqlite3.Row | None:
+    """Return one feeder fund's shared settings."""
+
+    return connection.execute(
+        """
+        SELECT
+            fund_symbol,
+            fee_mode,
+            fee_value,
+            subscription_cutoff,
+            created_at,
+            updated_at
+        FROM fund_settings
+        WHERE fund_symbol = ?
+        """,
+        (fund_symbol,),
+    ).fetchone()
+
+
+def upsert_position_snapshot(
+    connection: sqlite3.Connection,
+    *,
+    fund_symbol: str,
+    units: float,
+    average_unit_cost: float,
+    synced_at: str | datetime | None = None,
+) -> sqlite3.Row:
+    """Replace one feeder-fund position with an exact platform snapshot."""
+
+    sync_time = _timestamp_text(synced_at)
+    now = _utc_now_text()
+    connection.execute(
+        """
+        INSERT INTO position_snapshots (
+            fund_symbol,
+            units,
+            average_unit_cost,
+            is_estimated,
+            last_synced_at,
+            estimates_since_sync,
+            position_sync_required_since,
+            created_at,
+            updated_at
+        )
+        VALUES (?, ?, ?, 0, ?, 0, NULL, ?, ?)
+        ON CONFLICT(fund_symbol) DO UPDATE SET
+            units = excluded.units,
+            average_unit_cost = excluded.average_unit_cost,
+            is_estimated = 0,
+            last_synced_at = excluded.last_synced_at,
+            estimates_since_sync = 0,
+            position_sync_required_since = NULL,
+            updated_at = excluded.updated_at
+        """,
+        (
+            fund_symbol,
+            units,
+            average_unit_cost,
+            sync_time,
+            now,
+            now,
+        ),
+    )
+    connection.commit()
+    row = get_position_snapshot(connection, fund_symbol)
+    if row is None:
+        raise RuntimeError("Position snapshot upsert did not persist a row.")
+    return row
+
+
+def get_position_snapshot(
+    connection: sqlite3.Connection,
+    fund_symbol: str,
+) -> sqlite3.Row | None:
+    """Return the current snapshot for one feeder fund."""
+
+    return connection.execute(
+        """
+        SELECT
+            fund_symbol,
+            units,
+            average_unit_cost,
+            is_estimated,
+            last_synced_at,
+            estimates_since_sync,
+            position_sync_required_since,
+            created_at,
+            updated_at
+        FROM position_snapshots
+        WHERE fund_symbol = ?
+        """,
+        (fund_symbol,),
+    ).fetchone()
 
 
 def alert_exists(connection: sqlite3.Connection, alert_key: str) -> bool:

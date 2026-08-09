@@ -17,6 +17,7 @@ from fund_alert_bot.market_data.exceptions import (
 )
 from fund_alert_bot.market_data.models import (
     AssetType,
+    FundNav,
     Instrument,
     PriceBasis,
     RealtimeQuote,
@@ -36,6 +37,7 @@ class AkshareMarketDataProvider(MarketDataProvider):
         retry_delay_seconds: float = 0.5,
         latest_lookback_days: int = 45,
         realtime_spot_ttl_seconds: float = 30.0,
+        fund_nav_cache_ttl_seconds: float = 300.0,
         today_factory: Callable[[], date] = date.today,
         now_factory: Callable[[], datetime] | None = None,
     ) -> None:
@@ -48,18 +50,25 @@ class AkshareMarketDataProvider(MarketDataProvider):
             or realtime_spot_ttl_seconds < 0
         ):
             raise ValueError("realtime_spot_ttl_seconds must be non-negative")
+        if (
+            not math.isfinite(fund_nav_cache_ttl_seconds)
+            or fund_nav_cache_ttl_seconds < 0
+        ):
+            raise ValueError("fund_nav_cache_ttl_seconds must be non-negative")
 
         self._ak_module = ak_module
         self._retries = retries
         self._retry_delay_seconds = retry_delay_seconds
         self._latest_lookback_days = latest_lookback_days
         self._realtime_spot_ttl_seconds = realtime_spot_ttl_seconds
+        self._fund_nav_cache_ttl_seconds = fund_nav_cache_ttl_seconds
         self._today_factory = today_factory
         self._now_factory = now_factory or (lambda: datetime.now(UTC))
         self._realtime_spot_cache: dict[
             AssetType, tuple[float, datetime, pd.DataFrame]
         ] = {}
         self._sina_etf_spot_cache: tuple[float, datetime, pd.DataFrame] | None = None
+        self._fund_nav_cache: dict[str, tuple[float, pd.DataFrame | None]] = {}
 
     def get_history(
         self,
@@ -158,6 +167,50 @@ class AkshareMarketDataProvider(MarketDataProvider):
         return {
             key: None if pd.isna(value) else value for key, value in latest_row.items()
         }
+
+    def get_fund_nav(
+        self,
+        instrument: Instrument,
+        nav_date: DateLike | None = None,
+    ) -> FundNav:
+        """Return one positive, finite feeder-fund unit NAV with its exact date."""
+
+        if (
+            self._resolve_asset_type(instrument.asset_type)
+            is not AssetType.CN_OPEN_FUND
+        ):
+            raise UnsupportedAssetTypeError("Unit NAV requires cn_open_fund.")
+
+        symbol = _strip_exchange_prefix(instrument.symbol)
+        history = normalize_history(
+            self._fetch_open_fund_history(symbol),
+            AssetType.CN_OPEN_FUND,
+            source="akshare_eastmoney",
+        )
+        history = history.loc[history["date"] <= _to_timestamp(self._today_factory())]
+        if nav_date is not None:
+            expected = _to_timestamp(nav_date)
+            history = history.loc[history["date"] == expected]
+        if history.empty:
+            expected_text = (
+                "latest" if nav_date is None else str(_to_timestamp(nav_date).date())
+            )
+            raise EmptyMarketDataError(
+                f"No unit NAV returned for {symbol} on {expected_text}."
+            )
+
+        row = history.iloc[-1]
+        value = pd.to_numeric(row["close"], errors="coerce")
+        if pd.isna(value) or not math.isfinite(float(value)) or float(value) <= 0:
+            raise EmptyMarketDataError(
+                f"Unit NAV for {symbol} on {row['date'].date()} is invalid."
+            )
+        return FundNav(
+            symbol=symbol,
+            date=row["date"].date(),
+            value=float(value),
+            source="akshare_eastmoney",
+        )
 
     def _get_realtime_latest(
         self,
@@ -318,16 +371,37 @@ class AkshareMarketDataProvider(MarketDataProvider):
                 "akshare",
             )
         if asset_type is AssetType.CN_OPEN_FUND:
-            return (
-                self._call_with_retry(
-                    ak_module.fund_open_fund_info_em,
-                    symbol=instrument.symbol,
-                    indicator="\u5355\u4f4d\u51c0\u503c\u8d70\u52bf",
-                ),
-                "akshare",
-            )
+            return self._fetch_open_fund_history(instrument.symbol), "akshare_eastmoney"
 
         raise UnsupportedAssetTypeError(f"Unsupported asset type: {asset_type!r}")
+
+    def _fetch_open_fund_history(self, symbol: str) -> pd.DataFrame:
+        symbol = _strip_exchange_prefix(symbol)
+        cached = self._fund_nav_cache.get(symbol)
+        if cached is not None:
+            cached_at, raw_data = cached
+            if time.monotonic() - cached_at <= self._fund_nav_cache_ttl_seconds:
+                if raw_data is None:
+                    raise MarketDataFetchError(
+                        f"Recent unit NAV request for {symbol} failed; "
+                        "retry suppressed."
+                    )
+                return raw_data
+            self._fund_nav_cache.pop(symbol, None)
+
+        try:
+            raw_data = self._call_with_retry(
+                self._akshare.fund_open_fund_info_em,
+                symbol=symbol,
+                indicator="\u5355\u4f4d\u51c0\u503c\u8d70\u52bf",
+            )
+        except MarketDataFetchError:
+            if self._fund_nav_cache_ttl_seconds > 0:
+                self._fund_nav_cache[symbol] = (time.monotonic(), None)
+            raise
+        if self._fund_nav_cache_ttl_seconds > 0:
+            self._fund_nav_cache[symbol] = (time.monotonic(), raw_data)
+        return raw_data
 
     def _fetch_cn_etf_history(
         self,

@@ -12,6 +12,7 @@ from fund_alert_bot.market_data.exceptions import (
 )
 from fund_alert_bot.market_data.models import (
     AssetType,
+    FundNav,
     Instrument,
     PriceBasis,
     RealtimeQuote,
@@ -23,6 +24,7 @@ __all__ = [
     "AssetType",
     "CNMarketCalendar",
     "EmptyMarketDataError",
+    "FundNav",
     "Instrument",
     "MarketCalendar",
     "MarketCalendarUnavailableError",

@@ -7,7 +7,12 @@ from typing import Protocol
 
 import pandas as pd
 
-from fund_alert_bot.market_data.models import Instrument, PriceBasis, RealtimeQuote
+from fund_alert_bot.market_data.models import (
+    FundNav,
+    Instrument,
+    PriceBasis,
+    RealtimeQuote,
+)
 
 DateLike = str | date | datetime | pd.Timestamp
 
@@ -33,3 +38,10 @@ class MarketDataProvider(Protocol):
 
     def get_sina_etf_realtime_quote(self, instrument: Instrument) -> RealtimeQuote:
         """Return the normalized Sina fallback ETF quote."""
+
+    def get_fund_nav(
+        self,
+        instrument: Instrument,
+        nav_date: DateLike | None = None,
+    ) -> FundNav:
+        """Return a validated exact-date or latest feeder-fund unit NAV."""
