@@ -139,6 +139,8 @@ especially on Windows workstations.
 
 - `AGENTS.md`: contributor and coding-agent guardrails
 - `docs/architecture.md`: planned module responsibilities
+- `docs/investment-plan-guide.md`: planned Drawdown Buy Plan and allocation usage
+- `docs/investment-plan-implementation.md`: agreed implementation design and PR plan
 - `docs/roadmap.md`: PR-sized implementation phases
 - `.env.example`: placeholder-only configuration template
 
