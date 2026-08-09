@@ -61,7 +61,7 @@ HELP_MESSAGE = "\n".join(
         "/add_profit <asset_type> <symbol> <name> <cost> <thresholds>",
         "/add_dca <name> <weekday> <amount>",
         "/list - List configured rules",
-        "/del <id> - Delete a configured rule",
+        "/del <id> - Remove a configured rule",
         "/check - Run a manual check",
         "/test_notify - Send a test notification to all enabled channels",
     )
@@ -432,9 +432,11 @@ def _format_rule_row(row: Any) -> str:
         sort_keys=True,
         separators=(",", ":"),
     )
+    status = "enabled" if bool(row["enabled"]) else "disabled"
     if row["type"] == DCA_RULE_TYPE:
         return (
-            f"id={row['id']} type={row['type']} name={row['name']} params={params_text}"
+            f"id={row['id']} type={row['type']} name={row['name']}"
+            f" status={status} params={params_text}"
         )
 
     return (
@@ -443,6 +445,7 @@ def _format_rule_row(row: Any) -> str:
         f"asset_type={row['asset_type']} "
         f"symbol={row['symbol']} "
         f"name={row['name']} "
+        f"status={status} "
         f"params={params_text}"
     )
 
@@ -655,9 +658,19 @@ def build_command_handlers(
 
         with open_connection(sqlite_path) as connection:
             initialize_database(connection)
-            deleted = delete_rule(connection, rule_id)
+            rule_type = next(
+                (
+                    str(row["type"])
+                    for row in db_list_rules(connection)
+                    if int(row["id"]) == rule_id
+                ),
+                None,
+            )
+            removed = delete_rule(connection, rule_id)
 
-        if deleted:
+        if removed and rule_type == "drawdown_plan":
+            await _reply_text(update, f"Disabled drawdown plan id={rule_id}")
+        elif removed:
             await _reply_text(update, f"Deleted rule id={rule_id}")
         else:
             await _reply_text(update, f"Rule id={rule_id} was not found")

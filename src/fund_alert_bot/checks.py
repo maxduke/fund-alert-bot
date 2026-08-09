@@ -12,7 +12,10 @@ import pandas as pd
 
 from fund_alert_bot.db import (
     alert_exists,
+    get_active_drawdown_cycle,
+    list_drawdown_tier_records,
     list_enabled_rules,
+    persist_drawdown_plan_evaluation,
     reserve_alert_event,
 )
 from fund_alert_bot.market_data import (
@@ -20,11 +23,19 @@ from fund_alert_bot.market_data import (
     EmptyMarketDataError,
     Instrument,
     MarketDataProvider,
+    PriceBasis,
 )
 from fund_alert_bot.rules.dca import build_dca_reminder_alert
 from fund_alert_bot.rules.drawdown import (
     build_drawdown_alerts,
     calculate_drawdown_from_high,
+)
+from fund_alert_bot.rules.drawdown_plan import (
+    ActiveDrawdownCycle,
+    DrawdownPlanEvaluation,
+    build_drawdown_plan_alert,
+    evaluate_drawdown_plan,
+    parse_drawdown_plan_config,
 )
 from fund_alert_bot.rules.profit import (
     LatestDataUnavailableError,
@@ -35,6 +46,7 @@ from fund_alert_bot.rules.profit import (
 DCA_RULE_TYPE = "dca_reminder"
 DRAW_DOWN_RULE_TYPE = "drawdown_from_high"
 PROFIT_RULE_TYPE = "profit_reminder"
+DRAW_DOWN_PLAN_RULE_TYPE = "drawdown_plan"
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +55,7 @@ class MarketDataCacheKey:
 
     symbol: str
     asset_type: AssetType
+    price_basis: PriceBasis = PriceBasis.UNADJUSTED
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +142,101 @@ class ProfitCheckResult:
     skipped_duplicates: int
     no_data_skips: list[RuleNoDataSkip]
     errors: list[RuleCheckError]
+
+
+@dataclass(frozen=True, slots=True)
+class DrawdownPlanRuleResult:
+    """Persisted result of one confirmed-history plan evaluation."""
+
+    cycle_id: int
+    evaluation: DrawdownPlanEvaluation
+    notification: AlertNotification | None
+
+
+def evaluate_drawdown_plan_rule(
+    connection: Any,
+    rule: Any,
+    history: pd.DataFrame,
+    *,
+    expected_date: date,
+) -> DrawdownPlanRuleResult:
+    """Evaluate and atomically persist one drawdown plan."""
+
+    if str(rule["type"]) != DRAW_DOWN_PLAN_RULE_TYPE:
+        raise ValueError("rule type must be drawdown_plan.")
+    rule_id = int(rule["id"])
+    reference_symbol = str(rule["symbol"])
+    name = str(rule["name"]).strip()
+    if not name:
+        raise ValueError("drawdown_plan name must not be empty.")
+    config = parse_drawdown_plan_config(
+        reference_symbol=reference_symbol,
+        asset_type=str(rule["asset_type"]),
+        params=_load_params(str(rule["params_json"])),
+    )
+    active_row = get_active_drawdown_cycle(connection, rule_id)
+    active_cycle = None
+    recorded_tier_keys: set[str] = set()
+    if active_row is not None:
+        active_cycle = ActiveDrawdownCycle(
+            cycle_id=int(active_row["id"]),
+            peak_date=date.fromisoformat(str(active_row["peak_date"])),
+            peak_price=float(active_row["peak_price"]),
+            last_evaluated_date=date.fromisoformat(
+                str(active_row["last_evaluated_date"])
+            ),
+        )
+        recorded_tier_keys = {
+            str(row["tier_key"])
+            for row in list_drawdown_tier_records(connection, active_cycle.cycle_id)
+        }
+
+    evaluation = evaluate_drawdown_plan(
+        history,
+        config,
+        reference_symbol=reference_symbol,
+        expected_date=expected_date,
+        active_cycle=active_cycle,
+        recorded_tier_keys=recorded_tier_keys,
+    )
+    alert = build_drawdown_plan_alert(
+        rule_id=rule_id,
+        reference_symbol=reference_symbol,
+        name=name,
+        config=config,
+        evaluation=evaluation,
+    )
+    tiers = evaluation.newly_crossed_tiers
+    cycle_id, event_id = persist_drawdown_plan_evaluation(
+        connection,
+        rule_id=rule_id,
+        expected_active_cycle_id=(
+            None if active_cycle is None else active_cycle.cycle_id
+        ),
+        expected_last_evaluated_date=(
+            None
+            if active_cycle is None
+            else active_cycle.last_evaluated_date.isoformat()
+        ),
+        start_new_cycle=active_cycle is None or evaluation.cycle_changed,
+        peak_date=evaluation.peak_date.isoformat(),
+        peak_price=evaluation.peak_price,
+        evaluation_date=evaluation.latest_date.isoformat(),
+        tiers=tiers,
+        alert=alert,
+    )
+    notification = None
+    if event_id is not None and alert is not None:
+        notification = AlertNotification(
+            event_id=event_id,
+            title=str(alert["title"]),
+            text=str(alert["message"]),
+        )
+    return DrawdownPlanRuleResult(
+        cycle_id=cycle_id,
+        evaluation=evaluation,
+        notification=notification,
+    )
 
 
 def evaluate_drawdown_rules(
@@ -505,13 +613,20 @@ class DrawdownMarketDataCache:
 
         start_date = self._earliest_start_by_instrument[context.cache_key]
         try:
-            self._history_cache[context.cache_key] = (
-                self._market_data_provider.get_history(
+            if context.cache_key.price_basis is PriceBasis.UNADJUSTED:
+                history = self._market_data_provider.get_history(
                     context.instrument,
                     start_date,
                     self._end_date,
                 )
-            )
+            else:
+                history = self._market_data_provider.get_history(
+                    context.instrument,
+                    start_date,
+                    self._end_date,
+                    price_basis=context.cache_key.price_basis,
+                )
+            self._history_cache[context.cache_key] = history
         except EmptyMarketDataError as exc:
             self._history_errors[context.cache_key] = exc
             raise

@@ -90,6 +90,37 @@ def init_db(connection: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS drawdown_cycles (
+            id INTEGER PRIMARY KEY,
+            rule_id INTEGER NOT NULL REFERENCES rules(id),
+            peak_date TEXT NOT NULL,
+            initial_peak_price REAL NOT NULL,
+            peak_price REAL NOT NULL,
+            last_evaluated_date TEXT NOT NULL,
+            end_date TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS drawdown_cycles_one_active_rule
+        ON drawdown_cycles(rule_id)
+        WHERE end_date IS NULL;
+
+        CREATE TABLE IF NOT EXISTS drawdown_tier_records (
+            id INTEGER PRIMARY KEY,
+            cycle_id INTEGER NOT NULL REFERENCES drawdown_cycles(id),
+            tier_key TEXT NOT NULL,
+            drawdown REAL NOT NULL,
+            amount REAL NOT NULL,
+            source TEXT NOT NULL CHECK (
+                source IN ('close_confirmed', 'user_marked_added')
+            ),
+            data_date TEXT NOT NULL,
+            alert_event_id INTEGER REFERENCES alert_events(id) ON DELETE SET NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(cycle_id, tier_key)
+        );
         """
     )
     _ensure_alert_event_delivery_columns(connection)
@@ -188,10 +219,24 @@ def list_enabled_rules(connection: sqlite3.Connection) -> list[sqlite3.Row]:
 
 
 def delete_rule(connection: sqlite3.Connection, rule_id: int) -> bool:
-    """Delete a rule by ID and report whether a row was removed."""
-    cursor = connection.execute("DELETE FROM rules WHERE id = ?", (rule_id,))
+    """Delete a legacy rule or disable a stateful drawdown plan."""
+
+    row = connection.execute(
+        "SELECT type FROM rules WHERE id = ?",
+        (rule_id,),
+    ).fetchone()
+    if row is None:
+        return False
+
+    if row["type"] == "drawdown_plan":
+        connection.execute(
+            "UPDATE rules SET enabled = 0, updated_at = ? WHERE id = ?",
+            (_utc_now_text(), rule_id),
+        )
+    else:
+        connection.execute("DELETE FROM rules WHERE id = ?", (rule_id,))
     connection.commit()
-    return cursor.rowcount > 0
+    return True
 
 
 def alert_exists(connection: sqlite3.Connection, alert_key: str) -> bool:
@@ -345,6 +390,230 @@ def record_alert_notification_result(
         ),
     )
     connection.commit()
+
+
+def get_active_drawdown_cycle(
+    connection: sqlite3.Connection,
+    rule_id: int,
+) -> sqlite3.Row | None:
+    """Return the active drawdown cycle for a rule."""
+
+    return connection.execute(
+        """
+        SELECT
+            id,
+            rule_id,
+            peak_date,
+            initial_peak_price,
+            peak_price,
+            last_evaluated_date,
+            end_date,
+            created_at,
+            updated_at
+        FROM drawdown_cycles
+        WHERE rule_id = ? AND end_date IS NULL
+        """,
+        (rule_id,),
+    ).fetchone()
+
+
+def list_drawdown_tier_records(
+    connection: sqlite3.Connection,
+    cycle_id: int,
+) -> list[sqlite3.Row]:
+    """Return durable tier records for one cycle."""
+
+    return list(
+        connection.execute(
+            """
+            SELECT
+                id,
+                cycle_id,
+                tier_key,
+                drawdown,
+                amount,
+                source,
+                data_date,
+                alert_event_id,
+                created_at
+            FROM drawdown_tier_records
+            WHERE cycle_id = ?
+            ORDER BY drawdown
+            """,
+            (cycle_id,),
+        ).fetchall()
+    )
+
+
+def persist_drawdown_plan_evaluation(
+    connection: sqlite3.Connection,
+    *,
+    rule_id: int,
+    expected_active_cycle_id: int | None,
+    expected_last_evaluated_date: str | None,
+    start_new_cycle: bool,
+    peak_date: str,
+    peak_price: float,
+    evaluation_date: str,
+    tiers: Sequence[Any] = (),
+    tier_source: str = "close_confirmed",
+    alert: Any | None = None,
+) -> tuple[int, int | None]:
+    """Atomically persist cycle state, tier records, and one aggregate event."""
+
+    if tier_source not in {"close_confirmed", "user_marked_added"}:
+        raise ValueError("Unsupported drawdown tier record source.")
+    if bool(tiers) != (alert is not None):
+        raise ValueError(
+            "An aggregate alert is required exactly when tiers are stored."
+        )
+
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        rule = connection.execute(
+            "SELECT enabled FROM rules WHERE id = ?",
+            (rule_id,),
+        ).fetchone()
+        if rule is None or not bool(rule["enabled"]):
+            raise sqlite3.IntegrityError("Drawdown plan is no longer enabled.")
+
+        active = get_active_drawdown_cycle(connection, rule_id)
+        active_id = None if active is None else int(active["id"])
+        active_evaluation_date = (
+            None if active is None else str(active["last_evaluated_date"])
+        )
+        if (
+            active_id != expected_active_cycle_id
+            or active_evaluation_date != expected_last_evaluated_date
+        ):
+            raise sqlite3.IntegrityError("Active drawdown cycle changed concurrently.")
+
+        now = _utc_now_text()
+        if start_new_cycle:
+            if active_id is not None:
+                connection.execute(
+                    """
+                    UPDATE drawdown_cycles
+                    SET end_date = ?, updated_at = ?
+                    WHERE id = ? AND end_date IS NULL
+                    """,
+                    (peak_date, now, active_id),
+                )
+            cursor = connection.execute(
+                """
+                INSERT INTO drawdown_cycles (
+                    rule_id,
+                    peak_date,
+                    initial_peak_price,
+                    peak_price,
+                    last_evaluated_date,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    rule_id,
+                    peak_date,
+                    peak_price,
+                    peak_price,
+                    evaluation_date,
+                    now,
+                    now,
+                ),
+            )
+            cycle_id = int(cursor.lastrowid)
+        else:
+            if active_id is None:
+                raise sqlite3.IntegrityError("No active drawdown cycle to update.")
+            connection.execute(
+                """
+                UPDATE drawdown_cycles
+                SET peak_price = ?, last_evaluated_date = ?, updated_at = ?
+                WHERE id = ? AND end_date IS NULL
+                """,
+                (peak_price, evaluation_date, now, active_id),
+            )
+            cycle_id = active_id
+
+        event_id: int | None = None
+        if alert is not None:
+            cursor = connection.execute(
+                """
+                INSERT INTO alert_events (
+                    rule_id,
+                    alert_key,
+                    title,
+                    message,
+                    payload_json,
+                    triggered_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    rule_id,
+                    str(alert["alert_key"]),
+                    str(alert["title"]),
+                    str(alert["message"]),
+                    _json_text(alert.get("payload")),
+                    now,
+                ),
+            )
+            event_id = int(cursor.lastrowid)
+            connection.executemany(
+                """
+                INSERT INTO drawdown_tier_records (
+                    cycle_id,
+                    tier_key,
+                    drawdown,
+                    amount,
+                    source,
+                    data_date,
+                    alert_event_id,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        cycle_id,
+                        str(tier.key),
+                        float(tier.drawdown),
+                        float(tier.amount),
+                        tier_source,
+                        evaluation_date,
+                        event_id,
+                        now,
+                    )
+                    for tier in tiers
+                ],
+            )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    return cycle_id, event_id
+
+
+def list_retryable_drawdown_plan_alert_events(
+    connection: sqlite3.Connection,
+) -> list[sqlite3.Row]:
+    """Return pending or failed plan reminders that still need delivery."""
+
+    return list(
+        connection.execute(
+            """
+            SELECT e.id, e.title, e.message, e.notification_status
+            FROM alert_events AS e
+            JOIN rules AS r ON r.id = e.rule_id
+            WHERE
+                r.type = 'drawdown_plan'
+                AND e.notification_status IN (?, ?)
+            ORDER BY e.id
+            """,
+            (ALERT_NOTIFICATION_PENDING, ALERT_NOTIFICATION_FAILED),
+        ).fetchall()
+    )
 
 
 def _ensure_alert_event_delivery_columns(connection: sqlite3.Connection) -> None:
