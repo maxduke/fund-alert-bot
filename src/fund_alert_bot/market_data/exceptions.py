@@ -21,3 +21,7 @@ class MarketDataNormalizeError(MarketDataProviderError):
 
 class MarketDataFetchError(MarketDataProviderError):
     """Raised when a provider call fails after retries."""
+
+
+class MarketCalendarUnavailableError(MarketDataProviderError):
+    """Raised when the provider cannot confirm calendar coverage for a date."""

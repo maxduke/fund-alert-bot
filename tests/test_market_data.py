@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import Any, cast
 
 import pandas as pd
@@ -11,7 +11,9 @@ from fund_alert_bot.market_data import (
     AssetType,
     EmptyMarketDataError,
     Instrument,
+    MarketDataFetchError,
     MarketDataNormalizeError,
+    PriceBasis,
     UnsupportedAssetTypeError,
 )
 from fund_alert_bot.market_data.normalize import NORMALIZED_COLUMNS
@@ -90,6 +92,67 @@ def test_etf_history_normalizes_to_shared_schema() -> None:
             },
         )
     ]
+
+
+def test_drawdown_plan_history_uses_qfq_eastmoney_without_sina_fallback() -> None:
+    fake_ak = FakeAkshare()
+    provider = AkshareMarketDataProvider(ak_module=fake_ak, retry_delay_seconds=0)
+    instrument = Instrument("510300", "CSI 300 ETF", AssetType.CN_ETF)
+
+    history = provider.get_history(
+        instrument,
+        "2024-01-01",
+        "2024-01-03",
+        price_basis=PriceBasis.QFQ,
+    )
+
+    assert history["source"].tolist() == [
+        "akshare_eastmoney",
+        "akshare_eastmoney",
+    ]
+    assert history.attrs == {
+        "symbol": "510300",
+        "source": "akshare_eastmoney",
+        "price_basis": "qfq",
+        "frequency": "daily",
+    }
+    assert fake_ak.calls == [
+        (
+            "fund_etf_hist_em",
+            {
+                "symbol": "510300",
+                "period": "daily",
+                "start_date": "20240101",
+                "end_date": "20240103",
+                "adjust": "qfq",
+            },
+        )
+    ]
+
+
+def test_drawdown_plan_history_does_not_fallback_to_unadjusted_sina() -> None:
+    class FailingEastmoneyAkshare(FakeAkshare):
+        def fund_etf_hist_em(self, **kwargs: Any) -> pd.DataFrame:
+            self.calls.append(("fund_etf_hist_em", kwargs))
+            raise RuntimeError("Eastmoney unavailable")
+
+    fake_ak = FailingEastmoneyAkshare()
+    provider = AkshareMarketDataProvider(
+        ak_module=fake_ak,
+        retries=1,
+        retry_delay_seconds=0,
+    )
+    instrument = Instrument("510300", "CSI 300 ETF", AssetType.CN_ETF)
+
+    with pytest.raises(MarketDataFetchError):
+        provider.get_history(
+            instrument,
+            "2024-01-01",
+            "2024-01-03",
+            price_basis=PriceBasis.QFQ,
+        )
+
+    assert [name for name, _kwargs in fake_ak.calls] == ["fund_etf_hist_em"]
 
 
 def test_open_fund_history_uses_unit_nav_as_close_and_filters_by_date() -> None:
@@ -226,9 +289,9 @@ def test_get_latest_prefers_realtime_spot_data_for_etf() -> None:
                 {
                     "代码": ["510300"],
                     "最新价": ["1.25"],
-                    "今开": ["1.20"],
-                    "最高": ["1.30"],
-                    "最低": ["1.19"],
+                    "开盘价": ["1.20"],
+                    "最高价": ["1.30"],
+                    "最低价": ["1.19"],
                     "成交量": ["1200"],
                     "成交额": ["15000"],
                 }
@@ -259,6 +322,79 @@ def test_get_latest_prefers_realtime_spot_data_for_etf() -> None:
         "source": "akshare_realtime",
     }
     assert fake_ak.calls == [("fund_etf_spot_em", {})]
+
+
+def test_get_etf_realtime_quote_uses_eastmoney_contract() -> None:
+    class RealtimeAkshare(FakeAkshare):
+        def fund_etf_spot_em(self, **kwargs: Any) -> pd.DataFrame:
+            self.calls.append(("fund_etf_spot_em", kwargs))
+            return pd.DataFrame(
+                {
+                    "代码": ["510300"],
+                    "最新价": ["1.25"],
+                    "昨收": ["1.24"],
+                    "成交量": ["1200"],
+                    "成交额": ["15000"],
+                }
+            )
+
+    fetched_at = datetime(2024, 1, 4, 6, 50, tzinfo=UTC)
+    fake_ak = RealtimeAkshare()
+    provider = AkshareMarketDataProvider(
+        ak_module=fake_ak,
+        retry_delay_seconds=0,
+        now_factory=lambda: fetched_at,
+    )
+
+    quote = provider.get_etf_realtime_quote(
+        Instrument("510300", "CSI 300 ETF", AssetType.CN_ETF)
+    )
+
+    assert quote.symbol == "510300"
+    assert quote.price == 1.25
+    assert quote.previous_close == 1.24
+    assert quote.volume == 1200
+    assert quote.amount == 15000
+    assert quote.source == "eastmoney"
+    assert quote.fetched_at == fetched_at
+    assert fake_ak.calls == [("fund_etf_spot_em", {})]
+
+
+def test_get_etf_realtime_quote_falls_back_to_sina() -> None:
+    class RealtimeAkshare(FakeAkshare):
+        def fund_etf_spot_em(self, **kwargs: Any) -> pd.DataFrame:
+            self.calls.append(("fund_etf_spot_em", kwargs))
+            raise RuntimeError("Eastmoney unavailable")
+
+        def fund_etf_category_sina(self, **kwargs: Any) -> pd.DataFrame:
+            self.calls.append(("fund_etf_category_sina", kwargs))
+            return pd.DataFrame(
+                {
+                    "代码": ["sh510300"],
+                    "最新价": ["1.25"],
+                    "昨收": ["1.24"],
+                    "成交量": ["1200"],
+                    "成交额": ["15000"],
+                }
+            )
+
+    fake_ak = RealtimeAkshare()
+    provider = AkshareMarketDataProvider(
+        ak_module=fake_ak,
+        retries=1,
+        retry_delay_seconds=0,
+    )
+
+    quote = provider.get_etf_realtime_quote(
+        Instrument("510300", "CSI 300 ETF", AssetType.CN_ETF)
+    )
+
+    assert quote.symbol == "510300"
+    assert quote.source == "sina_fallback"
+    assert fake_ak.calls == [
+        ("fund_etf_spot_em", {}),
+        ("fund_etf_category_sina", {"symbol": "ETF基金"}),
+    ]
 
 
 def test_get_latest_reuses_realtime_spot_data_within_ttl() -> None:
