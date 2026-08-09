@@ -127,7 +127,8 @@ price-basis metadata for logging and validation. Before evaluation:
 - require the requested symbol and `qfq` basis;
 - normalize dates and daily granularity;
 - sort ascending and keep the last duplicate for a date;
-- coerce closes and discard non-finite or non-positive values;
+- coerce closes, then reject confirmed history if any retained close is missing,
+  non-finite, or non-positive;
 - require the expected confirmed trading date after close;
 - require a positive finite current-session ETF quote with evidence of trading
   before close (`volume > 0` or `amount > 0`);

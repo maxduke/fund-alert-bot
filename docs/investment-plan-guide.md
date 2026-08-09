@@ -392,11 +392,13 @@ valid ETF closes. It requests a safe calendar range large enough for both those
 observations and the locked peak date; the drawdown lookback remains 365 days
 even when more history is fetched for calculation.
 
-Before evaluating, the bot normalizes dates, sorts rows, keeps the last duplicate
-for a date, removes invalid closes, and requires positive finite prices. A
-before-close quote must match the exact ETF symbol and show current-session
-trading. An after-close reminder requires the expected confirmed trading date.
-The bot does not use a stale row and label it as current.
+Before evaluating, the bot normalizes dates, sorts rows, and keeps the last
+duplicate for a date. Pure trend calculations ignore invalid observations, but
+confirmed-close plan evaluation rejects the entire snapshot if any retained
+close is missing, non-finite, or non-positive; it cannot safely assume a missing
+row was not the recent high. A before-close quote must match the exact ETF symbol
+and show current-session trading. An after-close reminder requires the expected
+confirmed trading date. The bot does not use a stale row and label it as current.
 
 The existing AKShare Sina trading calendar remains the calendar source, but a
 payload is valid only when its returned date range covers the date being checked.

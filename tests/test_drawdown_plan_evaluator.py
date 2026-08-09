@@ -421,6 +421,16 @@ def test_confirmed_history_fails_closed_on_stale_or_wrong_basis() -> None:
         )
 
 
+def test_confirmed_history_rejects_invalid_close_inside_peak_window() -> None:
+    with pytest.raises(ValueError, match="invalid closing prices"):
+        evaluate_drawdown_plan(
+            _history([100, float("nan"), 85]),
+            _config([(0.15, 5000)]),
+            reference_symbol="510300",
+            expected_date=date(2024, 1, 3),
+        )
+
+
 def test_realtime_quote_requires_activity_and_continuity() -> None:
     valid = RealtimeQuote(
         symbol="510300",

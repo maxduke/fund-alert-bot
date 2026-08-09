@@ -218,7 +218,7 @@ def validate_confirmed_plan_history(
     if not isinstance(source, str) or source not in _CONFIRMED_HISTORY_SOURCES:
         raise ValueError("Confirmed history source is unsupported.")
 
-    frame = _clean_history(history, "close")
+    frame = _clean_history(history, "close", reject_invalid_prices=True)
     if frame.empty:
         raise ValueError("Confirmed history has no valid closing prices.")
     if frame.iloc[-1]["date"].date() != expected_date:
@@ -405,7 +405,12 @@ def _clean_closes(history: pd.DataFrame, price_field: str) -> pd.Series:
     return _clean_history(history, price_field)[price_field]
 
 
-def _clean_history(history: pd.DataFrame, price_field: str) -> pd.DataFrame:
+def _clean_history(
+    history: pd.DataFrame,
+    price_field: str,
+    *,
+    reject_invalid_prices: bool = False,
+) -> pd.DataFrame:
     if "date" not in history.columns:
         raise ValueError("Market data is missing date field.")
     if price_field not in history.columns:
@@ -426,6 +431,8 @@ def _clean_history(history: pd.DataFrame, price_field: str) -> pd.DataFrame:
     valid = frame[price_field].map(
         lambda value: pd.notna(value) and math.isfinite(value) and value > 0
     )
+    if reject_invalid_prices and not valid.all():
+        raise ValueError("Confirmed history contains invalid closing prices.")
     frame = frame.loc[valid].copy()
     frame[price_field] = frame[price_field].astype(float)
     return frame.reset_index(drop=True)
