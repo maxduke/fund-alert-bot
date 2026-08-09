@@ -485,6 +485,8 @@ def _read_tiers(raw_tiers: object) -> tuple[DrawdownTier, ...]:
                 key=_canonical_number(drawdown),
             )
         )
+    if not math.isfinite(sum(float(tier.amount) for tier in tiers)):
+        raise ValueError("tier amounts must have a finite total.")
     return tuple(tiers)
 
 

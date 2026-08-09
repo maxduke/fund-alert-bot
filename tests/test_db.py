@@ -9,6 +9,7 @@ from fund_alert_bot.db import (
     ALERT_NOTIFICATION_PENDING,
     ALERT_NOTIFICATION_SENT,
     add_alert_event,
+    add_drawdown_plan_rule,
     add_rule,
     alert_exists,
     connect,
@@ -278,6 +279,48 @@ def test_rule_helpers_add_list_filter_and_delete_rules(tmp_path: Path) -> None:
     assert [row["id"] for row in enabled_rows] == [enabled_rule_id]
     assert deleted
     assert not deleted_again
+
+
+def test_drawdown_plan_pair_is_unique_while_enabled() -> None:
+    connection = connect(":memory:")
+    try:
+        init_db(connection)
+        first_id = add_drawdown_plan_rule(
+            connection,
+            reference_symbol="510300",
+            investment_fund_symbol="000001",
+            name="A500",
+            params={"investment_fund_symbol": "000001", "tiers": []},
+        )
+        with pytest.raises(sqlite3.IntegrityError, match="already uses"):
+            add_drawdown_plan_rule(
+                connection,
+                reference_symbol="510300",
+                investment_fund_symbol="000002",
+                name="same ETF",
+                params={"investment_fund_symbol": "000002", "tiers": []},
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="already uses"):
+            add_drawdown_plan_rule(
+                connection,
+                reference_symbol="510500",
+                investment_fund_symbol="000001",
+                name="same fund",
+                params={"investment_fund_symbol": "000001", "tiers": []},
+            )
+
+        assert delete_rule(connection, first_id)
+        replacement_id = add_drawdown_plan_rule(
+            connection,
+            reference_symbol="510300",
+            investment_fund_symbol="000001",
+            name="replacement",
+            params={"investment_fund_symbol": "000001", "tiers": []},
+        )
+    finally:
+        connection.close()
+
+    assert replacement_id != first_id
 
 
 def test_alert_event_helpers_store_payload_and_detect_existing_alerts(

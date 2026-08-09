@@ -13,7 +13,12 @@ import pytest
 from fund_alert_bot import commands, scheduler
 from fund_alert_bot.config import NotificationSettings
 from fund_alert_bot.db import add_rule, initialize_database, open_connection
-from fund_alert_bot.market_data import AssetType, Instrument
+from fund_alert_bot.market_data import (
+    AssetType,
+    Instrument,
+    MarketCalendarUnavailableError,
+    PriceBasis,
+)
 
 EXPECTED_DRAWDOWN_10_MESSAGE = "\n".join(
     (
@@ -401,6 +406,158 @@ def test_scheduled_market_check_evaluates_profit_rules(
     ]
 
 
+def test_scheduled_market_check_confirms_drawdown_plan_once(tmp_path: Path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    _add_drawdown_plan(sqlite_path)
+    application = FakeApplication()
+    provider = FakeProvider(_plan_history([100, 80]))
+    market_calendar = FakeMarketCalendar(is_trading_day=True)
+
+    for _ in range(2):
+        asyncio.run(
+            scheduler.run_scheduled_market_check(
+                application=application,
+                sqlite_path=sqlite_path,
+                allowed_user_ids={123},
+                market_data_provider=provider,
+                market_calendar=market_calendar,
+                timezone="Asia/Shanghai",
+                run_date=date(2024, 1, 2),
+            )
+        )
+
+    with open_connection(sqlite_path) as connection:
+        event = connection.execute(
+            "SELECT notification_status FROM alert_events"
+        ).fetchone()
+        tiers = connection.execute(
+            "SELECT tier_key FROM drawdown_tier_records ORDER BY drawdown"
+        ).fetchall()
+
+    assert len(application.bot.messages) == 1
+    assert "Buy-plan reminder — A500" in application.bot.messages[0]["text"]
+    assert "Data date: 2024-01-02" in application.bot.messages[0]["text"]
+    assert [row["tier_key"] for row in tiers] == ["0.15", "0.2"]
+    assert event["notification_status"] == "sent"
+    assert provider.price_bases == [PriceBasis.QFQ, PriceBasis.QFQ]
+
+
+def test_scheduled_market_check_notifies_once_when_plan_close_is_missing(
+    tmp_path: Path,
+) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    _add_drawdown_plan(sqlite_path)
+    application = FakeApplication()
+    provider = FakeProvider(_plan_history([100]))
+    market_calendar = FakeMarketCalendar(is_trading_day=True)
+
+    for _ in range(2):
+        asyncio.run(
+            scheduler.run_scheduled_market_check(
+                application=application,
+                sqlite_path=sqlite_path,
+                allowed_user_ids={123},
+                market_data_provider=provider,
+                market_calendar=market_calendar,
+                timezone="Asia/Shanghai",
+                run_date=date(2024, 1, 2),
+            )
+        )
+
+    with open_connection(sqlite_path) as connection:
+        event = connection.execute(
+            "SELECT alert_key, notification_status FROM alert_events"
+        ).fetchone()
+
+    assert event["alert_key"] == "data_unavailable:after_close:2024-01-02"
+    assert event["notification_status"] == "sent"
+    assert len(application.bot.messages) == 1
+    assert "Drawdown plan data unavailable" in application.bot.messages[0]["text"]
+    assert "No tier decision was made" in application.bot.messages[0]["text"]
+
+
+def test_plan_close_does_not_mutate_state_without_confirmed_calendar(
+    tmp_path: Path,
+) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    _add_drawdown_plan(sqlite_path)
+    application = FakeApplication()
+    provider = FakeProvider(_plan_history([100, 80]))
+    market_calendar = FakeMarketCalendar(
+        is_trading_day=True,
+        confirmed_error=MarketCalendarUnavailableError("calendar unavailable"),
+    )
+
+    asyncio.run(
+        scheduler.run_scheduled_market_check(
+            application=application,
+            sqlite_path=sqlite_path,
+            allowed_user_ids={123},
+            market_data_provider=provider,
+            market_calendar=market_calendar,
+            timezone="Asia/Shanghai",
+            run_date=date(2024, 1, 2),
+        )
+    )
+
+    with open_connection(sqlite_path) as connection:
+        cycles = connection.execute("SELECT COUNT(*) FROM drawdown_cycles").fetchone()[
+            0
+        ]
+        tiers = connection.execute(
+            "SELECT COUNT(*) FROM drawdown_tier_records"
+        ).fetchone()[0]
+
+    assert provider.calls == []
+    assert cycles == 0
+    assert tiers == 0
+    assert market_calendar.confirmed_dates == [date(2024, 1, 2)]
+    assert len(application.bot.messages) == 1
+    assert "calendar unavailable" in application.bot.messages[0]["text"]
+
+
+def test_failed_plan_notification_retries_even_when_market_is_closed(
+    tmp_path: Path,
+) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    _add_drawdown_plan(sqlite_path)
+    provider = FakeProvider(_plan_history([100, 80]))
+
+    asyncio.run(
+        scheduler.run_scheduled_market_check(
+            application=SimpleNamespace(bot=FakeFailingBot()),
+            sqlite_path=sqlite_path,
+            allowed_user_ids={123},
+            market_data_provider=provider,
+            market_calendar=FakeMarketCalendar(is_trading_day=True),
+            timezone="Asia/Shanghai",
+            run_date=date(2024, 1, 2),
+        )
+    )
+    success_application = FakeApplication()
+    asyncio.run(
+        scheduler.run_scheduled_market_check(
+            application=success_application,
+            sqlite_path=sqlite_path,
+            allowed_user_ids={123},
+            market_data_provider=provider,
+            market_calendar=FakeMarketCalendar(is_trading_day=False),
+            timezone="Asia/Shanghai",
+            run_date=date(2024, 1, 3),
+        )
+    )
+
+    with open_connection(sqlite_path) as connection:
+        status = connection.execute(
+            "SELECT notification_status FROM alert_events"
+        ).fetchone()["notification_status"]
+
+    assert status == "sent"
+    assert len(success_application.bot.messages) == 1
+    assert "Buy-plan reminder — A500" in success_application.bot.messages[0]["text"]
+    assert provider.price_bases == [PriceBasis.QFQ]
+
+
 def test_scheduled_dca_check_prevents_duplicate_alerts_by_alert_key(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -469,14 +626,18 @@ class FakeProvider:
         self.latest = latest
         self.calls: list[tuple[Instrument, object, object]] = []
         self.latest_calls: list[Instrument] = []
+        self.price_bases: list[PriceBasis] = []
 
     def get_history(
         self,
         instrument: Instrument,
         start_date: object,
         end_date: object,
+        *,
+        price_basis: PriceBasis = PriceBasis.UNADJUSTED,
     ) -> pd.DataFrame:
         self.calls.append((instrument, start_date, end_date))
+        self.price_bases.append(price_basis)
         return self.history
 
     def get_latest(self, instrument: Instrument) -> dict[str, object] | None:
@@ -485,12 +646,25 @@ class FakeProvider:
 
 
 class FakeMarketCalendar:
-    def __init__(self, *, is_trading_day: bool) -> None:
+    def __init__(
+        self,
+        *,
+        is_trading_day: bool,
+        confirmed_error: Exception | None = None,
+    ) -> None:
         self._is_trading_day = is_trading_day
+        self._confirmed_error = confirmed_error
         self.checked_dates: list[date] = []
+        self.confirmed_dates: list[date] = []
 
     def is_trading_day(self, check_date: date) -> bool:
         self.checked_dates.append(check_date)
+        return self._is_trading_day
+
+    def confirmed_status(self, check_date: date) -> bool:
+        self.confirmed_dates.append(check_date)
+        if self._confirmed_error is not None:
+            raise self._confirmed_error
         return self._is_trading_day
 
 
@@ -509,6 +683,12 @@ class FakeBot:
 
     async def send_message(self, *, chat_id: int, text: str) -> None:
         self.messages.append({"chat_id": chat_id, "text": text})
+
+
+class FakeFailingBot:
+    async def send_message(self, *, chat_id: int, text: str) -> None:
+        del chat_id, text
+        raise RuntimeError("telegram unavailable")
 
 
 class FakeApplication(SimpleNamespace):
@@ -536,6 +716,47 @@ def _add_drawdown_rule(sqlite_path: Path) -> None:
                 "price_field": "close",
             },
         )
+
+
+def _add_drawdown_plan(sqlite_path: Path) -> None:
+    with open_connection(sqlite_path) as connection:
+        initialize_database(connection)
+        add_rule(
+            connection,
+            type="drawdown_plan",
+            symbol="510300",
+            name="A500",
+            asset_type="cn_etf",
+            params={
+                "investment_fund_symbol": "000001",
+                "lookback_days": 365,
+                "tiers": [
+                    {"drawdown": 0.15, "amount": 5000},
+                    {"drawdown": 0.20, "amount": 10000},
+                ],
+                "sma_window": 250,
+                "sma_slope_window": 20,
+            },
+        )
+
+
+def _plan_history(closes: list[float]) -> pd.DataFrame:
+    frame = pd.DataFrame(
+        {
+            "date": pd.date_range("2024-01-01", periods=len(closes)),
+            "close": closes,
+            "source": ["akshare_eastmoney"] * len(closes),
+        }
+    )
+    frame.attrs.update(
+        {
+            "symbol": "510300",
+            "source": "akshare_eastmoney",
+            "price_basis": "qfq",
+            "frequency": "daily",
+        }
+    )
+    return frame
 
 
 def _add_dca_rule(sqlite_path: Path) -> None:

@@ -703,6 +703,14 @@ notification result. Never log tokens, webhook URLs, or notification secrets.
 
 ### PR 4 — Drawdown Plan commands, scheduling, and manual additions
 
+Deliver this phase as two reviewable changes without changing its final scope:
+
+- **PR 4A:** pairing-confirmed `/add_drawdown_plan`, confirmed-close scheduling,
+  notification recovery, and read-only `/plans`/`/check` status;
+- **PR 4B:** before-close pre-alerts, `/mark_added` and Telegram actions, cutoff
+  choices, pending Manual Add Estimates, Position Sync reconciliation, and the
+  exact-date feeder-NAV settlement job.
+
 - Add `/add_drawdown_plan`, `/mark_added`, and `/plans` using the fixed command
   shape, optional `lookback`, and internal SMA defaults.
 - Preview identities, readiness, current tiers, and maximum one-cycle total;

@@ -11,16 +11,26 @@ from zoneinfo import ZoneInfo
 
 from fund_alert_bot.checks import (
     AlertNotification,
+    DrawdownPlanCheckResult,
+    RuleNoDataSkip,
     evaluate_dca_rules,
+    evaluate_drawdown_plan_rules,
     evaluate_drawdown_rules,
     evaluate_profit_rules,
+    reserve_drawdown_plan_data_unavailable_notice,
 )
 from fund_alert_bot.config import NotificationSettings
-from fund_alert_bot.db import initialize_database, open_connection
+from fund_alert_bot.db import (
+    initialize_database,
+    list_enabled_rules,
+    list_retryable_drawdown_plan_alert_events,
+    open_connection,
+)
 from fund_alert_bot.market_data import (
     AkshareMarketDataProvider,
     CNMarketCalendar,
     MarketCalendar,
+    MarketCalendarUnavailableError,
     MarketDataProvider,
 )
 from fund_alert_bot.notifications.dispatch import send_alert_notifications
@@ -335,8 +345,15 @@ async def run_scheduled_market_check(
         check_date.isoformat(),
     )
     drawdown_result = None
+    plan_result = None
     profit_result = None
     try:
+        await retry_pending_drawdown_plan_notifications(
+            application=application,
+            sqlite_path=sqlite_path,
+            allowed_user_ids=allowed_user_ids,
+            notification_settings=notification_settings,
+        )
         if market_calendar is None:
             market_calendar = CNMarketCalendar()
         if not market_calendar.is_trading_day(check_date):
@@ -355,16 +372,62 @@ async def run_scheduled_market_check(
                 today=check_date,
                 require_new_data_date=check_date,
             )
+            plan_rules = [
+                row
+                for row in list_enabled_rules(connection)
+                if row["type"] == "drawdown_plan"
+            ]
+            try:
+                confirmed_plan_day = bool(
+                    plan_rules
+                ) and market_calendar.confirmed_status(check_date)
+            except MarketCalendarUnavailableError as exc:
+                plan_result = DrawdownPlanCheckResult(
+                    checked_rules=len(plan_rules),
+                    notifications=[],
+                    no_data_skips=[
+                        RuleNoDataSkip(
+                            rule_id=int(row["id"]),
+                            symbol=str(row["symbol"]),
+                            message=str(exc),
+                        )
+                        for row in plan_rules
+                    ],
+                    errors=[],
+                )
+            else:
+                plan_result = (
+                    evaluate_drawdown_plan_rules(
+                        connection,
+                        market_data_provider,
+                        expected_date=check_date,
+                    )
+                    if confirmed_plan_day
+                    else DrawdownPlanCheckResult(len(plan_rules), [], [], [])
+                )
             profit_result = evaluate_profit_rules(connection, market_data_provider)
+            data_notice = reserve_drawdown_plan_data_unavailable_notice(
+                connection,
+                evaluation_date=check_date,
+                result=plan_result,
+            )
 
-        for skip in [*drawdown_result.no_data_skips, *profit_result.no_data_skips]:
+        for skip in [
+            *drawdown_result.no_data_skips,
+            *plan_result.no_data_skips,
+            *profit_result.no_data_skips,
+        ]:
             LOGGER.info(
                 "Scheduled market reminder check skipped rule_id=%s symbol=%s: %s",
                 skip.rule_id,
                 skip.symbol,
                 skip.message,
             )
-        for error in [*drawdown_result.errors, *profit_result.errors]:
+        for error in [
+            *drawdown_result.errors,
+            *plan_result.errors,
+            *profit_result.errors,
+        ]:
             LOGGER.warning(
                 "Scheduled market reminder check error rule_id=%s symbol=%s: %s",
                 error.rule_id,
@@ -378,7 +441,9 @@ async def run_scheduled_market_check(
             allowed_user_ids=allowed_user_ids,
             notifications=[
                 *drawdown_result.notifications,
+                *plan_result.notifications,
                 *profit_result.notifications,
+                *([] if data_notice is None else [data_notice]),
             ],
             notification_settings=notification_settings,
         )
@@ -386,19 +451,26 @@ async def run_scheduled_market_check(
         LOGGER.exception("Scheduled market reminder check failed")
         raise
     finally:
-        if drawdown_result is None or profit_result is None:
+        if drawdown_result is None or plan_result is None or profit_result is None:
             LOGGER.info("Scheduled market reminder check ended")
         else:
             LOGGER.info(
                 "Scheduled market reminder check ended: "
-                "drawdown_rules=%d profit_rules=%d new_alerts=%d "
+                "drawdown_rules=%d plan_rules=%d profit_rules=%d new_alerts=%d "
                 "duplicate_alerts=%d no_data_skips=%d errors=%d",
                 drawdown_result.checked_rules,
+                plan_result.checked_rules,
                 profit_result.checked_rules,
-                len(drawdown_result.notifications) + len(profit_result.notifications),
+                len(drawdown_result.notifications)
+                + len(plan_result.notifications)
+                + len(profit_result.notifications),
                 drawdown_result.skipped_duplicates + profit_result.skipped_duplicates,
-                len(drawdown_result.no_data_skips) + len(profit_result.no_data_skips),
-                len(drawdown_result.errors) + len(profit_result.errors),
+                len(drawdown_result.no_data_skips)
+                + len(plan_result.no_data_skips)
+                + len(profit_result.no_data_skips),
+                len(drawdown_result.errors)
+                + len(plan_result.errors)
+                + len(profit_result.errors),
             )
 
 
@@ -425,6 +497,12 @@ async def run_scheduled_dca_check(
     LOGGER.info("Scheduled DCA reminder check started for date=%s", check_date)
     result = None
     try:
+        await retry_pending_drawdown_plan_notifications(
+            application=application,
+            sqlite_path=sqlite_path,
+            allowed_user_ids=allowed_user_ids,
+            notification_settings=notification_settings,
+        )
         with open_connection(sqlite_path) as connection:
             initialize_database(connection)
             result = evaluate_dca_rules(connection, today=check_date)
@@ -489,6 +567,35 @@ async def send_scheduled_notifications(
             "Scheduled notification delivery failures: %d",
             dispatch_summary.failed,
         )
+
+
+async def retry_pending_drawdown_plan_notifications(
+    *,
+    application: Application[Any, Any, Any, Any, Any, Any],
+    sqlite_path: str | Path,
+    allowed_user_ids: Collection[int],
+    notification_settings: NotificationSettings | None = None,
+) -> int:
+    """Retry durable plan reminders independently of market-day evaluation."""
+
+    with open_connection(sqlite_path) as connection:
+        initialize_database(connection)
+        notifications = [
+            AlertNotification(
+                event_id=int(row["id"]),
+                title=str(row["title"]),
+                text=str(row["message"]),
+            )
+            for row in list_retryable_drawdown_plan_alert_events(connection)
+        ]
+    await send_scheduled_notifications(
+        application=application,
+        sqlite_path=sqlite_path,
+        allowed_user_ids=allowed_user_ids,
+        notifications=notifications,
+        notification_settings=notification_settings,
+    )
+    return len(notifications)
 
 
 def _current_date(timezone: str | tzinfo) -> date:

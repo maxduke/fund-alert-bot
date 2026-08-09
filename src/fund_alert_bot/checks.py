@@ -11,8 +11,11 @@ from typing import Any
 import pandas as pd
 
 from fund_alert_bot.db import (
+    add_alert_event,
     alert_exists,
     get_active_drawdown_cycle,
+    get_fund_settings,
+    get_position_snapshot,
     list_drawdown_tier_records,
     list_enabled_rules,
     persist_drawdown_plan_evaluation,
@@ -21,8 +24,10 @@ from fund_alert_bot.db import (
 from fund_alert_bot.market_data import (
     AssetType,
     EmptyMarketDataError,
+    FundNav,
     Instrument,
     MarketDataProvider,
+    MarketDataProviderError,
     PriceBasis,
 )
 from fund_alert_bot.rules.dca import build_dca_reminder_alert
@@ -32,10 +37,12 @@ from fund_alert_bot.rules.drawdown import (
 )
 from fund_alert_bot.rules.drawdown_plan import (
     ActiveDrawdownCycle,
+    DrawdownPlanConfig,
     DrawdownPlanEvaluation,
     build_drawdown_plan_alert,
     evaluate_drawdown_plan,
     parse_drawdown_plan_config,
+    required_history_start,
 )
 from fund_alert_bot.rules.profit import (
     LatestDataUnavailableError,
@@ -153,6 +160,93 @@ class DrawdownPlanRuleResult:
     notification: AlertNotification | None
 
 
+@dataclass(frozen=True, slots=True)
+class DrawdownPlanCheckResult:
+    """Summary of confirmed-close evaluations for enabled plans."""
+
+    checked_rules: int
+    notifications: list[AlertNotification]
+    no_data_skips: list[RuleNoDataSkip]
+    errors: list[RuleCheckError]
+
+
+def reserve_drawdown_plan_data_unavailable_notice(
+    connection: Any,
+    *,
+    evaluation_date: date,
+    result: DrawdownPlanCheckResult,
+) -> AlertNotification | None:
+    """Reserve one after-close notice for plans that could not be evaluated."""
+
+    affected = [*result.no_data_skips, *result.errors]
+    if not affected:
+        return None
+
+    alert_key = f"data_unavailable:after_close:{evaluation_date.isoformat()}"
+    lines = [
+        "⚠️ Drawdown plan data unavailable",
+        "",
+        f"Data date: {evaluation_date.isoformat()}",
+        "After-close confirmation could not evaluate:",
+        *(f"• {item.symbol}: {item.message}" for item in affected),
+        "",
+        "No tier decision was made for these plans.",
+        "Please check your own platform.",
+        "",
+        "This is a reminder only. No trade has been placed.",
+    ]
+    message = "\n".join(lines)
+    try:
+        event_id = add_alert_event(
+            connection,
+            rule_id=affected[0].rule_id,
+            alert_key=alert_key,
+            title="Drawdown plan data unavailable",
+            message=message,
+            payload={
+                "phase": "after_close",
+                "data_date": evaluation_date.isoformat(),
+                "affected_plans": [
+                    {
+                        "rule_id": item.rule_id,
+                        "symbol": item.symbol,
+                        "reason": item.message,
+                    }
+                    for item in affected
+                ],
+            },
+        )
+    except sqlite3.IntegrityError:
+        return None
+    return AlertNotification(event_id=event_id, title="Data unavailable", text=message)
+
+
+@dataclass(frozen=True, slots=True)
+class DrawdownPlanStatus:
+    """Read-only current state for one enabled drawdown plan."""
+
+    rule_id: int
+    reference_symbol: str
+    name: str
+    config: DrawdownPlanConfig
+    evaluation: DrawdownPlanEvaluation
+    recorded_tier_keys: frozenset[str]
+    readiness: str
+    missing_setup: tuple[str, ...]
+    position: Any | None
+    fund_nav: FundNav | None
+
+
+@dataclass(frozen=True, slots=True)
+class DrawdownPlanStatusResult:
+    """Read-only statuses plus per-plan failures."""
+
+    checked_rules: int
+    statuses: list[DrawdownPlanStatus]
+    no_data_skips: list[RuleNoDataSkip]
+    errors: list[RuleCheckError]
+
+
 def evaluate_drawdown_plan_rule(
     connection: Any,
     rule: Any,
@@ -169,27 +263,10 @@ def evaluate_drawdown_plan_rule(
     name = str(rule["name"]).strip()
     if not name:
         raise ValueError("drawdown_plan name must not be empty.")
-    config = parse_drawdown_plan_config(
-        reference_symbol=reference_symbol,
-        asset_type=str(rule["asset_type"]),
-        params=_load_params(str(rule["params_json"])),
+    config, active_cycle, recorded_tier_keys = _load_drawdown_plan_state(
+        connection,
+        rule,
     )
-    active_row = get_active_drawdown_cycle(connection, rule_id)
-    active_cycle = None
-    recorded_tier_keys: set[str] = set()
-    if active_row is not None:
-        active_cycle = ActiveDrawdownCycle(
-            cycle_id=int(active_row["id"]),
-            peak_date=date.fromisoformat(str(active_row["peak_date"])),
-            peak_price=float(active_row["peak_price"]),
-            last_evaluated_date=date.fromisoformat(
-                str(active_row["last_evaluated_date"])
-            ),
-        )
-        recorded_tier_keys = {
-            str(row["tier_key"])
-            for row in list_drawdown_tier_records(connection, active_cycle.cycle_id)
-        }
 
     evaluation = evaluate_drawdown_plan(
         history,
@@ -237,6 +314,216 @@ def evaluate_drawdown_plan_rule(
         evaluation=evaluation,
         notification=notification,
     )
+
+
+def evaluate_drawdown_plan_rules(
+    connection: Any,
+    market_data_provider: MarketDataProvider,
+    *,
+    expected_date: date,
+) -> DrawdownPlanCheckResult:
+    """Evaluate and persist every enabled plan for one confirmed close date."""
+
+    rules = [
+        row
+        for row in list_enabled_rules(connection)
+        if row["type"] == DRAW_DOWN_PLAN_RULE_TYPE
+    ]
+    notifications: list[AlertNotification] = []
+    no_data_skips: list[RuleNoDataSkip] = []
+    errors: list[RuleCheckError] = []
+    for rule in rules:
+        try:
+            history = _fetch_drawdown_plan_history(
+                connection,
+                rule,
+                market_data_provider,
+                end_date=expected_date,
+            )
+            result = evaluate_drawdown_plan_rule(
+                connection,
+                rule,
+                history,
+                expected_date=expected_date,
+            )
+            if result.notification is not None:
+                notifications.append(result.notification)
+        except MarketDataProviderError as exc:
+            no_data_skips.append(_plan_no_data_skip(rule, exc))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(_plan_check_error(rule, exc))
+    return DrawdownPlanCheckResult(
+        checked_rules=len(rules),
+        notifications=notifications,
+        no_data_skips=no_data_skips,
+        errors=errors,
+    )
+
+
+def read_drawdown_plan_statuses(
+    connection: Any,
+    market_data_provider: MarketDataProvider,
+    *,
+    end_date: date | None = None,
+) -> DrawdownPlanStatusResult:
+    """Calculate current plan state without reserving alerts or changing cycles."""
+
+    check_date = end_date or date.today()
+    rules = [
+        row
+        for row in list_enabled_rules(connection)
+        if row["type"] == DRAW_DOWN_PLAN_RULE_TYPE
+    ]
+    statuses: list[DrawdownPlanStatus] = []
+    no_data_skips: list[RuleNoDataSkip] = []
+    errors: list[RuleCheckError] = []
+    for rule in rules:
+        try:
+            config, active_cycle, recorded_tier_keys = _load_drawdown_plan_state(
+                connection,
+                rule,
+            )
+            history = _fetch_drawdown_plan_history(
+                connection,
+                rule,
+                market_data_provider,
+                end_date=check_date,
+            )
+            latest_date = _latest_history_date(history)
+            if latest_date is None:
+                raise EmptyMarketDataError("Confirmed ETF history has no dated row.")
+            evaluation = evaluate_drawdown_plan(
+                history,
+                config,
+                reference_symbol=str(rule["symbol"]),
+                expected_date=latest_date,
+                active_cycle=active_cycle,
+                recorded_tier_keys=recorded_tier_keys,
+            )
+            position = get_position_snapshot(
+                connection,
+                config.investment_fund_symbol,
+            )
+            readiness, missing_setup = derive_plan_readiness(
+                connection,
+                config.investment_fund_symbol,
+            )
+            fund_nav = None
+            if position is not None and float(position["units"]) > 0:
+                try:
+                    fund_nav = market_data_provider.get_fund_nav(
+                        Instrument(
+                            config.investment_fund_symbol,
+                            str(rule["name"]),
+                            AssetType.CN_OPEN_FUND,
+                        )
+                    )
+                except MarketDataProviderError as exc:
+                    no_data_skips.append(
+                        RuleNoDataSkip(
+                            int(rule["id"]),
+                            config.investment_fund_symbol,
+                            str(exc),
+                        )
+                    )
+            statuses.append(
+                DrawdownPlanStatus(
+                    rule_id=int(rule["id"]),
+                    reference_symbol=str(rule["symbol"]),
+                    name=str(rule["name"]),
+                    config=config,
+                    evaluation=evaluation,
+                    recorded_tier_keys=frozenset(
+                        () if evaluation.cycle_changed else recorded_tier_keys
+                    ),
+                    readiness=readiness,
+                    missing_setup=missing_setup,
+                    position=position,
+                    fund_nav=fund_nav,
+                )
+            )
+        except MarketDataProviderError as exc:
+            no_data_skips.append(_plan_no_data_skip(rule, exc))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(_plan_check_error(rule, exc))
+    return DrawdownPlanStatusResult(len(rules), statuses, no_data_skips, errors)
+
+
+def derive_plan_readiness(
+    connection: Any,
+    fund_symbol: str,
+) -> tuple[str, tuple[str, ...]]:
+    """Derive readiness from the shared fee and an explicit position snapshot."""
+
+    settings = get_fund_settings(connection, fund_symbol)
+    position = get_position_snapshot(connection, fund_symbol)
+    missing = tuple(
+        item
+        for item, absent in (
+            ("fund fee", settings is None or settings["fee_mode"] is None),
+            ("position snapshot", position is None),
+        )
+        if absent
+    )
+    return ("READY" if not missing else "SETUP_REQUIRED"), missing
+
+
+def _load_drawdown_plan_state(
+    connection: Any,
+    rule: Any,
+) -> tuple[DrawdownPlanConfig, ActiveDrawdownCycle | None, set[str]]:
+    config = parse_drawdown_plan_config(
+        reference_symbol=str(rule["symbol"]),
+        asset_type=str(rule["asset_type"]),
+        params=_load_params(str(rule["params_json"])),
+    )
+    active_row = get_active_drawdown_cycle(connection, int(rule["id"]))
+    if active_row is None:
+        return config, None, set()
+    active_cycle = ActiveDrawdownCycle(
+        cycle_id=int(active_row["id"]),
+        peak_date=date.fromisoformat(str(active_row["peak_date"])),
+        peak_price=float(active_row["peak_price"]),
+        last_evaluated_date=date.fromisoformat(str(active_row["last_evaluated_date"])),
+    )
+    recorded = {
+        str(row["tier_key"])
+        for row in list_drawdown_tier_records(connection, active_cycle.cycle_id)
+    }
+    return config, active_cycle, recorded
+
+
+def _fetch_drawdown_plan_history(
+    connection: Any,
+    rule: Any,
+    market_data_provider: MarketDataProvider,
+    *,
+    end_date: date,
+) -> pd.DataFrame:
+    config, active_cycle, _recorded = _load_drawdown_plan_state(connection, rule)
+    instrument = Instrument(
+        symbol=str(rule["symbol"]),
+        name=str(rule["name"]),
+        asset_type=AssetType.CN_ETF,
+    )
+    return market_data_provider.get_history(
+        instrument,
+        required_history_start(
+            evaluation_date=end_date,
+            config=config,
+            active_peak_date=None if active_cycle is None else active_cycle.peak_date,
+        ),
+        end_date,
+        price_basis=PriceBasis.QFQ,
+    )
+
+
+def _plan_no_data_skip(rule: Any, exc: Exception) -> RuleNoDataSkip:
+    return RuleNoDataSkip(int(rule["id"]), str(rule["symbol"]), str(exc))
+
+
+def _plan_check_error(rule: Any, exc: Exception) -> RuleCheckError:
+    return RuleCheckError(int(rule["id"]), str(rule["symbol"]), str(exc))
 
 
 def evaluate_drawdown_rules(
