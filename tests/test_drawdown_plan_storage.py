@@ -134,6 +134,28 @@ def test_read_plan_status_is_pure_and_reports_open_tiers(tmp_path: Path) -> None
     assert counts == [0, 0, 0]
 
 
+def test_read_plan_status_does_not_reuse_tiers_after_new_peak(tmp_path: Path) -> None:
+    sqlite_path = tmp_path / "bot.sqlite3"
+    _add_plan(sqlite_path)
+    with open_connection(sqlite_path) as connection:
+        evaluate_drawdown_plan_rule(
+            connection,
+            list_rules(connection)[0],
+            _history([100, 84]),
+            expected_date=date(2024, 1, 2),
+        )
+        result = read_drawdown_plan_statuses(
+            connection,
+            FakePlanProvider(_history([100, 84, 101, 85.85])),
+            end_date=date(2024, 1, 4),
+        )
+
+    status = result.statuses[0]
+    assert status.evaluation.cycle_changed is True
+    assert status.recorded_tier_keys == frozenset()
+    assert [tier.key for tier in status.evaluation.newly_crossed_tiers] == ["0.15"]
+
+
 def test_plan_readiness_is_derived_from_fee_and_even_closed_position(
     tmp_path: Path,
 ) -> None:

@@ -433,7 +433,9 @@ def read_drawdown_plan_statuses(
                     name=str(rule["name"]),
                     config=config,
                     evaluation=evaluation,
-                    recorded_tier_keys=frozenset(recorded_tier_keys),
+                    recorded_tier_keys=frozenset(
+                        () if evaluation.cycle_changed else recorded_tier_keys
+                    ),
                     readiness=readiness,
                     missing_setup=missing_setup,
                     position=position,
