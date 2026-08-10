@@ -181,6 +181,21 @@ def test_fractional_drawdown_tiers_keep_precision_in_actions_and_confirmation() 
     assert "• -15.4% → ¥100.25" in confirmation
 
 
+def test_drawdown_tier_callbacks_use_bounded_indexes() -> None:
+    tiny_key = "0." + "0" * 39 + "1"
+    tiers = (
+        DrawdownTier(1e-40, 100, tiny_key),
+        DrawdownTier(0.15, 200, "0.15"),
+    )
+
+    rows = _drawdown_plan_action_rows(2**63 - 1, 2**63 - 1, tiers)
+    callback_data = [rows[1][0][1], rows[2][0][1]]
+
+    assert callback_data[0].endswith(":tier:0")
+    assert callback_data[1].endswith(":tier:1")
+    assert all(len(value.encode()) <= 64 for value in callback_data)
+
+
 def test_parse_drawdown_plan_with_quoted_name_and_optional_lookback() -> None:
     command = parse_add_drawdown_plan_args(
         [
@@ -714,9 +729,17 @@ def test_mark_added_fallback_matches_earlier_same_day_multi_tier_alert(
             action_date=date(2024, 1, 2),
             tier_percentages=(15, 20),
         )
+        indexed = load_manual_add_selection(
+            connection,
+            plan_id=rule_id,
+            event_id=int(original["id"]),
+            action_date=date(2024, 1, 2),
+            tier_index=1,
+        )
 
     assert selection.event_id == original["id"]
     assert [tier.key for tier in selection.tiers] == ["0.15", "0.2"]
+    assert [tier.key for tier in indexed.tiers] == ["0.2"]
 
 
 def test_mark_added_after_cutoff_uses_next_confirmed_open_day(tmp_path) -> None:

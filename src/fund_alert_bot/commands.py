@@ -481,7 +481,7 @@ def load_manual_add_selection(
     action_date: date,
     event_id: int | None = None,
     tier_percentages: Sequence[float] = (),
-    tier_key: str | None = None,
+    tier_index: int | None = None,
     select_all: bool = False,
 ) -> ManualAddSelection:
     """Load and validate eligible tiers from a stored same-day alert event."""
@@ -552,8 +552,8 @@ def load_manual_add_selection(
     eligible = tuple(tier for tier in config.tiers if tier.key in eligible_keys)
     if select_all:
         selected = eligible
-    elif tier_key is not None:
-        selected = tuple(tier for tier in eligible if tier.key == tier_key)
+    elif tier_index is not None:
+        selected = eligible[tier_index : tier_index + 1]
     else:
         selected = tuple(
             tier
@@ -1711,6 +1711,9 @@ def build_command_handlers(
         try:
             plan_id = int(parts[1])
             event_id = int(parts[2])
+            tier_index = (
+                int(parts[4]) if parts[3] == "tier" and len(parts) == 5 else None
+            )
         except ValueError:
             return
         selector = parts[3]
@@ -1734,9 +1737,7 @@ def build_command_handlers(
                     event_id=event_id,
                     action_date=_clock_now(clock).astimezone(timezone_info).date(),
                     select_all=selector == "all",
-                    tier_key=(
-                        parts[4] if selector == "tier" and len(parts) == 5 else None
-                    ),
+                    tier_index=tier_index,
                 )
         except (CommandParseError, ValueError) as exc:
             await query.edit_message_text(str(exc))
@@ -2353,7 +2354,7 @@ def build_command_handlers(
         ),
         CallbackQueryHandler(
             manual_add_event_callback,
-            pattern=(r"^drawdown_add:[0-9]+:[0-9]+:(?:all|none|tier:[0-9.]+)$"),
+            pattern=(r"^drawdown_add:[0-9]+:[0-9]+:(?:all|none|tier:[0-9]+)$"),
         ),
         CallbackQueryHandler(
             manual_add_confirm_callback,

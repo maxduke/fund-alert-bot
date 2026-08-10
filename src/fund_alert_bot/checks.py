@@ -772,10 +772,10 @@ def _drawdown_plan_action_rows(
                     "仅记录 "
                     f"-{format_plan_percent(tier.drawdown)} "
                     f"{format_plan_amount(tier.amount)}",
-                    f"drawdown_add:{rule_id}:{event_id}:tier:{tier.key}",
+                    f"drawdown_add:{rule_id}:{event_id}:tier:{index}",
                 ),
             )
-            for tier in tiers
+            for index, tier in enumerate(tiers)
         )
     rows.append((("⏭ 暂未加仓", f"drawdown_add:{rule_id}:{event_id}:none"),))
     return tuple(rows)
