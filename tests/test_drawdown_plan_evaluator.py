@@ -11,6 +11,7 @@ from fund_alert_bot.rules.drawdown_plan import (
     ActiveDrawdownCycle,
     DrawdownPlanConfig,
     DrawdownTier,
+    _tier_command_text,
     build_drawdown_plan_alert,
     build_drawdown_plan_pre_alert,
     evaluate_drawdown_plan,
@@ -41,6 +42,12 @@ def test_plan_config_applies_defaults_and_preserves_incremental_amounts() -> Non
         DrawdownTier(0.15, 5000, "0.15"),
         DrawdownTier(0.20, 10000.5, "0.2"),
     )
+
+
+def test_mark_added_fallback_keeps_canonical_tier_precision() -> None:
+    tier = DrawdownTier(0.123456789, 100.25, "0.123456789")
+
+    assert _tier_command_text((tier,)) == "12.3456789"
 
 
 @pytest.mark.parametrize(

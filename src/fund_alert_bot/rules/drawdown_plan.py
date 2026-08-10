@@ -719,7 +719,7 @@ def format_plan_amount(amount: int | float) -> str:
     return f"¥{format(Decimal(str(amount)).normalize(), ',f')}"
 
 
-def format_plan_percent(value: float) -> str:
+def format_plan_percent(value: float | str) -> str:
     """Format a configured drawdown fraction without rounding its tier."""
 
     percentage = (Decimal(str(value)) * 100).normalize()
@@ -727,7 +727,7 @@ def format_plan_percent(value: float) -> str:
 
 
 def _tier_command_text(tiers: Sequence[DrawdownTier]) -> str:
-    return ",".join(f"{tier.drawdown * 100:g}" for tier in tiers)
+    return ",".join(format_plan_percent(tier.key).removesuffix("%") for tier in tiers)
 
 
 def _format_trend(

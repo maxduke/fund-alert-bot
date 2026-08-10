@@ -262,6 +262,14 @@ def test_manual_add_estimate_applies_exact_nav_once(tmp_path: Path) -> None:
     sqlite_path = tmp_path / "bot.sqlite3"
     _add_plan(sqlite_path)
     with open_connection(sqlite_path) as connection:
+        rule = list_rules(connection)[0]
+        params = json.loads(str(rule["params_json"]))
+        params["tiers"][0]["drawdown"] = 0.151
+        connection.execute(
+            "UPDATE rules SET params_json = ? WHERE id = ?",
+            (json.dumps(params), int(rule["id"])),
+        )
+        connection.commit()
         upsert_fund_fee(
             connection,
             fund_symbol="000001",
@@ -287,7 +295,7 @@ def test_manual_add_estimate_applies_exact_nav_once(tmp_path: Path) -> None:
             cycle_id=confirmed.cycle_id,
             source_alert_event_id=confirmed.notification.event_id,
             fund_symbol="000001",
-            tiers=(DrawdownTier(0.15, 5000, "0.15"),),
+            tiers=(DrawdownTier(0.151, 5000, "0.151"),),
             action_at=datetime(2024, 1, 2, 10, tzinfo=UTC),
             create_estimate=True,
             cutoff_choice="before",
@@ -320,7 +328,7 @@ def test_manual_add_estimate_applies_exact_nav_once(tmp_path: Path) -> None:
             "SELECT status, settlement_alert_event_id FROM manual_add_estimates"
         ).fetchone()
 
-    assert recorded == ("0.15",)
+    assert recorded == ("0.151",)
     assert applied is not None
     assert repeated is None
     assert position["units"] == pytest.approx(100 + (5000 / 1.01) / 2)
@@ -328,7 +336,8 @@ def test_manual_add_estimate_applies_exact_nav_once(tmp_path: Path) -> None:
         5200 / (100 + (5000 / 1.01) / 2)
     )
     assert position["is_estimated"] == 1
-    assert [row["tier_key"] for row in actions] == ["0.15"]
+    assert [row["tier_key"] for row in actions] == ["0.151"]
+    assert "Configured tiers: -15.1%" in applied["message"]
     assert occurrence["status"] == "applied"
     assert occurrence["settlement_alert_event_id"] == applied["event_id"]
 
