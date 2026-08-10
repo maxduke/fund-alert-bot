@@ -442,11 +442,13 @@ def evaluate_drawdown_plan_prealerts(
         try:
             rule_id = int(rule["id"])
             reference_symbol = str(rule["symbol"])
-            if connection.execute(
-                "SELECT 1 FROM alert_events WHERE alert_key = ? LIMIT 1",
-                (f"{rule_id}:drawdown_plan:pre_alert:{market_date.isoformat()}",),
-            ).fetchone():
-                continue
+            prealert_exists = (
+                connection.execute(
+                    "SELECT 1 FROM alert_events WHERE alert_key = ? LIMIT 1",
+                    (f"{rule_id}:drawdown_plan:pre_alert:{market_date.isoformat()}",),
+                ).fetchone()
+                is not None
+            )
             name = str(rule["name"]).strip()
             if not name:
                 raise ValueError("drawdown_plan name must not be empty.")
@@ -454,12 +456,33 @@ def evaluate_drawdown_plan_prealerts(
                 connection,
                 rule,
             )
+            if (
+                prealert_exists
+                and active_cycle is not None
+                and active_cycle.last_evaluated_date >= confirmed_date
+            ):
+                continue
             history = _fetch_drawdown_plan_history(
                 connection,
                 rule,
                 market_data_provider,
                 end_date=confirmed_date,
             )
+            if (
+                active_cycle is None
+                or active_cycle.last_evaluated_date < confirmed_date
+            ):
+                catch_up = evaluate_drawdown_plan_rule(
+                    connection,
+                    rule,
+                    history,
+                    expected_date=confirmed_date,
+                )
+                if catch_up.notification is not None:
+                    notifications.append(catch_up.notification)
+                config, active_cycle, recorded_tier_keys = _load_drawdown_plan_state(
+                    connection, rule
+                )
             confirmed = evaluate_drawdown_plan(
                 history,
                 config,
@@ -468,6 +491,8 @@ def evaluate_drawdown_plan_prealerts(
                 active_cycle=active_cycle,
                 recorded_tier_keys=recorded_tier_keys,
             )
+            if prealert_exists:
+                continue
             quote = market_data_provider.get_etf_realtime_quote(
                 Instrument(reference_symbol, name, AssetType.CN_ETF)
             )
@@ -494,22 +519,9 @@ def evaluate_drawdown_plan_prealerts(
                     market_date=market_date,
                     recorded_tier_keys=recorded_tier_keys,
                 )
-            cycle_id, _event_id = persist_drawdown_plan_evaluation(
-                connection,
-                rule_id=rule_id,
-                expected_active_cycle_id=(
-                    None if active_cycle is None else active_cycle.cycle_id
-                ),
-                expected_last_evaluated_date=(
-                    None
-                    if active_cycle is None
-                    else active_cycle.last_evaluated_date.isoformat()
-                ),
-                start_new_cycle=active_cycle is None or confirmed.cycle_changed,
-                peak_date=confirmed.peak_date.isoformat(),
-                peak_price=confirmed.peak_price,
-                evaluation_date=confirmed.latest_date.isoformat(),
-            )
+            if active_cycle is None:
+                raise sqlite3.IntegrityError("Drawdown plan cycle was not initialized.")
+            cycle_id = active_cycle.cycle_id
             alert = build_drawdown_plan_pre_alert(
                 rule_id=rule_id,
                 cycle_id=cycle_id,

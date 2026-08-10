@@ -1807,7 +1807,7 @@ def build_command_handlers(
                         None if effective_date is None else effective_date.isoformat()
                     ),
                 )
-        except (ValueError, sqlite3.IntegrityError) as exc:
+        except (MarketDataProviderError, ValueError, sqlite3.IntegrityError) as exc:
             await query.edit_message_text(f"Addition was not recorded: {exc}")
             return
         tier_text = ", ".join(

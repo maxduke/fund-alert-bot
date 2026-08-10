@@ -437,6 +437,58 @@ def test_scheduled_before_close_plan_prealert_does_not_consume_tiers(
     assert provider.price_bases == [PriceBasis.QFQ]
 
 
+def test_before_close_catches_up_missed_confirmed_plan_tiers(tmp_path: Path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    _add_drawdown_plan(sqlite_path)
+    with open_connection(sqlite_path) as connection:
+        evaluate_drawdown_plan_rule(
+            connection,
+            list_rules(connection)[0],
+            _plan_history([100]),
+            expected_date=date(2024, 1, 1),
+        )
+    application = FakeApplication()
+    provider = FakeProvider(
+        _plan_history([100, 80]),
+        realtime_quote=RealtimeQuote(
+            symbol="510300",
+            price=90,
+            previous_close=80,
+            volume=100,
+            amount=1000,
+            source="eastmoney",
+            fetched_at=datetime(2024, 1, 3, 6, 50, tzinfo=ZoneInfo("UTC")),
+        ),
+    )
+
+    asyncio.run(
+        scheduler.run_scheduled_before_close_check(
+            application=application,
+            sqlite_path=sqlite_path,
+            allowed_user_ids={123},
+            market_data_provider=provider,
+            market_calendar=FakeMarketCalendar(is_trading_day=True),
+            timezone="Asia/Shanghai",
+            run_date=date(2024, 1, 3),
+        )
+    )
+
+    with open_connection(sqlite_path) as connection:
+        cycle = connection.execute(
+            "SELECT last_evaluated_date FROM drawdown_cycles WHERE end_date IS NULL"
+        ).fetchone()
+        tiers = connection.execute(
+            "SELECT tier_key FROM drawdown_tier_records ORDER BY drawdown"
+        ).fetchall()
+        events = connection.execute("SELECT alert_key FROM alert_events").fetchall()
+
+    assert cycle["last_evaluated_date"] == "2024-01-02"
+    assert [row["tier_key"] for row in tiers] == ["0.15", "0.2"]
+    assert len(application.bot.messages) == 1
+    assert "Buy-plan reminder — A500" in application.bot.messages[0]["text"]
+    assert all("pre_alert" not in row["alert_key"] for row in events)
+
+
 def test_failed_before_close_prealert_is_not_retried_after_expiry(
     tmp_path: Path,
 ) -> None:

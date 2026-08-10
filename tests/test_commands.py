@@ -52,7 +52,13 @@ from fund_alert_bot.db import (
     upsert_fund_fee,
     upsert_position_snapshot,
 )
-from fund_alert_bot.market_data import AssetType, FundNav, Instrument, PriceBasis
+from fund_alert_bot.market_data import (
+    AssetType,
+    FundNav,
+    Instrument,
+    MarketCalendarUnavailableError,
+    PriceBasis,
+)
 from fund_alert_bot.rules.dca import weekday_for_date
 from fund_alert_bot.rules.drawdown_plan import DrawdownTier
 
@@ -695,6 +701,57 @@ def test_mark_added_records_one_pending_estimate_after_confirmation(tmp_path) ->
     assert len(actions) == 1
     assert actions[0]["tier_key"] == "0.15"
     assert all("waiting for exact dated NAV" in edit for edit in query.edits)
+
+
+def test_mark_added_calendar_outage_returns_actionable_error(tmp_path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    rule_id = _prepare_ready_plan_alert(
+        sqlite_path,
+        closes=[100, 80],
+        expected_date=date(2024, 1, 2),
+    )
+    handlers = build_command_handlers(
+        {123},
+        sqlite_path=sqlite_path,
+        market_calendar=FakeMarketCalendar(
+            confirmed_error=MarketCalendarUnavailableError("calendar unavailable")
+        ),
+        now_factory=lambda: datetime(2024, 1, 2, 6, 0, tzinfo=UTC),
+    )
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        effective_message=message,
+    )
+    asyncio.run(
+        _handler_by_command(handlers, "mark_added").callback(
+            update,
+            SimpleNamespace(args=[str(rule_id), "15"]),
+        )
+    )
+    query = FakeCallbackQuery(
+        message.reply_markups[0].inline_keyboard[0][0].callback_data
+    )
+    callback_update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        callback_query=query,
+    )
+    asyncio.run(
+        _callback_by_name(handlers, "manual_add_confirm_callback").callback(
+            callback_update,
+            SimpleNamespace(),
+        )
+    )
+
+    with open_connection(sqlite_path) as connection:
+        estimate_count = connection.execute(
+            "SELECT COUNT(*) FROM manual_add_estimates"
+        ).fetchone()[0]
+
+    assert query.edits[-1] == "Addition was not recorded: calendar unavailable"
+    assert estimate_count == 0
 
 
 def test_mark_added_fallback_matches_earlier_same_day_multi_tier_alert(
@@ -1544,10 +1601,17 @@ class FakeResponse:
 
 
 class FakeMarketCalendar:
-    def __init__(self, open_dates: set[date] | None = None) -> None:
+    def __init__(
+        self,
+        open_dates: set[date] | None = None,
+        confirmed_error: Exception | None = None,
+    ) -> None:
         self.open_dates = open_dates
+        self.confirmed_error = confirmed_error
 
     def confirmed_status(self, check_date: date) -> bool:
+        if self.confirmed_error is not None:
+            raise self.confirmed_error
         return self.open_dates is None or check_date in self.open_dates
 
 
