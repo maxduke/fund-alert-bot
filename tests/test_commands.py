@@ -800,6 +800,29 @@ def test_mark_added_fallback_matches_earlier_same_day_multi_tier_alert(
     assert [tier.key for tier in indexed.tiers] == ["0.2"]
 
 
+def test_mark_added_fallback_exactly_matches_close_tier_keys(tmp_path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    rule_id = _prepare_ready_plan_alert(
+        sqlite_path,
+        closes=[100, 80],
+        expected_date=date(2024, 1, 2),
+        tiers=[
+            {"drawdown": 0.1500000000001, "amount": 100},
+            {"drawdown": 0.1500000000002, "amount": 200},
+        ],
+    )
+
+    with open_connection(sqlite_path) as connection:
+        selection = load_manual_add_selection(
+            connection,
+            plan_id=rule_id,
+            action_date=date(2024, 1, 2),
+            tier_percentages=(15.00000000001,),
+        )
+
+    assert [tier.key for tier in selection.tiers] == ["0.1500000000001"]
+
+
 def test_mark_added_after_cutoff_uses_next_confirmed_open_day(tmp_path) -> None:
     sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
     rule_id = _prepare_ready_plan_alert(
@@ -905,6 +928,10 @@ def test_sync_not_included_keeps_unestimated_manual_add_sync_warning(tmp_path) -
         sqlite_path,
         closes=[100, 84],
         expected_date=date(2024, 1, 2),
+        tiers=[
+            {"drawdown": 0.15, "amount": 5000.005},
+            {"drawdown": 0.20, "amount": 10000},
+        ],
     )
     with open_connection(sqlite_path) as connection:
         cycle = get_active_drawdown_cycle(connection, rule_id)
@@ -915,7 +942,7 @@ def test_sync_not_included_keeps_unestimated_manual_add_sync_warning(tmp_path) -
             cycle_id=int(cycle["id"]),
             source_alert_event_id=int(event["id"]),
             fund_symbol="000001",
-            tiers=(DrawdownTier(0.15, 5000, "0.15"),),
+            tiers=(DrawdownTier(0.15, 5000.005, "0.15"),),
             action_at=datetime(2024, 1, 2, 8, tzinfo=UTC),
             create_estimate=False,
         )
@@ -952,6 +979,7 @@ def test_sync_not_included_keeps_unestimated_manual_add_sync_warning(tmp_path) -
         )
     )
 
+    assert "¥5,000.005" in message.replies[0]
     assert "still require another /sync_position" in query.edits[-1]
     assert "eligible for dated-NAV processing" not in query.edits[-1]
 
@@ -1677,6 +1705,7 @@ def _prepare_ready_plan_alert(
     *,
     closes: list[float],
     expected_date: date,
+    tiers: list[dict[str, float | int]] | None = None,
 ) -> int:
     with open_connection(sqlite_path) as connection:
         init_db(connection)
@@ -1689,7 +1718,9 @@ def _prepare_ready_plan_alert(
             params={
                 "investment_fund_symbol": "000001",
                 "lookback_days": 365,
-                "tiers": [
+                "tiers": tiers
+                if tiers is not None
+                else [
                     {"drawdown": 0.15, "amount": 5000},
                     {"drawdown": 0.20, "amount": 10000},
                 ],

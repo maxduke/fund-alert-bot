@@ -12,6 +12,7 @@ import sqlite3
 from collections.abc import Awaitable, Callable, Collection, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
@@ -510,22 +511,16 @@ def load_manual_add_selection(
         asset_type=str(event["asset_type"]),
         params=_load_params(str(event["params_json"])),
     )
-    if event_id is None and tier_percentages:
-        requested = tuple(
-            tier
-            for tier in config.tiers
-            if any(
-                math.isclose(
-                    tier.drawdown * 100,
-                    percentage,
-                    rel_tol=0,
-                    abs_tol=1e-10,
-                )
-                for percentage in tier_percentages
-            )
-        )
-        if len(requested) != len(tier_percentages):
+    requested_keys = tuple(
+        _tier_key_from_percentage(percentage) for percentage in tier_percentages
+    )
+    if len(set(requested_keys)) != len(requested_keys):
+        raise CommandParseError("Selected tiers must be unique.")
+    if event_id is None and requested_keys:
+        configured_by_key = {tier.key: tier for tier in config.tiers}
+        if any(key not in configured_by_key for key in requested_keys):
             raise CommandParseError("One or more selected tiers are not configured.")
+        requested = tuple(configured_by_key[key] for key in requested_keys)
         event = get_drawdown_plan_action_event(
             connection,
             rule_id=plan_id,
@@ -556,23 +551,12 @@ def load_manual_add_selection(
     elif tier_index is not None:
         selected = eligible[tier_index : tier_index + 1]
     else:
-        selected = tuple(
-            tier
-            for tier in eligible
-            if any(
-                math.isclose(
-                    tier.drawdown * 100,
-                    percentage,
-                    rel_tol=0,
-                    abs_tol=1e-10,
-                )
-                for percentage in tier_percentages
-            )
-        )
-        if len(selected) != len(tier_percentages):
+        eligible_by_key = {tier.key: tier for tier in eligible}
+        if any(key not in eligible_by_key for key in requested_keys):
             raise CommandParseError(
                 "Selected tiers are not all present in a same-day reminder."
             )
+        selected = tuple(eligible_by_key[key] for key in requested_keys)
     if not selected:
         raise CommandParseError("No eligible tiers were selected.")
     already_added = {
@@ -599,6 +583,10 @@ def load_manual_add_selection(
         cutoff=cutoff,
         market_date=action_date,
     )
+
+
+def _tier_key_from_percentage(percentage: float) -> str:
+    return format((Decimal(str(percentage)) / 100).normalize(), "f")
 
 
 def format_manual_add_confirmation(selection: ManualAddSelection) -> str:
@@ -2034,7 +2022,8 @@ def build_command_handlers(
                 "items below?",
                 "",
                 *(
-                    f"• {item['kind']} / {item['date']} / ¥{float(item['amount']):,.2f}"
+                    f"• {item['kind']} / {item['date']} / "
+                    f"{format_plan_amount(float(item['amount']))}"
                     for item in pending_items
                 ),
             ]
