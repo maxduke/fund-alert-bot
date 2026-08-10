@@ -12,7 +12,7 @@ import sqlite3
 from collections.abc import Awaitable, Callable, Collection, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
@@ -226,7 +226,7 @@ class MarkAddedCommand:
     """Parsed explicit user statement that configured tiers were purchased."""
 
     plan_id: int
-    tier_percentages: tuple[float, ...]
+    tier_keys: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -457,23 +457,23 @@ def parse_mark_added_args(args: Sequence[str]) -> MarkAddedCommand:
         raise CommandParseError("plan_id must be a positive integer")
     raw_values = args[1].split(",")
     try:
-        percentages = tuple(float(value) for value in raw_values)
-    except ValueError as exc:
+        percentages = tuple(Decimal(value) for value in raw_values)
+    except InvalidOperation as exc:
         raise CommandParseError(
             "tier percentages must be comma-separated numbers"
         ) from exc
-    if (
-        not percentages
-        or any(
-            not math.isfinite(value) or value <= 0 or value >= 100
-            for value in percentages
-        )
-        or len(set(percentages)) != len(percentages)
+    if not percentages or any(
+        not value.is_finite() or value <= 0 or value >= 100 for value in percentages
     ):
         raise CommandParseError(
             "tier percentages must be unique numbers between 0 and 100"
         )
-    return MarkAddedCommand(plan_id, percentages)
+    tier_keys = tuple(format((value / 100).normalize(), "f") for value in percentages)
+    if len(set(tier_keys)) != len(tier_keys):
+        raise CommandParseError(
+            "tier percentages must be unique numbers between 0 and 100"
+        )
+    return MarkAddedCommand(plan_id, tier_keys)
 
 
 def load_manual_add_selection(
@@ -482,7 +482,7 @@ def load_manual_add_selection(
     plan_id: int,
     action_date: date,
     event_id: int | None = None,
-    tier_percentages: Sequence[float] = (),
+    tier_keys: Sequence[str] = (),
     tier_index: int | None = None,
     select_all: bool = False,
 ) -> ManualAddSelection:
@@ -511,9 +511,7 @@ def load_manual_add_selection(
         asset_type=str(event["asset_type"]),
         params=_load_params(str(event["params_json"])),
     )
-    requested_keys = tuple(
-        _tier_key_from_percentage(percentage) for percentage in tier_percentages
-    )
+    requested_keys = tuple(tier_keys)
     if len(set(requested_keys)) != len(requested_keys):
         raise CommandParseError("Selected tiers must be unique.")
     if event_id is None and requested_keys:
@@ -583,10 +581,6 @@ def load_manual_add_selection(
         cutoff=cutoff,
         market_date=action_date,
     )
-
-
-def _tier_key_from_percentage(percentage: float) -> str:
-    return format((Decimal(str(percentage)) / 100).normalize(), "f")
 
 
 def format_manual_add_confirmation(selection: ManualAddSelection) -> str:
@@ -1661,7 +1655,7 @@ def build_command_handlers(
                     connection,
                     plan_id=command.plan_id,
                     action_date=action_date,
-                    tier_percentages=command.tier_percentages,
+                    tier_keys=command.tier_keys,
                 )
         except (CommandParseError, ValueError) as exc:
             await _reply_text(update, str(exc))

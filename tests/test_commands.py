@@ -258,7 +258,7 @@ def test_parse_fund_settings_and_position_commands() -> None:
     assert (closed.units, closed.average_unit_cost) == (0, 0)
 
     marked = parse_mark_added_args(["12", "15,20"])
-    assert (marked.plan_id, marked.tier_percentages) == (12, (15, 20))
+    assert (marked.plan_id, marked.tier_keys) == (12, ("0.15", "0.2"))
 
 
 @pytest.mark.parametrize(
@@ -785,7 +785,7 @@ def test_mark_added_fallback_matches_earlier_same_day_multi_tier_alert(
             connection,
             plan_id=rule_id,
             action_date=date(2024, 1, 2),
-            tier_percentages=(15, 20),
+            tier_keys=("0.15", "0.2"),
         )
         indexed = load_manual_add_selection(
             connection,
@@ -811,16 +811,39 @@ def test_mark_added_fallback_exactly_matches_close_tier_keys(tmp_path) -> None:
             {"drawdown": 0.1500000000002, "amount": 200},
         ],
     )
+    command = parse_mark_added_args([str(rule_id), "15.00000000001"])
 
     with open_connection(sqlite_path) as connection:
         selection = load_manual_add_selection(
             connection,
             plan_id=rule_id,
             action_date=date(2024, 1, 2),
-            tier_percentages=(15.00000000001,),
+            tier_keys=command.tier_keys,
         )
 
     assert [tier.key for tier in selection.tiers] == ["0.1500000000001"]
+
+
+def test_mark_added_keeps_printed_high_precision_percentage_exact(tmp_path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    rule_id = _prepare_ready_plan_alert(
+        sqlite_path,
+        closes=[100, 10],
+        expected_date=date(2024, 1, 2),
+        tiers=[{"drawdown": 0.7949398787921911, "amount": 100}],
+    )
+    command = parse_mark_added_args([str(rule_id), "79.49398787921911"])
+
+    with open_connection(sqlite_path) as connection:
+        selection = load_manual_add_selection(
+            connection,
+            plan_id=rule_id,
+            action_date=date(2024, 1, 2),
+            tier_keys=command.tier_keys,
+        )
+
+    assert command.tier_keys == ("0.7949398787921911",)
+    assert [tier.key for tier in selection.tiers] == ["0.7949398787921911"]
 
 
 def test_mark_added_after_cutoff_uses_next_confirmed_open_day(tmp_path) -> None:
