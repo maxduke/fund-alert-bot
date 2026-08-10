@@ -87,6 +87,7 @@ def test_fund_settings_and_position_snapshot_survive_restart(tmp_path: Path) -> 
         "fee_mode": "rate",
         "fee_value": 0.0015,
         "subscription_cutoff": "14:45",
+        "position_sync_required_since": None,
         "created_at": settings["created_at"],
         "updated_at": settings["updated_at"],
     }

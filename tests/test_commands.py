@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
+from fund_alert_bot.checks import evaluate_drawdown_plan_rule
 from fund_alert_bot.commands import (
     DCA_RULE_TYPE,
     DRAW_DOWN_RULE_TYPE,
@@ -26,6 +27,7 @@ from fund_alert_bot.commands import (
     parse_add_drawdown_args,
     parse_add_drawdown_plan_args,
     parse_add_profit_args,
+    parse_mark_added_args,
     parse_set_fund_cutoff_args,
     parse_set_fund_fee_args,
     parse_sync_position_args,
@@ -39,6 +41,7 @@ from fund_alert_bot.db import (
     init_db,
     list_rules,
     open_connection,
+    upsert_fund_fee,
     upsert_position_snapshot,
 )
 from fund_alert_bot.market_data import AssetType, FundNav, Instrument, PriceBasis
@@ -192,6 +195,9 @@ def test_parse_fund_settings_and_position_commands() -> None:
     assert cutoff.subscription_cutoff == "15:00"
     assert (position.units, position.average_unit_cost) == (1234.5, 1.234)
     assert (closed.units, closed.average_unit_cost) == (0, 0)
+
+    marked = parse_mark_added_args(["12", "15,20"])
+    assert (marked.plan_id, marked.tier_percentages) == (12, (15, 20))
 
 
 @pytest.mark.parametrize(
@@ -582,6 +588,117 @@ def test_fund_setting_commands_persist_shared_values(tmp_path) -> None:
     assert row["subscription_cutoff"] == "14:45"
     assert "future estimates" in update.effective_message.replies[0]
     assert "future manual confirmations" in update.effective_message.replies[1]
+
+
+def test_mark_added_records_one_pending_estimate_after_confirmation(tmp_path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    rule_id = _prepare_ready_plan_alert(
+        sqlite_path,
+        closes=[100, 80],
+        expected_date=date(2024, 1, 2),
+    )
+
+    handlers = build_command_handlers(
+        {123},
+        sqlite_path=sqlite_path,
+        market_calendar=FakeMarketCalendar(),
+        now_factory=lambda: datetime(2024, 1, 2, 6, 0, tzinfo=UTC),
+    )
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        effective_message=message,
+    )
+
+    asyncio.run(
+        _handler_by_command(handlers, "mark_added").callback(
+            update,
+            SimpleNamespace(args=[str(rule_id), "15"]),
+        )
+    )
+    callback_data = message.reply_markups[0].inline_keyboard[0][0].callback_data
+    query = FakeCallbackQuery(callback_data)
+    callback_update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        effective_message=message,
+        callback_query=query,
+    )
+    callback = _callback_by_name(handlers, "manual_add_confirm_callback")
+    asyncio.run(callback.callback(callback_update, SimpleNamespace()))
+    asyncio.run(callback.callback(callback_update, SimpleNamespace()))
+
+    with open_connection(sqlite_path) as connection:
+        estimates = connection.execute("SELECT * FROM manual_add_estimates").fetchall()
+        actions = connection.execute("SELECT * FROM manual_add_actions").fetchall()
+
+    assert "Continue only if you already submitted" in message.replies[0]
+    assert len(estimates) == 1
+    assert estimates[0]["gross_amount"] == 5000
+    assert estimates[0]["effective_date"] == "2024-01-02"
+    assert estimates[0]["status"] == "pending"
+    assert len(actions) == 1
+    assert actions[0]["tier_key"] == "0.15"
+    assert all("waiting for exact dated NAV" in edit for edit in query.edits)
+
+
+def test_mark_added_after_cutoff_uses_next_confirmed_open_day(tmp_path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    rule_id = _prepare_ready_plan_alert(
+        sqlite_path,
+        closes=[100, 100, 100, 100, 80],
+        expected_date=date(2024, 1, 5),
+    )
+    handlers = build_command_handlers(
+        {123},
+        sqlite_path=sqlite_path,
+        market_calendar=FakeMarketCalendar(
+            open_dates={date(2024, 1, 5), date(2024, 1, 8)}
+        ),
+        now_factory=lambda: datetime(2024, 1, 5, 7, 10, tzinfo=UTC),
+    )
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        effective_message=message,
+    )
+    asyncio.run(
+        _handler_by_command(handlers, "mark_added").callback(
+            update,
+            SimpleNamespace(args=[str(rule_id), "15"]),
+        )
+    )
+    query = FakeCallbackQuery(
+        message.reply_markups[0].inline_keyboard[0][0].callback_data
+    )
+    callback_update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        effective_message=message,
+        callback_query=query,
+    )
+    asyncio.run(
+        _callback_by_name(handlers, "manual_add_confirm_callback").callback(
+            callback_update,
+            SimpleNamespace(),
+        )
+    )
+    query.data = query.reply_markups[0].inline_keyboard[1][0].callback_data
+    asyncio.run(
+        _callback_by_name(handlers, "manual_add_cutoff_callback").callback(
+            callback_update,
+            SimpleNamespace(),
+        )
+    )
+
+    with open_connection(sqlite_path) as connection:
+        estimate = connection.execute("SELECT * FROM manual_add_estimates").fetchone()
+
+    assert estimate["cutoff_choice"] == "after"
+    assert estimate["effective_date"] == "2024-01-08"
+    assert "2024-01-08" in query.edits[-1]
 
 
 def test_sync_position_persists_exact_snapshot_and_shows_dated_value(tmp_path) -> None:
@@ -1235,12 +1352,20 @@ class FakeCallbackQuery:
         self.data = data
         self.answer_count = 0
         self.edits: list[str] = []
+        self.reply_markups: list[object] = []
 
     async def answer(self) -> None:
         self.answer_count += 1
 
-    async def edit_message_text(self, text: str) -> None:
+    async def edit_message_text(
+        self,
+        text: str,
+        *,
+        reply_markup: object | None = None,
+    ) -> None:
         self.edits.append(text)
+        if reply_markup is not None:
+            self.reply_markups.append(reply_markup)
 
 
 class FakeBot:
@@ -1260,6 +1385,14 @@ class FakeFailingBot:
 class FakeResponse:
     def __init__(self, *, status_code: int) -> None:
         self.status_code = status_code
+
+
+class FakeMarketCalendar:
+    def __init__(self, open_dates: set[date] | None = None) -> None:
+        self.open_dates = open_dates
+
+    def confirmed_status(self, check_date: date) -> bool:
+        return self.open_dates is None or check_date in self.open_dates
 
 
 def _history(dates: list[str], closes: list[float]) -> pd.DataFrame:
@@ -1308,3 +1441,58 @@ def _drawdown_plan_callback(handlers: list[object]) -> object:
         if handler.__class__.__name__ == "CallbackQueryHandler":
             return handler
     raise AssertionError("drawdown plan callback handler not found")
+
+
+def _callback_by_name(handlers: list[object], name: str) -> object:
+    for handler in handlers:
+        callback = getattr(handler, "callback", None)
+        if getattr(callback, "__name__", "") == name:
+            return handler
+    raise AssertionError(f"callback handler not found: {name}")
+
+
+def _prepare_ready_plan_alert(
+    sqlite_path: object,
+    *,
+    closes: list[float],
+    expected_date: date,
+) -> int:
+    with open_connection(sqlite_path) as connection:
+        init_db(connection)
+        rule_id = add_rule(
+            connection,
+            type="drawdown_plan",
+            symbol="510300",
+            name="A500",
+            asset_type="cn_etf",
+            params={
+                "investment_fund_symbol": "000001",
+                "lookback_days": 365,
+                "tiers": [
+                    {"drawdown": 0.15, "amount": 5000},
+                    {"drawdown": 0.20, "amount": 10000},
+                ],
+                "sma_window": 250,
+                "sma_slope_window": 20,
+            },
+        )
+        upsert_fund_fee(
+            connection,
+            fund_symbol="000001",
+            fee_mode="rate",
+            fee_value=0.0015,
+        )
+        upsert_position_snapshot(
+            connection,
+            fund_symbol="000001",
+            units=1000,
+            average_unit_cost=1.2,
+        )
+        result = evaluate_drawdown_plan_rule(
+            connection,
+            list_rules(connection)[0],
+            _plan_history(closes),
+            expected_date=expected_date,
+        )
+    assert result.notification is not None
+    return rule_id

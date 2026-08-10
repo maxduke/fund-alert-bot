@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -12,12 +13,16 @@ import pandas as pd
 
 from fund_alert_bot.db import (
     add_alert_event,
+    add_drawdown_plan_pre_alert_event,
     alert_exists,
+    apply_manual_add_estimate,
     get_active_drawdown_cycle,
     get_fund_settings,
     get_position_snapshot,
     list_drawdown_tier_records,
     list_enabled_rules,
+    list_manual_add_actions,
+    list_pending_manual_add_estimates,
     persist_drawdown_plan_evaluation,
     reserve_alert_event,
 )
@@ -26,6 +31,8 @@ from fund_alert_bot.market_data import (
     EmptyMarketDataError,
     FundNav,
     Instrument,
+    MarketCalendar,
+    MarketCalendarUnavailableError,
     MarketDataProvider,
     MarketDataProviderError,
     PriceBasis,
@@ -39,8 +46,11 @@ from fund_alert_bot.rules.drawdown_plan import (
     ActiveDrawdownCycle,
     DrawdownPlanConfig,
     DrawdownPlanEvaluation,
+    DrawdownTier,
     build_drawdown_plan_alert,
+    build_drawdown_plan_pre_alert,
     evaluate_drawdown_plan,
+    evaluate_drawdown_plan_realtime,
     parse_drawdown_plan_config,
     required_history_start,
 )
@@ -54,6 +64,7 @@ DCA_RULE_TYPE = "dca_reminder"
 DRAW_DOWN_RULE_TYPE = "drawdown_from_high"
 PROFIT_RULE_TYPE = "profit_reminder"
 DRAW_DOWN_PLAN_RULE_TYPE = "drawdown_plan"
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +95,7 @@ class AlertNotification:
     event_id: int
     title: str
     text: str
+    telegram_actions: tuple[tuple[tuple[str, str], ...], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,27 +182,49 @@ class DrawdownPlanCheckResult:
     errors: list[RuleCheckError]
 
 
+@dataclass(frozen=True, slots=True)
+class ManualAddSettlementResult:
+    """Summary of one exact-date feeder-NAV processing run."""
+
+    checked_estimates: int
+    notifications: list[AlertNotification]
+    no_data_skips: list[RuleNoDataSkip]
+    errors: list[RuleCheckError]
+
+
 def reserve_drawdown_plan_data_unavailable_notice(
     connection: Any,
     *,
     evaluation_date: date,
-    result: DrawdownPlanCheckResult,
+    result: Any,
+    phase: str = "after_close",
 ) -> AlertNotification | None:
-    """Reserve one after-close notice for plans that could not be evaluated."""
+    """Reserve one phase-level notice for plans that could not be evaluated."""
 
     affected = [*result.no_data_skips, *result.errors]
     if not affected:
         return None
+    if phase not in {"before_close", "after_close", "fund_nav"}:
+        raise ValueError("Unsupported drawdown plan notice phase.")
 
-    alert_key = f"data_unavailable:after_close:{evaluation_date.isoformat()}"
+    phase_label = {
+        "before_close": "Before-close estimate",
+        "after_close": "After-close confirmation",
+        "fund_nav": "Feeder-fund NAV settlement",
+    }[phase]
+    alert_key = f"data_unavailable:{phase}:{evaluation_date.isoformat()}"
     lines = [
         "⚠️ Drawdown plan data unavailable",
         "",
         f"Data date: {evaluation_date.isoformat()}",
-        "After-close confirmation could not evaluate:",
+        f"{phase_label} could not evaluate:",
         *(f"• {item.symbol}: {item.message}" for item in affected),
         "",
-        "No tier decision was made for these plans.",
+        (
+            "The recorded addition remains pending; no position estimate was applied."
+            if phase == "fund_nav"
+            else "No tier decision was made for these plans."
+        ),
         "Please check your own platform.",
         "",
         "This is a reminder only. No trade has been placed.",
@@ -204,7 +238,7 @@ def reserve_drawdown_plan_data_unavailable_notice(
             title="Drawdown plan data unavailable",
             message=message,
             payload={
-                "phase": "after_close",
+                "phase": phase,
                 "data_date": evaluation_date.isoformat(),
                 "affected_plans": [
                     {
@@ -231,10 +265,12 @@ class DrawdownPlanStatus:
     config: DrawdownPlanConfig
     evaluation: DrawdownPlanEvaluation
     recorded_tier_keys: frozenset[str]
+    added_tier_keys: frozenset[str]
     readiness: str
     missing_setup: tuple[str, ...]
     position: Any | None
     fund_nav: FundNav | None
+    position_sync_required_since: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -302,12 +338,30 @@ def evaluate_drawdown_plan_rule(
         tiers=tiers,
         alert=alert,
     )
+    LOGGER.info(
+        "Drawdown plan evaluation rule_id=%s cycle_id=%s symbol=%s evaluation_date=%s "
+        "latest_price=%s peak_price=%s drawdown=%s newly_crossed_tiers=%s "
+        "sma=%s distance_to_sma=%s sma_slope=%s alert_reserved=%s",
+        rule_id,
+        cycle_id,
+        reference_symbol,
+        evaluation.latest_date,
+        evaluation.latest_price,
+        evaluation.peak_price,
+        evaluation.drawdown,
+        [tier.key for tier in tiers],
+        evaluation.sma,
+        evaluation.distance_to_sma,
+        evaluation.sma_slope,
+        event_id is not None,
+    )
     notification = None
     if event_id is not None and alert is not None:
         notification = AlertNotification(
             event_id=event_id,
             title=str(alert["title"]),
             text=str(alert["message"]),
+            telegram_actions=_drawdown_plan_action_rows(rule_id, event_id, tiers),
         )
     return DrawdownPlanRuleResult(
         cycle_id=cycle_id,
@@ -334,6 +388,11 @@ def evaluate_drawdown_plan_rules(
     errors: list[RuleCheckError] = []
     for rule in rules:
         try:
+            active = get_active_drawdown_cycle(connection, int(rule["id"]))
+            if active is not None and str(active["last_evaluated_date"]) >= (
+                expected_date.isoformat()
+            ):
+                continue
             history = _fetch_drawdown_plan_history(
                 connection,
                 rule,
@@ -354,6 +413,213 @@ def evaluate_drawdown_plan_rules(
             errors.append(_plan_check_error(rule, exc))
     return DrawdownPlanCheckResult(
         checked_rules=len(rules),
+        notifications=notifications,
+        no_data_skips=no_data_skips,
+        errors=errors,
+    )
+
+
+def evaluate_drawdown_plan_prealerts(
+    connection: Any,
+    market_data_provider: MarketDataProvider,
+    *,
+    market_date: date,
+    confirmed_date: date,
+) -> DrawdownPlanCheckResult:
+    """Evaluate provisional realtime plan crossings without recording tiers."""
+
+    rules = [
+        row
+        for row in list_enabled_rules(connection)
+        if row["type"] == DRAW_DOWN_PLAN_RULE_TYPE
+    ]
+    notifications: list[AlertNotification] = []
+    no_data_skips: list[RuleNoDataSkip] = []
+    errors: list[RuleCheckError] = []
+    for rule in rules:
+        try:
+            rule_id = int(rule["id"])
+            reference_symbol = str(rule["symbol"])
+            if connection.execute(
+                "SELECT 1 FROM alert_events WHERE alert_key = ? LIMIT 1",
+                (f"{rule_id}:drawdown_plan:pre_alert:{market_date.isoformat()}",),
+            ).fetchone():
+                continue
+            name = str(rule["name"]).strip()
+            if not name:
+                raise ValueError("drawdown_plan name must not be empty.")
+            config, active_cycle, recorded_tier_keys = _load_drawdown_plan_state(
+                connection,
+                rule,
+            )
+            history = _fetch_drawdown_plan_history(
+                connection,
+                rule,
+                market_data_provider,
+                end_date=confirmed_date,
+            )
+            confirmed = evaluate_drawdown_plan(
+                history,
+                config,
+                reference_symbol=reference_symbol,
+                expected_date=confirmed_date,
+                active_cycle=active_cycle,
+                recorded_tier_keys=recorded_tier_keys,
+            )
+            quote = market_data_provider.get_etf_realtime_quote(
+                Instrument(reference_symbol, name, AssetType.CN_ETF)
+            )
+            try:
+                realtime = evaluate_drawdown_plan_realtime(
+                    confirmed,
+                    config,
+                    quote,
+                    reference_symbol=reference_symbol,
+                    market_date=market_date,
+                    recorded_tier_keys=recorded_tier_keys,
+                )
+            except ValueError:
+                if quote.source != "eastmoney":
+                    raise
+                quote = market_data_provider.get_sina_etf_realtime_quote(
+                    Instrument(reference_symbol, name, AssetType.CN_ETF)
+                )
+                realtime = evaluate_drawdown_plan_realtime(
+                    confirmed,
+                    config,
+                    quote,
+                    reference_symbol=reference_symbol,
+                    market_date=market_date,
+                    recorded_tier_keys=recorded_tier_keys,
+                )
+            cycle_id, _event_id = persist_drawdown_plan_evaluation(
+                connection,
+                rule_id=rule_id,
+                expected_active_cycle_id=(
+                    None if active_cycle is None else active_cycle.cycle_id
+                ),
+                expected_last_evaluated_date=(
+                    None
+                    if active_cycle is None
+                    else active_cycle.last_evaluated_date.isoformat()
+                ),
+                start_new_cycle=active_cycle is None or confirmed.cycle_changed,
+                peak_date=confirmed.peak_date.isoformat(),
+                peak_price=confirmed.peak_price,
+                evaluation_date=confirmed.latest_date.isoformat(),
+            )
+            alert = build_drawdown_plan_pre_alert(
+                rule_id=rule_id,
+                cycle_id=cycle_id,
+                reference_symbol=reference_symbol,
+                name=name,
+                confirmed_date=confirmed_date,
+                config=config,
+                evaluation=realtime,
+                quote=quote,
+            )
+            if alert is None:
+                continue
+            try:
+                event_id = add_drawdown_plan_pre_alert_event(
+                    connection,
+                    rule_id=rule_id,
+                    alert=alert,
+                )
+            except sqlite3.IntegrityError:
+                continue
+            LOGGER.info(
+                "Drawdown plan pre-alert rule_id=%s cycle_id=%s symbol=%s "
+                "evaluation_date=%s "
+                "latest_price=%s peak_price=%s drawdown=%s "
+                "newly_crossed_tiers=%s sma=%s distance_to_sma=%s sma_slope=%s "
+                "alert_reserved=true",
+                rule_id,
+                cycle_id,
+                reference_symbol,
+                realtime.latest_date,
+                realtime.latest_price,
+                realtime.peak_price,
+                realtime.drawdown,
+                [tier.key for tier in realtime.newly_crossed_tiers],
+                realtime.sma,
+                realtime.distance_to_sma,
+                realtime.sma_slope,
+            )
+            notifications.append(
+                AlertNotification(
+                    event_id=event_id,
+                    title=str(alert["title"]),
+                    text=str(alert["message"]),
+                    telegram_actions=_drawdown_plan_action_rows(
+                        rule_id,
+                        event_id,
+                        realtime.newly_crossed_tiers,
+                    ),
+                )
+            )
+        except MarketDataProviderError as exc:
+            no_data_skips.append(_plan_no_data_skip(rule, exc))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(_plan_check_error(rule, exc))
+    return DrawdownPlanCheckResult(
+        checked_rules=len(rules),
+        notifications=notifications,
+        no_data_skips=no_data_skips,
+        errors=errors,
+    )
+
+
+def process_manual_add_estimates(
+    connection: Any,
+    market_data_provider: MarketDataProvider,
+    market_calendar: MarketCalendar,
+    *,
+    processing_date: date,
+) -> ManualAddSettlementResult:
+    """Apply pending additions only from their exact effective dated NAV."""
+
+    occurrences = list_pending_manual_add_estimates(connection)
+    notifications: list[AlertNotification] = []
+    no_data_skips: list[RuleNoDataSkip] = []
+    errors: list[RuleCheckError] = []
+    navs: dict[tuple[str, date], Any] = {}
+    for occurrence in occurrences:
+        rule_id = int(occurrence["rule_id"])
+        fund_symbol = str(occurrence["fund_symbol"])
+        effective_date = date.fromisoformat(str(occurrence["effective_date"]))
+        if processing_date <= effective_date:
+            continue
+        try:
+            if not market_calendar.confirmed_status(effective_date):
+                raise ValueError(
+                    f"Effective date {effective_date} is not a confirmed open day."
+                )
+            nav_key = (fund_symbol, effective_date)
+            if nav_key not in navs:
+                navs[nav_key] = market_data_provider.get_fund_nav(
+                    Instrument(fund_symbol, fund_symbol, AssetType.CN_OPEN_FUND),
+                    nav_date=effective_date,
+                )
+            applied = apply_manual_add_estimate(
+                connection,
+                estimate_id=int(occurrence["id"]),
+                nav=navs[nav_key],
+            )
+            if applied is not None:
+                notifications.append(
+                    AlertNotification(
+                        event_id=int(applied["event_id"]),
+                        title=str(applied["title"]),
+                        text=str(applied["message"]),
+                    )
+                )
+        except (MarketDataProviderError, MarketCalendarUnavailableError) as exc:
+            no_data_skips.append(RuleNoDataSkip(rule_id, fund_symbol, str(exc)))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(RuleCheckError(rule_id, fund_symbol, str(exc)))
+    return ManualAddSettlementResult(
+        checked_estimates=len(occurrences),
         notifications=notifications,
         no_data_skips=no_data_skips,
         errors=errors,
@@ -408,6 +674,21 @@ def read_drawdown_plan_statuses(
                 connection,
                 config.investment_fund_symbol,
             )
+            settings = get_fund_settings(
+                connection,
+                config.investment_fund_symbol,
+            )
+            added_tier_keys = (
+                frozenset()
+                if active_cycle is None or evaluation.cycle_changed
+                else frozenset(
+                    str(row["tier_key"])
+                    for row in list_manual_add_actions(
+                        connection,
+                        active_cycle.cycle_id,
+                    )
+                )
+            )
             fund_nav = None
             if position is not None and float(position["units"]) > 0:
                 try:
@@ -436,10 +717,16 @@ def read_drawdown_plan_statuses(
                     recorded_tier_keys=frozenset(
                         () if evaluation.cycle_changed else recorded_tier_keys
                     ),
+                    added_tier_keys=added_tier_keys,
                     readiness=readiness,
                     missing_setup=missing_setup,
                     position=position,
                     fund_nav=fund_nav,
+                    position_sync_required_since=(
+                        None
+                        if settings is None
+                        else settings["position_sync_required_since"]
+                    ),
                 )
             )
         except MarketDataProviderError as exc:
@@ -466,6 +753,28 @@ def derive_plan_readiness(
         if absent
     )
     return ("READY" if not missing else "SETUP_REQUIRED"), missing
+
+
+def _drawdown_plan_action_rows(
+    rule_id: int,
+    event_id: int,
+    tiers: tuple[DrawdownTier, ...],
+) -> tuple[tuple[tuple[str, str], ...], ...]:
+    rows: list[tuple[tuple[str, str], ...]] = [
+        (("✅ 已按全部档位加仓", f"drawdown_add:{rule_id}:{event_id}:all"),)
+    ]
+    if len(tiers) > 1:
+        rows.extend(
+            (
+                (
+                    f"仅记录 -{tier.drawdown:.0%} ¥{tier.amount:,.0f}",
+                    f"drawdown_add:{rule_id}:{event_id}:tier:{tier.key}",
+                ),
+            )
+            for tier in tiers
+        )
+    rows.append((("⏭ 暂未加仓", f"drawdown_add:{rule_id}:{event_id}:none"),))
+    return tuple(rows)
 
 
 def _load_drawdown_plan_state(

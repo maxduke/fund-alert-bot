@@ -25,6 +25,7 @@ DEFAULT_TIMEZONE = "Asia/Shanghai"
 DEFAULT_AFTER_CLOSE_CHECK_TIME = "17:10"
 DEFAULT_BEFORE_CLOSE_CHECK_TIME = "14:50"
 DEFAULT_DCA_REMINDER_TIME = "09:30"
+DEFAULT_FUND_NAV_PROCESS_TIME = "08:30"
 DEFAULT_AKSHARE_RETRIES = 3
 DEFAULT_AKSHARE_RETRY_DELAY_SECONDS = 0.5
 DEFAULT_AKSHARE_LATEST_LOOKBACK_DAYS = 45
@@ -124,6 +125,7 @@ class Settings:
     after_close_check_time: str
     before_close_check_time: str
     dca_reminder_time: str
+    fund_nav_process_time: str
     telegram_bot_token: str
     telegram_allowed_user_ids: frozenset[int]
     akshare_retries: int
@@ -155,6 +157,10 @@ def load_settings(
         dca_reminder_time=os.environ.get(
             "DCA_REMINDER_TIME",
             DEFAULT_DCA_REMINDER_TIME,
+        ),
+        fund_nav_process_time=os.environ.get(
+            "FUND_NAV_PROCESS_TIME",
+            DEFAULT_FUND_NAV_PROCESS_TIME,
         ),
         telegram_bot_token=os.environ.get("TELEGRAM_BOT_TOKEN", ""),
         telegram_allowed_user_ids=parse_allowed_user_ids(

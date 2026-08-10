@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -127,6 +128,7 @@ def init_db(connection: sqlite3.Connection) -> None:
             fee_mode TEXT CHECK (fee_mode IN ('rate', 'fixed')),
             fee_value REAL CHECK (fee_value >= 0),
             subscription_cutoff TEXT NOT NULL DEFAULT '15:00',
+            position_sync_required_since TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             CHECK (
@@ -151,9 +153,52 @@ def init_db(connection: sqlite3.Connection) -> None:
                 OR (units > 0 AND average_unit_cost > 0)
             )
         );
+
+        CREATE TABLE IF NOT EXISTS manual_add_estimates (
+            id INTEGER PRIMARY KEY,
+            rule_id INTEGER NOT NULL REFERENCES rules(id),
+            cycle_id INTEGER NOT NULL REFERENCES drawdown_cycles(id),
+            source_alert_event_id INTEGER NOT NULL REFERENCES alert_events(id),
+            fund_symbol TEXT NOT NULL,
+            tier_keys_json TEXT NOT NULL,
+            gross_amount REAL NOT NULL CHECK (gross_amount > 0),
+            fee_mode TEXT NOT NULL CHECK (fee_mode IN ('rate', 'fixed')),
+            fee_value REAL NOT NULL CHECK (fee_value >= 0),
+            action_at TEXT NOT NULL,
+            action_date TEXT NOT NULL,
+            cutoff_time TEXT NOT NULL,
+            cutoff_choice TEXT NOT NULL CHECK (cutoff_choice IN ('before', 'after')),
+            effective_date TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending' CHECK (
+                status IN ('pending', 'applied', 'reconciled_by_sync')
+            ),
+            unit_nav REAL,
+            nav_date TEXT,
+            nav_source TEXT,
+            net_amount REAL,
+            added_units REAL,
+            new_average_cost REAL,
+            applied_at TEXT,
+            settlement_alert_event_id INTEGER REFERENCES alert_events(id),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(source_alert_event_id, tier_keys_json)
+        );
+
+        CREATE TABLE IF NOT EXISTS manual_add_actions (
+            cycle_id INTEGER NOT NULL REFERENCES drawdown_cycles(id),
+            tier_key TEXT NOT NULL,
+            source_alert_event_id INTEGER NOT NULL REFERENCES alert_events(id),
+            estimate_id INTEGER REFERENCES manual_add_estimates(id),
+            action_date TEXT NOT NULL,
+            reconciled_at TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (cycle_id, tier_key)
+        );
         """
     )
     _ensure_alert_event_delivery_columns(connection)
+    _ensure_fund_settings_columns(connection)
     connection.commit()
 
 
@@ -424,6 +469,7 @@ def get_fund_settings(
             fee_mode,
             fee_value,
             subscription_cutoff,
+            position_sync_required_since,
             created_at,
             updated_at
         FROM fund_settings
@@ -476,6 +522,14 @@ def upsert_position_snapshot(
             now,
             now,
         ),
+    )
+    connection.execute(
+        """
+        UPDATE fund_settings
+        SET position_sync_required_since = NULL, updated_at = ?
+        WHERE fund_symbol = ?
+        """,
+        (now, fund_symbol),
     )
     connection.commit()
     row = get_position_snapshot(connection, fund_symbol)
@@ -532,6 +586,639 @@ def list_position_snapshots(connection: sqlite3.Connection) -> list[sqlite3.Row]
     )
 
 
+def get_drawdown_plan_action_event(
+    connection: sqlite3.Connection,
+    *,
+    rule_id: int,
+    event_id: int | None = None,
+    data_date: str | None = None,
+) -> sqlite3.Row | None:
+    """Return one enabled plan event eligible to start a manual-add action."""
+
+    filters = ["e.rule_id = ?", "r.type = 'drawdown_plan'", "r.enabled = 1"]
+    values: list[object] = [rule_id]
+    if event_id is not None:
+        filters.append("e.id = ?")
+        values.append(event_id)
+    if data_date is not None:
+        filters.append("json_extract(e.payload_json, '$.data_date') = ?")
+        values.append(data_date)
+    return connection.execute(
+        f"""
+        SELECT
+            e.id,
+            e.rule_id,
+            e.payload_json,
+            r.symbol,
+            r.name,
+            r.asset_type,
+            r.params_json
+        FROM alert_events AS e
+        JOIN rules AS r ON r.id = e.rule_id
+        WHERE {" AND ".join(filters)}
+            AND json_type(e.payload_json, '$.crossed_tiers') = 'array'
+        ORDER BY e.id DESC
+        LIMIT 1
+        """,
+        values,
+    ).fetchone()
+
+
+def list_manual_add_actions(
+    connection: sqlite3.Connection,
+    cycle_id: int,
+) -> list[sqlite3.Row]:
+    """Return user-recorded additions for one drawdown cycle."""
+
+    return list(
+        connection.execute(
+            """
+            SELECT
+                cycle_id,
+                tier_key,
+                source_alert_event_id,
+                estimate_id,
+                action_date,
+                created_at
+            FROM manual_add_actions
+            WHERE cycle_id = ?
+            ORDER BY tier_key
+            """,
+            (cycle_id,),
+        ).fetchall()
+    )
+
+
+def record_manual_addition(
+    connection: sqlite3.Connection,
+    *,
+    rule_id: int,
+    cycle_id: int,
+    source_alert_event_id: int,
+    fund_symbol: str,
+    tiers: Sequence[Any],
+    action_at: datetime,
+    create_estimate: bool,
+    cutoff_choice: str | None = None,
+    effective_date: str | None = None,
+) -> tuple[int | None, tuple[str, ...]]:
+    """Record selected tiers and optionally one fee-aware pending estimate."""
+
+    if not tiers:
+        raise ValueError("At least one drawdown tier must be selected.")
+    if create_estimate and (
+        cutoff_choice not in {"before", "after"} or effective_date is None
+    ):
+        raise ValueError("A pending estimate requires a cutoff choice and date.")
+
+    action_text = _timestamp_text(action_at)
+    action_date = action_at.date().isoformat()
+    now = _utc_now_text()
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        rule = connection.execute(
+            "SELECT enabled FROM rules WHERE id = ? AND type = 'drawdown_plan'",
+            (rule_id,),
+        ).fetchone()
+        active = get_active_drawdown_cycle(connection, rule_id)
+        event = connection.execute(
+            "SELECT rule_id, payload_json FROM alert_events WHERE id = ?",
+            (source_alert_event_id,),
+        ).fetchone()
+        if rule is None or not bool(rule["enabled"]):
+            raise sqlite3.IntegrityError("Drawdown plan is no longer enabled.")
+        if active is None or int(active["id"]) != cycle_id:
+            raise sqlite3.IntegrityError("Drawdown plan cycle changed.")
+        if event is None or int(event["rule_id"]) != rule_id:
+            raise sqlite3.IntegrityError("Manual-add event does not match the plan.")
+        payload = json.loads(str(event["payload_json"]))
+        eligible_tiers = {
+            str(item["key"]): item for item in payload.get("crossed_tiers", ())
+        }
+        selected_keys = tuple(str(tier.key) for tier in tiers)
+        if (
+            int(payload.get("cycle_id", -1)) != cycle_id
+            or str(payload.get("data_date")) != action_date
+            or str(payload.get("investment_fund_symbol")) != fund_symbol
+            or len(set(selected_keys)) != len(selected_keys)
+            or not set(selected_keys).issubset(eligible_tiers)
+            or any(
+                not math.isclose(
+                    float(tier.drawdown),
+                    float(eligible_tiers[str(tier.key)]["drawdown"]),
+                )
+                or not math.isclose(
+                    float(tier.amount),
+                    float(eligible_tiers[str(tier.key)]["amount"]),
+                )
+                for tier in tiers
+            )
+        ):
+            raise sqlite3.IntegrityError("Manual-add event is no longer eligible.")
+
+        existing_keys = {
+            str(row["tier_key"])
+            for row in connection.execute(
+                "SELECT tier_key FROM manual_add_actions WHERE cycle_id = ?",
+                (cycle_id,),
+            ).fetchall()
+        }
+        new_tiers = tuple(tier for tier in tiers if str(tier.key) not in existing_keys)
+        if not new_tiers:
+            connection.commit()
+            return None, ()
+
+        estimate_id: int | None = None
+        if create_estimate:
+            settings = get_fund_settings(connection, fund_symbol)
+            position = get_position_snapshot(connection, fund_symbol)
+            if settings is None or settings["fee_mode"] is None or position is None:
+                raise sqlite3.IntegrityError("Plan setup is no longer READY.")
+            gross_amount = sum(float(tier.amount) for tier in new_tiers)
+            fee_mode = str(settings["fee_mode"])
+            fee_value = float(settings["fee_value"])
+            if fee_mode == "fixed" and fee_value >= gross_amount:
+                raise ValueError("Fixed fee must be lower than the selected amount.")
+            tier_keys_json = _json_text([str(tier.key) for tier in new_tiers])
+            cursor = connection.execute(
+                """
+                INSERT INTO manual_add_estimates (
+                    rule_id,
+                    cycle_id,
+                    source_alert_event_id,
+                    fund_symbol,
+                    tier_keys_json,
+                    gross_amount,
+                    fee_mode,
+                    fee_value,
+                    action_at,
+                    action_date,
+                    cutoff_time,
+                    cutoff_choice,
+                    effective_date,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    rule_id,
+                    cycle_id,
+                    source_alert_event_id,
+                    fund_symbol,
+                    tier_keys_json,
+                    gross_amount,
+                    fee_mode,
+                    fee_value,
+                    action_text,
+                    action_date,
+                    str(settings["subscription_cutoff"]),
+                    cutoff_choice,
+                    effective_date,
+                    now,
+                    now,
+                ),
+            )
+            estimate_id = int(cursor.lastrowid)
+        else:
+            connection.execute(
+                """
+                INSERT INTO fund_settings (
+                    fund_symbol,
+                    position_sync_required_since,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(fund_symbol) DO UPDATE SET
+                    position_sync_required_since = COALESCE(
+                        fund_settings.position_sync_required_since,
+                        excluded.position_sync_required_since
+                    ),
+                    updated_at = excluded.updated_at
+                """,
+                (fund_symbol, action_text, now, now),
+            )
+            connection.execute(
+                """
+                UPDATE position_snapshots
+                SET position_sync_required_since = COALESCE(
+                    position_sync_required_since, ?
+                ), updated_at = ?
+                WHERE fund_symbol = ?
+                """,
+                (action_text, now, fund_symbol),
+            )
+
+        connection.executemany(
+            """
+            INSERT INTO manual_add_actions (
+                cycle_id,
+                tier_key,
+                source_alert_event_id,
+                estimate_id,
+                action_date,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    cycle_id,
+                    str(tier.key),
+                    source_alert_event_id,
+                    estimate_id,
+                    action_date,
+                    now,
+                )
+                for tier in new_tiers
+            ],
+        )
+        connection.executemany(
+            """
+            INSERT OR IGNORE INTO drawdown_tier_records (
+                cycle_id,
+                tier_key,
+                drawdown,
+                amount,
+                source,
+                data_date,
+                alert_event_id,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, 'user_marked_added', ?, ?, ?)
+            """,
+            [
+                (
+                    cycle_id,
+                    str(tier.key),
+                    float(tier.drawdown),
+                    float(tier.amount),
+                    action_date,
+                    source_alert_event_id,
+                    now,
+                )
+                for tier in new_tiers
+            ],
+        )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    return estimate_id, tuple(str(tier.key) for tier in new_tiers)
+
+
+def list_pending_manual_add_estimates(
+    connection: sqlite3.Connection,
+    *,
+    fund_symbol: str | None = None,
+) -> list[sqlite3.Row]:
+    """Return unapplied manual additions in stable order."""
+
+    where = "WHERE status = 'pending'"
+    values: tuple[object, ...] = ()
+    if fund_symbol is not None:
+        where += " AND fund_symbol = ?"
+        values = (fund_symbol,)
+    return list(
+        connection.execute(
+            f"""
+            SELECT *
+            FROM manual_add_estimates
+            {where}
+            ORDER BY id
+            """,
+            values,
+        ).fetchall()
+    )
+
+
+def list_pending_position_items(
+    connection: sqlite3.Connection,
+    fund_symbol: str,
+) -> list[dict[str, object]]:
+    """Return pending estimated and unestimated additions for sync preview."""
+
+    items = [
+        {
+            "key": f"estimate:{row['id']}",
+            "kind": "manual estimate",
+            "date": str(row["action_date"]),
+            "amount": float(row["gross_amount"]),
+        }
+        for row in list_pending_manual_add_estimates(
+            connection,
+            fund_symbol=fund_symbol,
+        )
+    ]
+    items.extend(
+        {
+            "key": f"action:{row['cycle_id']}:{row['tier_key']}",
+            "kind": "manual add requiring sync",
+            "date": str(row["action_date"]),
+            "amount": float(row["amount"]),
+        }
+        for row in connection.execute(
+            """
+            SELECT
+                a.cycle_id,
+                a.tier_key,
+                a.action_date,
+                t.amount
+            FROM manual_add_actions AS a
+            JOIN drawdown_cycles AS c ON c.id = a.cycle_id
+            JOIN rules AS r ON r.id = c.rule_id
+            JOIN drawdown_tier_records AS t
+                ON t.cycle_id = a.cycle_id AND t.tier_key = a.tier_key
+            WHERE
+                json_extract(r.params_json, '$.investment_fund_symbol') = ?
+                AND a.estimate_id IS NULL
+                AND a.reconciled_at IS NULL
+            ORDER BY a.action_date, a.cycle_id, a.tier_key
+            """,
+            (fund_symbol,),
+        ).fetchall()
+    )
+    return sorted(items, key=lambda item: str(item["key"]))
+
+
+def reconcile_position_snapshot(
+    connection: sqlite3.Connection,
+    *,
+    fund_symbol: str,
+    units: float,
+    average_unit_cost: float,
+    expected_item_keys: Sequence[str],
+    included: bool,
+    synced_at: datetime,
+) -> sqlite3.Row:
+    """Apply an exact snapshot after verifying the displayed pending set."""
+
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        current_keys = tuple(
+            str(item["key"])
+            for item in list_pending_position_items(connection, fund_symbol)
+        )
+        if current_keys != tuple(expected_item_keys):
+            raise sqlite3.IntegrityError(
+                "Pending additions changed; rerun /sync_position."
+            )
+        sync_time = _timestamp_text(synced_at)
+        now = _utc_now_text()
+        connection.execute(
+            """
+            INSERT INTO position_snapshots (
+                fund_symbol,
+                units,
+                average_unit_cost,
+                is_estimated,
+                last_synced_at,
+                estimates_since_sync,
+                position_sync_required_since,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, 0, ?, 0, NULL, ?, ?)
+            ON CONFLICT(fund_symbol) DO UPDATE SET
+                units = excluded.units,
+                average_unit_cost = excluded.average_unit_cost,
+                is_estimated = 0,
+                last_synced_at = excluded.last_synced_at,
+                estimates_since_sync = 0,
+                position_sync_required_since = NULL,
+                updated_at = excluded.updated_at
+            """,
+            (fund_symbol, units, average_unit_cost, sync_time, now, now),
+        )
+        if included:
+            estimate_ids = [
+                int(key.split(":", 1)[1])
+                for key in current_keys
+                if key.startswith("estimate:")
+            ]
+            action_keys = [
+                key.split(":", 2)[1:]
+                for key in current_keys
+                if key.startswith("action:")
+            ]
+            if estimate_ids:
+                connection.executemany(
+                    """
+                    UPDATE manual_add_estimates
+                    SET status = 'reconciled_by_sync', updated_at = ?
+                    WHERE id = ? AND status = 'pending'
+                    """,
+                    [(now, estimate_id) for estimate_id in estimate_ids],
+                )
+            if action_keys:
+                connection.executemany(
+                    """
+                    UPDATE manual_add_actions
+                    SET reconciled_at = ?
+                    WHERE cycle_id = ? AND tier_key = ? AND reconciled_at IS NULL
+                    """,
+                    [
+                        (now, int(cycle_id), tier_key)
+                        for cycle_id, tier_key in action_keys
+                    ],
+                )
+        unresolved = connection.execute(
+            """
+            SELECT 1
+            FROM manual_add_actions AS a
+            JOIN drawdown_cycles AS c ON c.id = a.cycle_id
+            JOIN rules AS r ON r.id = c.rule_id
+            WHERE
+                json_extract(r.params_json, '$.investment_fund_symbol') = ?
+                AND a.estimate_id IS NULL
+                AND a.reconciled_at IS NULL
+            LIMIT 1
+            """,
+            (fund_symbol,),
+        ).fetchone()
+        connection.execute(
+            """
+            UPDATE fund_settings
+            SET position_sync_required_since = ?, updated_at = ?
+            WHERE fund_symbol = ?
+            """,
+            (None if unresolved is None else sync_time, now, fund_symbol),
+        )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    row = get_position_snapshot(connection, fund_symbol)
+    if row is None:
+        raise RuntimeError("Position snapshot reconciliation did not persist.")
+    return row
+
+
+def apply_manual_add_estimate(
+    connection: sqlite3.Connection,
+    *,
+    estimate_id: int,
+    nav: Any,
+) -> dict[str, object] | None:
+    """Atomically apply one exact-date NAV estimate and reserve its notice."""
+
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        occurrence = connection.execute(
+            "SELECT * FROM manual_add_estimates WHERE id = ?",
+            (estimate_id,),
+        ).fetchone()
+        if occurrence is None or str(occurrence["status"]) != "pending":
+            connection.commit()
+            return None
+        nav_value = float(nav.value)
+        if (
+            str(nav.symbol) != str(occurrence["fund_symbol"])
+            or nav.date.isoformat() != str(occurrence["effective_date"])
+            or str(nav.source) != "akshare_eastmoney"
+            or not math.isfinite(nav_value)
+            or nav_value <= 0
+        ):
+            raise ValueError("Fund NAV does not match the pending estimate.")
+        position = get_position_snapshot(connection, str(occurrence["fund_symbol"]))
+        if position is None:
+            raise sqlite3.IntegrityError("Position snapshot is missing.")
+        gross_amount = float(occurrence["gross_amount"])
+        fee_value = float(occurrence["fee_value"])
+        net_amount = (
+            gross_amount / (1 + fee_value)
+            if str(occurrence["fee_mode"]) == "rate"
+            else gross_amount - fee_value
+        )
+        if net_amount <= 0:
+            raise ValueError("Subscription fee leaves no investable amount.")
+        added_units = net_amount / nav_value
+        old_units = float(position["units"])
+        new_units = old_units + added_units
+        new_average_cost = (
+            old_units * float(position["average_unit_cost"]) + gross_amount
+        ) / new_units
+        now = _utc_now_text()
+        connection.execute(
+            """
+            UPDATE position_snapshots
+            SET
+                units = ?,
+                average_unit_cost = ?,
+                is_estimated = 1,
+                estimates_since_sync = estimates_since_sync + 1,
+                updated_at = ?
+            WHERE fund_symbol = ?
+            """,
+            (
+                new_units,
+                new_average_cost,
+                now,
+                str(occurrence["fund_symbol"]),
+            ),
+        )
+        tier_keys = json.loads(str(occurrence["tier_keys_json"]))
+        message = "\n".join(
+            (
+                "✅ Manual addition estimate updated",
+                "",
+                f"Fund: {occurrence['fund_symbol']}",
+                "Configured tiers: "
+                + ", ".join("-" + format(float(key), ".0%") for key in tier_keys),
+                f"Gross amount: ¥{gross_amount:,.2f}",
+                f"Effective date: {occurrence['effective_date']}",
+                f"Unit NAV: {nav_value:.12g} on {nav.date}",
+                f"NAV source: {nav.source}",
+                f"Estimated added units: {added_units:.6f}",
+                f"New estimated average cost: {new_average_cost:.6f}",
+                "",
+                "Estimated only; not yet synchronized with the fund platform.",
+                "No trade has been placed or verified.",
+            )
+        )
+        payload = {
+            "phase": "manual_add_settled",
+            "estimate_id": estimate_id,
+            "rule_id": int(occurrence["rule_id"]),
+            "cycle_id": int(occurrence["cycle_id"]),
+            "fund_symbol": str(occurrence["fund_symbol"]),
+            "tier_keys": tier_keys,
+            "gross_amount": gross_amount,
+            "fee_mode": str(occurrence["fee_mode"]),
+            "fee_value": fee_value,
+            "action_date": str(occurrence["action_date"]),
+            "effective_date": str(occurrence["effective_date"]),
+            "nav_date": nav.date.isoformat(),
+            "unit_nav": nav_value,
+            "nav_source": str(nav.source),
+            "net_amount": net_amount,
+            "added_units": added_units,
+            "new_average_cost": new_average_cost,
+            "estimated": True,
+        }
+        cursor = connection.execute(
+            """
+            INSERT INTO alert_events (
+                rule_id,
+                alert_key,
+                title,
+                message,
+                payload_json,
+                triggered_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                int(occurrence["rule_id"]),
+                f"manual_add_settled:{estimate_id}",
+                "Manual addition estimate updated",
+                message,
+                _json_text(payload),
+                now,
+            ),
+        )
+        event_id = int(cursor.lastrowid)
+        connection.execute(
+            """
+            UPDATE manual_add_estimates
+            SET
+                status = 'applied',
+                unit_nav = ?,
+                nav_date = ?,
+                nav_source = ?,
+                net_amount = ?,
+                added_units = ?,
+                new_average_cost = ?,
+                applied_at = ?,
+                settlement_alert_event_id = ?,
+                updated_at = ?
+            WHERE id = ? AND status = 'pending'
+            """,
+            (
+                nav_value,
+                nav.date.isoformat(),
+                str(nav.source),
+                net_amount,
+                added_units,
+                new_average_cost,
+                now,
+                event_id,
+                now,
+                estimate_id,
+            ),
+        )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    return {
+        "event_id": event_id,
+        "title": "Manual addition estimate updated",
+        "message": message,
+    }
+
+
 def alert_exists(connection: sqlite3.Connection, alert_key: str) -> bool:
     """Return whether a non-failed alert event with the key already exists."""
     row = connection.execute(
@@ -583,6 +1270,54 @@ def add_alert_event(
         ),
     )
     connection.commit()
+    return int(cursor.lastrowid)
+
+
+def add_drawdown_plan_pre_alert_event(
+    connection: sqlite3.Connection,
+    *,
+    rule_id: int,
+    alert: Any,
+) -> int:
+    """Reserve one expiring pre-alert only while its plan remains enabled."""
+
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        rule = connection.execute(
+            "SELECT type, enabled FROM rules WHERE id = ?",
+            (rule_id,),
+        ).fetchone()
+        if (
+            rule is None
+            or str(rule["type"]) != "drawdown_plan"
+            or not bool(rule["enabled"])
+        ):
+            raise sqlite3.IntegrityError("Drawdown plan is no longer enabled.")
+        cursor = connection.execute(
+            """
+            INSERT INTO alert_events (
+                rule_id,
+                alert_key,
+                title,
+                message,
+                payload_json,
+                triggered_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                rule_id,
+                str(alert["alert_key"]),
+                str(alert["title"]),
+                str(alert["message"]),
+                _json_text(alert.get("payload")),
+                _utc_now_text(),
+            ),
+        )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
     return int(cursor.lastrowid)
 
 
@@ -831,6 +1566,8 @@ def persist_drawdown_plan_evaluation(
 
         event_id: int | None = None
         if alert is not None:
+            payload = dict(alert.get("payload") or {})
+            payload["cycle_id"] = cycle_id
             cursor = connection.execute(
                 """
                 INSERT INTO alert_events (
@@ -848,7 +1585,7 @@ def persist_drawdown_plan_evaluation(
                     str(alert["alert_key"]),
                     str(alert["title"]),
                     str(alert["message"]),
-                    _json_text(alert.get("payload")),
+                    _json_text(payload),
                     now,
                 ),
             )
@@ -902,6 +1639,8 @@ def list_retryable_drawdown_plan_alert_events(
             WHERE
                 r.type = 'drawdown_plan'
                 AND e.notification_status IN (?, ?)
+                AND COALESCE(json_extract(e.payload_json, '$.phase'), '')
+                    != 'before_close'
             ORDER BY e.id
             """,
             (ALERT_NOTIFICATION_PENDING, ALERT_NOTIFICATION_FAILED),
@@ -925,6 +1664,17 @@ def _ensure_alert_event_delivery_columns(connection: sqlite3.Connection) -> None
             connection.execute(
                 f"ALTER TABLE alert_events ADD COLUMN {column} {definition}"
             )
+
+
+def _ensure_fund_settings_columns(connection: sqlite3.Connection) -> None:
+    columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(fund_settings)").fetchall()
+    }
+    if "position_sync_required_since" not in columns:
+        connection.execute(
+            "ALTER TABLE fund_settings ADD COLUMN position_sync_required_since TEXT"
+        )
 
 
 def _notification_result_payload(result: Any) -> dict[str, object]:

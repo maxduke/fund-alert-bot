@@ -5,10 +5,11 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Collection, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -260,6 +261,139 @@ def validate_realtime_quote(
     return quote
 
 
+def evaluate_drawdown_plan_realtime(
+    confirmed: DrawdownPlanEvaluation,
+    config: DrawdownPlanConfig,
+    quote: RealtimeQuote,
+    *,
+    reference_symbol: str,
+    market_date: date,
+    recorded_tier_keys: Collection[str] = (),
+) -> DrawdownPlanEvaluation:
+    """Apply one validated current-session quote to confirmed plan context."""
+
+    validate_realtime_quote(
+        quote,
+        reference_symbol=reference_symbol,
+        confirmed_previous_close=confirmed.latest_price,
+    )
+    if confirmed.latest_date >= market_date:
+        raise ValueError("Realtime estimate requires an earlier confirmed close.")
+    if quote.fetched_at.astimezone(ZoneInfo("Asia/Shanghai")).date() != market_date:
+        raise ValueError("Realtime quote was not fetched on the market date.")
+
+    price = float(quote.price)
+    drawdown = max(0.0, 1 - price / confirmed.peak_price)
+    already_recorded = set() if confirmed.cycle_changed else set(recorded_tier_keys)
+    crossed = tuple(
+        tier
+        for tier in config.tiers
+        if drawdown + _THRESHOLD_TOLERANCE >= tier.drawdown
+        and tier.key not in already_recorded
+    )
+    return replace(
+        confirmed,
+        latest_date=market_date,
+        latest_price=price,
+        drawdown=drawdown,
+        above_sma=None if confirmed.sma is None else price > confirmed.sma,
+        distance_to_sma=calculate_sma_distance(price, confirmed.sma),
+        source=quote.source,
+        newly_crossed_tiers=crossed,
+        total_amount=sum((tier.amount for tier in crossed), start=0),
+    )
+
+
+def build_drawdown_plan_pre_alert(
+    *,
+    rule_id: int,
+    cycle_id: int,
+    reference_symbol: str,
+    name: str,
+    confirmed_date: date,
+    config: DrawdownPlanConfig,
+    evaluation: DrawdownPlanEvaluation,
+    quote: RealtimeQuote,
+) -> dict[str, object] | None:
+    """Build one provisional before-close reminder without consuming tiers."""
+
+    tiers = evaluation.newly_crossed_tiers
+    if not tiers:
+        return None
+    tier_lines = [
+        f"-{_format_percent(tier.drawdown)} → {_format_amount(tier.amount)}"
+        for tier in tiers
+    ]
+    fetched_at = quote.fetched_at.astimezone(ZoneInfo("Asia/Shanghai"))
+    message = "\n".join(
+        (
+            f"⚠️ Buy-plan pre-alert — {name}",
+            "",
+            "Realtime estimate before close",
+            f"Market date: {evaluation.latest_date.isoformat()}",
+            f"Reference ETF: {reference_symbol}",
+            f"Investment fund: {config.investment_fund_symbol}",
+            f"Realtime drawdown: -{evaluation.drawdown:.1%}",
+            f"Recent confirmed peak: {evaluation.peak_price:.6g}",
+            f"Realtime price: {evaluation.latest_price:.6g}",
+            f"Peak date: {evaluation.peak_date.isoformat()}",
+            f"Quote source: {evaluation.source}",
+            f"Fetched at: {fetched_at.isoformat(timespec='seconds')}",
+            "",
+            "🎯 Tiers currently reached:",
+            *tier_lines,
+            "",
+            f"Configured additional amount: {_format_amount(evaluation.total_amount)}",
+            "",
+            "📈 Long-term trend from confirmed closes",
+            *_format_trend(config, evaluation),
+            "",
+            "Final confirmation will use closing data.",
+            "Only after you actually subscribe, record it with:",
+            f"/mark_added {rule_id} {_tier_command_text(tiers)}",
+            "If you add today, remember to sync the fund position after units settle.",
+            "This is a reminder only. No trade has been placed.",
+        )
+    )
+    return {
+        "alert_key": (
+            f"{rule_id}:drawdown_plan:pre_alert:{evaluation.latest_date.isoformat()}"
+        ),
+        "title": f"Buy-plan pre-alert — {name}",
+        "message": message,
+        "payload": {
+            "phase": "before_close",
+            "rule_id": rule_id,
+            "cycle_id": cycle_id,
+            "reference_symbol": reference_symbol,
+            "investment_fund_symbol": config.investment_fund_symbol,
+            "data_date": evaluation.latest_date.isoformat(),
+            "confirmed_close_date": confirmed_date.isoformat(),
+            "source": evaluation.source,
+            "fetched_at": fetched_at.isoformat(),
+            "peak_date": evaluation.peak_date.isoformat(),
+            "peak_price": evaluation.peak_price,
+            "latest_price": evaluation.latest_price,
+            "drawdown": evaluation.drawdown,
+            "crossed_tiers": [
+                {
+                    "key": tier.key,
+                    "drawdown": tier.drawdown,
+                    "amount": tier.amount,
+                }
+                for tier in tiers
+            ],
+            "total_amount": evaluation.total_amount,
+            "sma_window": config.sma_window,
+            "sma": evaluation.sma,
+            "above_sma": evaluation.above_sma,
+            "distance_to_sma": evaluation.distance_to_sma,
+            "sma_slope_window": config.sma_slope_window,
+            "sma_slope": evaluation.sma_slope,
+        },
+    }
+
+
 def build_drawdown_plan_alert(
     *,
     rule_id: int,
@@ -313,6 +447,8 @@ def build_drawdown_plan_alert(
             *trend_lines,
             "",
             "Regular DCA continues separately.",
+            "Only after you actually subscribe, record it with:",
+            f"/mark_added {rule_id} {_tier_command_text(tiers)}",
             "This is a reminder only. No trade has been placed.",
         )
     )
@@ -325,6 +461,7 @@ def build_drawdown_plan_alert(
         "title": f"Buy-plan reminder — {name}",
         "message": message,
         "payload": {
+            "phase": "after_close",
             "rule_id": rule_id,
             "reference_symbol": reference_symbol,
             "investment_fund_symbol": config.investment_fund_symbol,
@@ -583,6 +720,10 @@ def _format_amount(amount: int | float) -> str:
 
 def _format_percent(value: float) -> str:
     return f"{value * 100:g}%"
+
+
+def _tier_command_text(tiers: Sequence[DrawdownTier]) -> str:
+    return ",".join(f"{tier.drawdown * 100:g}" for tier in tiers)
 
 
 def _format_trend(

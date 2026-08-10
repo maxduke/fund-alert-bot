@@ -38,6 +38,7 @@ class AkshareMarketDataProvider(MarketDataProvider):
         latest_lookback_days: int = 45,
         realtime_spot_ttl_seconds: float = 30.0,
         fund_nav_cache_ttl_seconds: float = 300.0,
+        eastmoney_failure_ttl_seconds: float = 30.0,
         today_factory: Callable[[], date] = date.today,
         now_factory: Callable[[], datetime] | None = None,
     ) -> None:
@@ -55,6 +56,11 @@ class AkshareMarketDataProvider(MarketDataProvider):
             or fund_nav_cache_ttl_seconds < 0
         ):
             raise ValueError("fund_nav_cache_ttl_seconds must be non-negative")
+        if (
+            not math.isfinite(eastmoney_failure_ttl_seconds)
+            or eastmoney_failure_ttl_seconds < 0
+        ):
+            raise ValueError("eastmoney_failure_ttl_seconds must be non-negative")
 
         self._ak_module = ak_module
         self._retries = retries
@@ -62,13 +68,17 @@ class AkshareMarketDataProvider(MarketDataProvider):
         self._latest_lookback_days = latest_lookback_days
         self._realtime_spot_ttl_seconds = realtime_spot_ttl_seconds
         self._fund_nav_cache_ttl_seconds = fund_nav_cache_ttl_seconds
+        self._eastmoney_failure_ttl_seconds = eastmoney_failure_ttl_seconds
         self._today_factory = today_factory
         self._now_factory = now_factory or (lambda: datetime.now(UTC))
         self._realtime_spot_cache: dict[
             AssetType, tuple[float, datetime, pd.DataFrame]
         ] = {}
-        self._sina_etf_spot_cache: tuple[float, datetime, pd.DataFrame] | None = None
+        self._sina_etf_spot_cache: (
+            tuple[float, datetime, pd.DataFrame | None] | None
+        ) = None
         self._fund_nav_cache: dict[str, tuple[float, pd.DataFrame | None]] = {}
+        self._eastmoney_failed_at: dict[str, float] = {}
 
     def get_history(
         self,
@@ -390,8 +400,9 @@ class AkshareMarketDataProvider(MarketDataProvider):
             self._fund_nav_cache.pop(symbol, None)
 
         try:
-            raw_data = self._call_with_retry(
+            raw_data = self._call_eastmoney_with_retry(
                 self._akshare.fund_open_fund_info_em,
+                failure_group="fund_nav",
                 symbol=symbol,
                 indicator="\u5355\u4f4d\u51c0\u503c\u8d70\u52bf",
             )
@@ -415,8 +426,9 @@ class AkshareMarketDataProvider(MarketDataProvider):
         adjust = "qfq" if price_basis is PriceBasis.QFQ else ""
         if price_basis is PriceBasis.QFQ:
             return (
-                self._call_with_retry(
+                self._call_eastmoney_with_retry(
                     ak_module.fund_etf_hist_em,
+                    failure_group="etf_history",
                     symbol=instrument.symbol,
                     period="daily",
                     start_date=start_date,
@@ -427,8 +439,9 @@ class AkshareMarketDataProvider(MarketDataProvider):
             )
 
         try:
-            raw_data = self._call_with_retry(
+            raw_data = self._call_eastmoney_with_retry(
                 ak_module.fund_etf_hist_em,
+                failure_group="etf_history",
                 symbol=instrument.symbol,
                 period="daily",
                 start_date=start_date,
@@ -453,12 +466,25 @@ class AkshareMarketDataProvider(MarketDataProvider):
         if self._sina_etf_spot_cache is not None:
             cached_at, fetched_at, raw_data = self._sina_etf_spot_cache
             if time.monotonic() - cached_at <= self._realtime_spot_ttl_seconds:
+                if raw_data is None:
+                    raise MarketDataFetchError(
+                        "Recent Sina realtime request failed; retry suppressed."
+                    )
                 return raw_data, fetched_at
 
-        raw_data = self._call_with_retry(
-            self._akshare.fund_etf_category_sina,
-            symbol="ETF\u57fa\u91d1",
-        )
+        try:
+            raw_data = self._call_with_retry(
+                self._akshare.fund_etf_category_sina,
+                symbol="ETF\u57fa\u91d1",
+            )
+        except MarketDataFetchError:
+            if self._realtime_spot_ttl_seconds > 0:
+                self._sina_etf_spot_cache = (
+                    time.monotonic(),
+                    self._now_factory(),
+                    None,
+                )
+            raise
         fetched_at = self._now_factory()
         if self._realtime_spot_ttl_seconds > 0:
             self._sina_etf_spot_cache = (time.monotonic(), fetched_at, raw_data)
@@ -483,6 +509,30 @@ class AkshareMarketDataProvider(MarketDataProvider):
         raise MarketDataFetchError(
             f"AKShare call failed after {self._retries} attempts."
         ) from last_error
+
+    def _call_eastmoney_with_retry(
+        self,
+        func: Callable[..., pd.DataFrame],
+        *,
+        failure_group: str,
+        **kwargs: object,
+    ) -> pd.DataFrame:
+        now = time.monotonic()
+        failed_at = self._eastmoney_failed_at.get(failure_group)
+        if failed_at is not None and (
+            now - failed_at <= self._eastmoney_failure_ttl_seconds
+        ):
+            raise MarketDataFetchError(
+                "Recent Eastmoney request failed; retry suppressed."
+            )
+        try:
+            result = self._call_with_retry(func, **kwargs)
+        except MarketDataFetchError:
+            if self._eastmoney_failure_ttl_seconds > 0:
+                self._eastmoney_failed_at[failure_group] = time.monotonic()
+            raise
+        self._eastmoney_failed_at.pop(failure_group, None)
+        return result
 
     def _filter_by_date(
         self,

@@ -11,7 +11,7 @@ import shlex
 import sqlite3
 from collections.abc import Awaitable, Callable, Collection, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
@@ -37,10 +37,17 @@ from fund_alert_bot.db import (
     add_rule,
     delete_rule,
     find_enabled_drawdown_plan_conflict,
+    get_active_drawdown_cycle,
+    get_drawdown_plan_action_event,
+    get_fund_settings,
     initialize_database,
     list_enabled_drawdown_plan_fund_symbols,
+    list_manual_add_actions,
+    list_pending_position_items,
     list_position_snapshots,
     open_connection,
+    reconcile_position_snapshot,
+    record_manual_addition,
     upsert_fund_cutoff,
     upsert_fund_fee,
     upsert_position_snapshot,
@@ -51,8 +58,10 @@ from fund_alert_bot.db import (
 from fund_alert_bot.market_data import (
     AkshareMarketDataProvider,
     AssetType,
+    CNMarketCalendar,
     FundNav,
     Instrument,
+    MarketCalendar,
     MarketDataProvider,
     MarketDataProviderError,
     PriceBasis,
@@ -62,6 +71,7 @@ from fund_alert_bot.notifications.service import build_notification_service
 from fund_alert_bot.rules.dca import normalize_weekday
 from fund_alert_bot.rules.drawdown_plan import (
     DrawdownPlanConfig,
+    DrawdownTier,
     evaluate_drawdown_plan,
     parse_drawdown_plan_config,
     required_history_start,
@@ -85,6 +95,7 @@ ADD_DRAWDOWN_PLAN_USAGE = (
     "Usage: /add_drawdown_plan <reference_etf_symbol> <feeder_fund_symbol> "
     "<name> <tiers> [lookback:<calendar_days>]"
 )
+MARK_ADDED_USAGE = "Usage: /mark_added <plan_id> <tier_percentages>"
 START_MESSAGE = "fund-alert-bot is running. Use /help to see available commands."
 HELP_MESSAGE = "\n".join(
     (
@@ -99,6 +110,7 @@ HELP_MESSAGE = "\n".join(
         "/sync_position <fund_symbol> <units> <average_unit_cost>",
         "/add_drawdown_plan <reference_etf> <feeder_fund> <name> <tiers> "
         "[lookback:<days>]",
+        "/mark_added <plan_id> <tier_percentages> - Record an addition you made",
         "/plans - Show investment-plan status",
         "/list - List configured rules",
         "/del <id> - Remove a configured rule",
@@ -204,6 +216,53 @@ class DrawdownPlanDraft:
     expires_at: datetime
     command: DrawdownPlanCommand
     created_rule_id: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class MarkAddedCommand:
+    """Parsed explicit user statement that configured tiers were purchased."""
+
+    plan_id: int
+    tier_percentages: tuple[float, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ManualAddSelection:
+    """Server-loaded eligible tiers awaiting explicit confirmation."""
+
+    plan_id: int
+    event_id: int
+    cycle_id: int
+    fund_symbol: str
+    name: str
+    tiers: tuple[DrawdownTier, ...]
+    readiness: str
+    missing_setup: tuple[str, ...]
+    cutoff: str
+    market_date: date
+
+
+@dataclass(slots=True)
+class ManualAddDraft:
+    """Short-lived user/chat-scoped manual-add confirmation."""
+
+    user_id: int
+    chat_id: int
+    expires_at: datetime
+    selection: ManualAddSelection
+    completed_message: str | None = None
+
+
+@dataclass(slots=True)
+class PositionSyncDraft:
+    """Short-lived reconciliation choice for a displayed pending set."""
+
+    user_id: int
+    chat_id: int
+    expires_at: datetime
+    command: SyncPositionCommand
+    item_keys: tuple[str, ...]
+    completed_message: str | None = None
 
 
 def parse_add_drawdown_args(args: Sequence[str]) -> DrawdownCommand:
@@ -380,6 +439,154 @@ def parse_sync_position_args(args: Sequence[str]) -> SyncPositionCommand:
             "use positive units with positive cost, or exact 0 0 for a closed position"
         )
     return SyncPositionCommand(fund_symbol, units, average_unit_cost)
+
+
+def parse_mark_added_args(args: Sequence[str]) -> MarkAddedCommand:
+    """Parse selected drawdown tier percentages for a recorded manual add."""
+
+    if len(args) != 2:
+        raise CommandParseError(MARK_ADDED_USAGE)
+    try:
+        plan_id = int(args[0])
+    except ValueError as exc:
+        raise CommandParseError("plan_id must be a positive integer") from exc
+    if plan_id <= 0:
+        raise CommandParseError("plan_id must be a positive integer")
+    raw_values = args[1].split(",")
+    try:
+        percentages = tuple(float(value) for value in raw_values)
+    except ValueError as exc:
+        raise CommandParseError(
+            "tier percentages must be comma-separated numbers"
+        ) from exc
+    if (
+        not percentages
+        or any(
+            not math.isfinite(value) or value <= 0 or value >= 100
+            for value in percentages
+        )
+        or len(set(percentages)) != len(percentages)
+    ):
+        raise CommandParseError(
+            "tier percentages must be unique numbers between 0 and 100"
+        )
+    return MarkAddedCommand(plan_id, percentages)
+
+
+def load_manual_add_selection(
+    connection: Any,
+    *,
+    plan_id: int,
+    action_date: date,
+    event_id: int | None = None,
+    tier_percentages: Sequence[float] = (),
+    tier_key: str | None = None,
+    select_all: bool = False,
+) -> ManualAddSelection:
+    """Load and validate eligible tiers from a stored same-day alert event."""
+
+    event = get_drawdown_plan_action_event(
+        connection,
+        rule_id=plan_id,
+        event_id=event_id,
+        data_date=action_date.isoformat(),
+    )
+    if event is None:
+        raise CommandParseError(
+            "No eligible same-day plan reminder was found. Use /sync_position "
+            "after your platform position updates."
+        )
+    config = parse_drawdown_plan_config(
+        reference_symbol=str(event["symbol"]),
+        asset_type=str(event["asset_type"]),
+        params=_load_params(str(event["params_json"])),
+    )
+    payload = json.loads(str(event["payload_json"]))
+    active = get_active_drawdown_cycle(connection, plan_id)
+    if (
+        active is None
+        or int(payload.get("cycle_id", -1)) != int(active["id"])
+        or str(payload.get("data_date")) != action_date.isoformat()
+    ):
+        raise CommandParseError(
+            "This reminder expired or its peak cycle changed. Use /sync_position."
+        )
+    eligible_keys = {
+        str(item["key"])
+        for item in payload.get("crossed_tiers", ())
+        if isinstance(item, dict) and "key" in item
+    }
+    eligible = tuple(tier for tier in config.tiers if tier.key in eligible_keys)
+    if select_all:
+        selected = eligible
+    elif tier_key is not None:
+        selected = tuple(tier for tier in eligible if tier.key == tier_key)
+    else:
+        selected = tuple(
+            tier
+            for tier in eligible
+            if any(
+                math.isclose(
+                    tier.drawdown * 100,
+                    percentage,
+                    rel_tol=0,
+                    abs_tol=1e-10,
+                )
+                for percentage in tier_percentages
+            )
+        )
+        if len(selected) != len(tier_percentages):
+            raise CommandParseError(
+                "Selected tiers are not all present in the latest same-day reminder."
+            )
+    if not selected:
+        raise CommandParseError("No eligible tiers were selected.")
+    already_added = {
+        str(row["tier_key"])
+        for row in list_manual_add_actions(connection, int(active["id"]))
+    }
+    if any(tier.key in already_added for tier in selected):
+        raise CommandParseError("One or more selected tiers were already recorded.")
+    readiness, missing_setup = derive_plan_readiness(
+        connection,
+        config.investment_fund_symbol,
+    )
+    settings = get_fund_settings(connection, config.investment_fund_symbol)
+    cutoff = "15:00" if settings is None else str(settings["subscription_cutoff"])
+    return ManualAddSelection(
+        plan_id=plan_id,
+        event_id=int(event["id"]),
+        cycle_id=int(active["id"]),
+        fund_symbol=config.investment_fund_symbol,
+        name=str(event["name"]),
+        tiers=selected,
+        readiness=readiness,
+        missing_setup=missing_setup,
+        cutoff=cutoff,
+        market_date=action_date,
+    )
+
+
+def format_manual_add_confirmation(selection: ManualAddSelection) -> str:
+    """Show exactly what a later callback would record."""
+
+    total = sum(float(tier.amount) for tier in selection.tiers)
+    lines = [
+        "Confirm a completed manual addition",
+        "",
+        f"Plan: {selection.name} ({selection.plan_id})",
+        f"Fund: {selection.fund_symbol}",
+        "Selected tiers:",
+        *(f"• -{tier.drawdown:.0%} → ¥{tier.amount:,.2f}" for tier in selection.tiers),
+        f"Configured gross total: ¥{total:,.2f}",
+        f"Position estimate readiness: {selection.readiness}",
+        "",
+        "Continue only if you already submitted the fund subscription.",
+        "The bot records your statement; it does not place or verify an order.",
+    ]
+    if selection.missing_setup:
+        lines.append(f"Missing setup: {', '.join(selection.missing_setup)}")
+    return "\n".join(lines)
 
 
 def parse_add_drawdown_plan_args(args: Sequence[str]) -> DrawdownPlanCommand:
@@ -885,11 +1092,12 @@ def format_plan_details(result: DrawdownPlanStatusResult) -> str:
             lines.append(f"Missing setup: {', '.join(status.missing_setup)}")
         lines.append("Tiers:")
         for tier in status.config.tiers:
-            state = (
-                "reminded; no add recorded"
-                if tier.key in status.recorded_tier_keys
-                else "open"
-            )
+            if tier.key in status.added_tier_keys:
+                state = "add recorded (user-confirmed)"
+            elif tier.key in status.recorded_tier_keys:
+                state = "reminded; no add recorded"
+            else:
+                state = "open"
             lines.append(f"• -{tier.drawdown:.0%} / ¥{tier.amount:,.2f}: {state}")
         next_tier = _next_open_tier(status)
         if next_tier is None:
@@ -951,13 +1159,24 @@ def _format_plan_trend(status: DrawdownPlanStatus) -> tuple[str, ...]:
 
 def _format_position_lines(status: DrawdownPlanStatus) -> tuple[str, ...]:
     if status.position is None:
-        return ("Position: not synced",)
+        return (
+            "Position: not synced",
+            *(
+                (f"Position sync required since {status.position_sync_required_since}",)
+                if status.position_sync_required_since is not None
+                else ()
+            ),
+        )
     accuracy = "estimated" if status.position["is_estimated"] else "exact"
     units = float(status.position["units"])
     lines = [
         f"Position: {accuracy}; last sync {status.position['last_synced_at']}; "
         f"later estimates {status.position['estimates_since_sync']}"
     ]
+    if status.position_sync_required_since is not None:
+        lines.append(
+            f"Position sync required since {status.position_sync_required_since}"
+        )
     if units == 0:
         lines.append("Position value: ¥0.00 (closed)")
     elif status.fund_nav is None:
@@ -1088,6 +1307,7 @@ def build_command_handlers(
     *,
     sqlite_path: str | Path = ":memory:",
     market_data_provider: MarketDataProvider | None = None,
+    market_calendar: MarketCalendar | None = None,
     notification_settings: NotificationSettings | None = None,
     timezone: str = "Asia/Shanghai",
     now_factory: Callable[[], datetime] | None = None,
@@ -1099,7 +1319,11 @@ def build_command_handlers(
     notification_settings = notification_settings or NotificationSettings()
     if market_data_provider is None:
         market_data_provider = AkshareMarketDataProvider()
+    if market_calendar is None:
+        market_calendar = CNMarketCalendar()
     plan_drafts: dict[str, DrawdownPlanDraft] = {}
+    manual_add_drafts: dict[str, ManualAddDraft] = {}
+    position_sync_drafts: dict[str, PositionSyncDraft] = {}
     clock = now_factory or (lambda: datetime.now(UTC))
     timezone_info = ZoneInfo(timezone)
 
@@ -1332,6 +1556,336 @@ def build_command_handlers(
             "has been placed."
         )
 
+    def store_manual_add_draft(
+        *,
+        user_id: int,
+        chat_id: int,
+        selection: ManualAddSelection,
+    ) -> tuple[str, ManualAddDraft]:
+        now = _clock_now(clock)
+        for old_token, old_draft in tuple(manual_add_drafts.items()):
+            if old_draft.expires_at <= now:
+                manual_add_drafts.pop(old_token, None)
+        token = secrets.token_urlsafe(9)
+        draft = ManualAddDraft(
+            user_id=user_id,
+            chat_id=chat_id,
+            expires_at=now + timedelta(minutes=10),
+            selection=selection,
+        )
+        manual_add_drafts[token] = draft
+        return token, draft
+
+    def manual_add_confirmation_markup(token: str, readiness: str) -> Any:
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+        if readiness == "READY":
+            rows = [
+                [
+                    InlineKeyboardButton(
+                        "实际金额与配置总额完全一致",
+                        callback_data=f"drawdown_add_confirm:{token}:match",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "金额不同，记录档位后同步持仓",
+                        callback_data=f"drawdown_add_confirm:{token}:sync",
+                    )
+                ],
+            ]
+        else:
+            rows = [
+                [
+                    InlineKeyboardButton(
+                        "记录档位，稍后同步持仓",
+                        callback_data=f"drawdown_add_confirm:{token}:sync",
+                    )
+                ]
+            ]
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "取消",
+                    callback_data=f"drawdown_add_confirm:{token}:cancel",
+                )
+            ]
+        )
+        return InlineKeyboardMarkup(rows)
+
+    async def mark_added(
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        if await reject_if_unauthorized(update, allowed_user_ids):
+            return
+        try:
+            command = parse_mark_added_args(getattr(context, "args", ()))
+            action_date = _clock_now(clock).astimezone(timezone_info).date()
+            with open_connection(sqlite_path) as connection:
+                initialize_database(connection)
+                selection = load_manual_add_selection(
+                    connection,
+                    plan_id=command.plan_id,
+                    action_date=action_date,
+                    tier_percentages=command.tier_percentages,
+                )
+        except (CommandParseError, ValueError) as exc:
+            await _reply_text(update, str(exc))
+            return
+        user_id = get_update_user_id(update)
+        chat_id = get_update_chat_id(update)
+        if user_id is None or chat_id is None:
+            await _reply_text(
+                update, "Unable to scope the confirmation; rerun command."
+            )
+            return
+        token, _draft = store_manual_add_draft(
+            user_id=user_id,
+            chat_id=chat_id,
+            selection=selection,
+        )
+        await _reply_text(
+            update,
+            format_manual_add_confirmation(selection),
+            reply_markup=manual_add_confirmation_markup(token, selection.readiness),
+        )
+
+    async def manual_add_event_callback(
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        del context
+        query = getattr(update, "callback_query", None)
+        if query is None:
+            return
+        await query.answer()
+        if await reject_if_unauthorized(update, allowed_user_ids):
+            return
+        parts = str(getattr(query, "data", "")).split(":")
+        if len(parts) not in {4, 5} or parts[0] != "drawdown_add":
+            return
+        try:
+            plan_id = int(parts[1])
+            event_id = int(parts[2])
+        except ValueError:
+            return
+        selector = parts[3]
+        if selector == "none":
+            await query.edit_message_text(
+                "No addition recorded. The tier reminder state was not changed. "
+                "No order has been placed."
+            )
+            return
+        user_id = get_update_user_id(update)
+        chat_id = get_update_chat_id(update)
+        if user_id is None or chat_id is None:
+            await query.edit_message_text("Unable to scope this action.")
+            return
+        try:
+            with open_connection(sqlite_path) as connection:
+                initialize_database(connection)
+                selection = load_manual_add_selection(
+                    connection,
+                    plan_id=plan_id,
+                    event_id=event_id,
+                    action_date=_clock_now(clock).astimezone(timezone_info).date(),
+                    select_all=selector == "all",
+                    tier_key=(
+                        parts[4] if selector == "tier" and len(parts) == 5 else None
+                    ),
+                )
+        except (CommandParseError, ValueError) as exc:
+            await query.edit_message_text(str(exc))
+            return
+        token, _draft = store_manual_add_draft(
+            user_id=user_id,
+            chat_id=chat_id,
+            selection=selection,
+        )
+        await query.edit_message_text(
+            format_manual_add_confirmation(selection),
+            reply_markup=manual_add_confirmation_markup(token, selection.readiness),
+        )
+
+    def get_manual_add_draft(update: Update, token: str) -> ManualAddDraft | None:
+        draft = manual_add_drafts.get(token)
+        now = _clock_now(clock)
+        if (
+            draft is None
+            or draft.expires_at <= now
+            or draft.user_id != get_update_user_id(update)
+            or draft.chat_id != get_update_chat_id(update)
+        ):
+            return None
+        return draft
+
+    async def commit_manual_add(
+        query: Any,
+        draft: ManualAddDraft,
+        *,
+        create_estimate: bool,
+        cutoff_choice: str | None = None,
+    ) -> None:
+        if draft.completed_message is not None:
+            await query.edit_message_text(draft.completed_message)
+            return
+        now = _clock_now(clock).astimezone(timezone_info)
+        if now.date() != draft.selection.market_date:
+            await query.edit_message_text(
+                "This reminder expired after its market date. Use /sync_position "
+                "after the fund platform updates."
+            )
+            return
+        effective_date = None
+        try:
+            if create_estimate:
+                if not market_calendar.confirmed_status(now.date()):
+                    raise ValueError("The action date is not a confirmed CN open day.")
+                effective_date = (
+                    _next_confirmed_trading_day(market_calendar, now.date())
+                    if cutoff_choice == "after"
+                    else now.date()
+                )
+            with open_connection(sqlite_path) as connection:
+                initialize_database(connection)
+                estimate_id, recorded_keys = record_manual_addition(
+                    connection,
+                    rule_id=draft.selection.plan_id,
+                    cycle_id=draft.selection.cycle_id,
+                    source_alert_event_id=draft.selection.event_id,
+                    fund_symbol=draft.selection.fund_symbol,
+                    tiers=draft.selection.tiers,
+                    action_at=now,
+                    create_estimate=create_estimate,
+                    cutoff_choice=cutoff_choice,
+                    effective_date=(
+                        None if effective_date is None else effective_date.isoformat()
+                    ),
+                )
+        except (ValueError, sqlite3.IntegrityError) as exc:
+            await query.edit_message_text(f"Addition was not recorded: {exc}")
+            return
+        tier_text = ", ".join(f"-{float(key):.0%}" for key in recorded_keys)
+        if not recorded_keys:
+            message = "These tiers were already recorded; no duplicate was created."
+        elif estimate_id is None:
+            message = (
+                f"Recorded tiers {tier_text}. Position sync is required. After the "
+                "platform settles, run /sync_position with current units and average "
+                "cost. No order has been placed."
+            )
+        else:
+            message = (
+                f"Recorded tiers {tier_text}; waiting for exact dated NAV on "
+                f"{effective_date}. Estimate id={estimate_id}. The bot did not place "
+                "or verify an order."
+            )
+        draft.completed_message = message
+        await query.edit_message_text(message)
+
+    async def manual_add_confirm_callback(
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        del context
+        query = getattr(update, "callback_query", None)
+        if query is None:
+            return
+        await query.answer()
+        if await reject_if_unauthorized(update, allowed_user_ids):
+            return
+        parts = str(getattr(query, "data", "")).split(":")
+        if len(parts) != 3:
+            return
+        token, action = parts[1], parts[2]
+        draft = get_manual_add_draft(update, token)
+        if draft is None:
+            await query.edit_message_text(
+                "This addition confirmation expired or belongs to another chat. "
+                "Rerun /mark_added."
+            )
+            return
+        if action == "cancel":
+            manual_add_drafts.pop(token, None)
+            await query.edit_message_text("Manual addition recording cancelled.")
+            return
+        if action == "sync":
+            await commit_manual_add(query, draft, create_estimate=False)
+            return
+        if action != "match" or draft.selection.readiness != "READY":
+            return
+        local_now = _clock_now(clock).astimezone(timezone_info)
+        cutoff = time.fromisoformat(draft.selection.cutoff)
+        if local_now.timetz().replace(tzinfo=None) < cutoff:
+            await commit_manual_add(
+                query,
+                draft,
+                create_estimate=True,
+                cutoff_choice="before",
+            )
+            return
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+        await query.edit_message_text(
+            "The confirmation is at or after the configured cutoff. When did you "
+            "actually submit the fund subscription?",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            f"{draft.selection.cutoff}前已提交 — 当日净值",
+                            callback_data=f"drawdown_add_cutoff:{token}:before",
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            f"{draft.selection.cutoff}后才提交 — 下一开放日",
+                            callback_data=f"drawdown_add_cutoff:{token}:after",
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "取消",
+                            callback_data=f"drawdown_add_cutoff:{token}:cancel",
+                        )
+                    ],
+                ]
+            ),
+        )
+
+    async def manual_add_cutoff_callback(
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        del context
+        query = getattr(update, "callback_query", None)
+        if query is None:
+            return
+        await query.answer()
+        if await reject_if_unauthorized(update, allowed_user_ids):
+            return
+        parts = str(getattr(query, "data", "")).split(":")
+        if len(parts) != 3:
+            return
+        token, choice = parts[1], parts[2]
+        draft = get_manual_add_draft(update, token)
+        if draft is None:
+            await query.edit_message_text("This cutoff confirmation expired.")
+            return
+        if choice == "cancel":
+            manual_add_drafts.pop(token, None)
+            await query.edit_message_text("Manual addition recording cancelled.")
+            return
+        if choice not in {"before", "after"}:
+            return
+        await commit_manual_add(
+            query,
+            draft,
+            create_estimate=True,
+            cutoff_choice=choice,
+        )
+
     async def set_fund_fee(
         update: Update,
         context: ContextTypes.DEFAULT_TYPE,
@@ -1396,12 +1950,73 @@ def build_command_handlers(
 
         with open_connection(sqlite_path) as connection:
             initialize_database(connection)
-            row = upsert_position_snapshot(
+            pending_items = list_pending_position_items(
                 connection,
-                fund_symbol=command.fund_symbol,
-                units=command.units,
-                average_unit_cost=command.average_unit_cost,
+                command.fund_symbol,
             )
+            if not pending_items:
+                row = upsert_position_snapshot(
+                    connection,
+                    fund_symbol=command.fund_symbol,
+                    units=command.units,
+                    average_unit_cost=command.average_unit_cost,
+                )
+            else:
+                row = None
+
+        if pending_items:
+            user_id = get_update_user_id(update)
+            chat_id = get_update_chat_id(update)
+            if user_id is None or chat_id is None:
+                await _reply_text(update, "Unable to scope the position confirmation.")
+                return
+            now = _clock_now(clock)
+            token = secrets.token_urlsafe(9)
+            position_sync_drafts[token] = PositionSyncDraft(
+                user_id=user_id,
+                chat_id=chat_id,
+                expires_at=now + timedelta(minutes=10),
+                command=command,
+                item_keys=tuple(str(item["key"]) for item in pending_items),
+            )
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+            lines = [
+                "Pending additions exist. Does this platform snapshot include all "
+                "items below?",
+                "",
+                *(
+                    f"• {item['kind']} / {item['date']} / ¥{float(item['amount']):,.2f}"
+                    for item in pending_items
+                ),
+            ]
+            await _reply_text(
+                update,
+                "\n".join(lines),
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton(
+                                "已全部包含",
+                                callback_data=f"position_sync:{token}:included",
+                            )
+                        ],
+                        [
+                            InlineKeyboardButton(
+                                "尚未包含",
+                                callback_data=f"position_sync:{token}:not_included",
+                            )
+                        ],
+                        [
+                            InlineKeyboardButton(
+                                "取消",
+                                callback_data=f"position_sync:{token}:cancel",
+                            )
+                        ],
+                    ]
+                ),
+            )
+            return
 
         nav = None
         if command.units > 0:
@@ -1419,6 +2034,63 @@ def build_command_handlers(
                     command.fund_symbol,
                 )
         await _reply_text(update, format_position_snapshot(row, nav))
+
+    async def position_sync_callback(
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        del context
+        query = getattr(update, "callback_query", None)
+        if query is None:
+            return
+        await query.answer()
+        if await reject_if_unauthorized(update, allowed_user_ids):
+            return
+        parts = str(getattr(query, "data", "")).split(":")
+        if len(parts) != 3:
+            return
+        token, choice = parts[1], parts[2]
+        draft = position_sync_drafts.get(token)
+        now = _clock_now(clock)
+        if (
+            draft is None
+            or draft.expires_at <= now
+            or draft.user_id != get_update_user_id(update)
+            or draft.chat_id != get_update_chat_id(update)
+        ):
+            await query.edit_message_text(
+                "This position confirmation expired. Rerun /sync_position."
+            )
+            return
+        if choice == "cancel":
+            position_sync_drafts.pop(token, None)
+            await query.edit_message_text("Position sync cancelled.")
+            return
+        if choice not in {"included", "not_included"}:
+            return
+        if draft.completed_message is not None:
+            await query.edit_message_text(draft.completed_message)
+            return
+        try:
+            with open_connection(sqlite_path) as connection:
+                initialize_database(connection)
+                row = reconcile_position_snapshot(
+                    connection,
+                    fund_symbol=draft.command.fund_symbol,
+                    units=draft.command.units,
+                    average_unit_cost=draft.command.average_unit_cost,
+                    expected_item_keys=draft.item_keys,
+                    included=choice == "included",
+                    synced_at=now,
+                )
+        except sqlite3.IntegrityError as exc:
+            await query.edit_message_text(str(exc))
+            return
+        message = format_position_snapshot(row, None)
+        if choice == "not_included":
+            message += "\nPending estimates remain eligible for dated-NAV processing."
+        draft.completed_message = message
+        await query.edit_message_text(message)
 
     async def list_rules(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context
@@ -1614,6 +2286,7 @@ def build_command_handlers(
         CommandHandler("add_profit", add_profit),
         CommandHandler("add_dca", add_dca),
         CommandHandler("add_drawdown_plan", add_drawdown_plan),
+        CommandHandler("mark_added", mark_added),
         CommandHandler("set_fund_fee", set_fund_fee),
         CommandHandler("set_fund_cutoff", set_fund_cutoff),
         CommandHandler("sync_position", sync_position),
@@ -1625,6 +2298,22 @@ def build_command_handlers(
             drawdown_plan_draft_callback,
             pattern=r"^drawdown_plan_(?:confirm|cancel):",
         ),
+        CallbackQueryHandler(
+            manual_add_event_callback,
+            pattern=(r"^drawdown_add:[0-9]+:[0-9]+:(?:all|none|tier:[0-9.]+)$"),
+        ),
+        CallbackQueryHandler(
+            manual_add_confirm_callback,
+            pattern=r"^drawdown_add_confirm:",
+        ),
+        CallbackQueryHandler(
+            manual_add_cutoff_callback,
+            pattern=r"^drawdown_add_cutoff:",
+        ),
+        CallbackQueryHandler(
+            position_sync_callback,
+            pattern=r"^position_sync:",
+        ),
         CommandHandler("test_notify", test_notify),
     ]
 
@@ -1635,6 +2324,7 @@ def register_command_handlers(
     *,
     sqlite_path: str | Path = ":memory:",
     market_data_provider: MarketDataProvider | None = None,
+    market_calendar: MarketCalendar | None = None,
     notification_settings: NotificationSettings | None = None,
     timezone: str = "Asia/Shanghai",
 ) -> None:
@@ -1643,6 +2333,7 @@ def register_command_handlers(
         allowed_user_ids,
         sqlite_path=sqlite_path,
         market_data_provider=market_data_provider,
+        market_calendar=market_calendar,
         notification_settings=notification_settings,
         timezone=timezone,
     ):
@@ -1655,6 +2346,7 @@ def create_application(
     allowed_user_ids: Collection[int],
     sqlite_path: str | Path = ":memory:",
     market_data_provider: MarketDataProvider | None = None,
+    market_calendar: MarketCalendar | None = None,
     notification_settings: NotificationSettings | None = None,
     timezone: str = "Asia/Shanghai",
     post_init: Callable[
@@ -1690,6 +2382,7 @@ def create_application(
         allowed_user_ids,
         sqlite_path=sqlite_path,
         market_data_provider=market_data_provider,
+        market_calendar=market_calendar,
         notification_settings=notification_settings,
         timezone=timezone,
     )
@@ -1709,3 +2402,16 @@ def _clock_now(clock: Callable[[], datetime]) -> datetime:
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("now_factory must return a timezone-aware datetime")
     return now.astimezone(UTC)
+
+
+def _next_confirmed_trading_day(
+    market_calendar: MarketCalendar,
+    check_date: date,
+) -> date:
+    for days_forward in range(1, 367):
+        candidate = check_date + timedelta(days=days_forward)
+        if market_calendar.confirmed_status(candidate):
+            return candidate
+    raise ValueError(
+        f"No next confirmed CN trading day found after {check_date.isoformat()}."
+    )

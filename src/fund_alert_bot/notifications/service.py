@@ -32,13 +32,23 @@ class NotificationService:
         """Return the enabled notification channel names."""
         return tuple(channel.name for channel in self._channels)
 
-    async def send_alert(self, *, title: str, body: str) -> list[NotificationResult]:
+    async def send_alert(
+        self,
+        *,
+        title: str,
+        body: str,
+        telegram_actions: tuple[tuple[tuple[str, str], ...], ...] = (),
+    ) -> list[NotificationResult]:
         """Send one alert to all enabled channels."""
         if not self._channels:
             LOGGER.warning("Notification skipped; no enabled notification channels")
             return []
 
-        message = NotificationMessage(title=title, body=body)
+        message = NotificationMessage(
+            title=title,
+            body=body,
+            telegram_actions=telegram_actions,
+        )
         results: list[NotificationResult] = []
         for channel in self._channels:
             try:

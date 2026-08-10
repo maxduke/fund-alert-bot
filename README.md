@@ -28,6 +28,7 @@ Implemented Telegram commands:
 - `/set_fund_cutoff <fund_symbol> <HH:MM>`
 - `/sync_position <fund_symbol> <units> <average_unit_cost>`
 - `/add_drawdown_plan <reference_etf> <feeder_fund> <name> <tiers> [lookback:<days>]`
+- `/mark_added <plan_id> <tier_percentages>`
 - `/plans`
 - `/list`
 - `/del <id>`
@@ -126,9 +127,32 @@ its peak cycle. A reminder does not mean that a purchase happened.
 
 Use `/plans` for a concise overview and `/check` for detailed plan state. Both
 are read-only for Drawdown Add Plans: they do not consume a tier or create an
-alert. Before-close plan pre-alerts and explicit `/mark_added` recording are
-implemented in the following phase; until then, only confirmed-close plan
-reminders are emitted.
+alert.
+
+At `14:50`, a plan uses the Reference ETF's current realtime price for a
+provisional pre-alert. It does not consume a tier by itself. If you actually
+submit the feeder-fund subscription, use the Telegram button or the printed
+fallback command, for example:
+
+```text
+/mark_added 1 15,20
+```
+
+Confirm only the tiers and configured gross amount you really submitted. Before
+the fund cutoff, the bot waits for that market date's exact published fund NAV;
+at or after the cutoff it asks whether the real submission occurred before or
+after the cutoff. A matching, fully configured action updates an explicitly
+estimated position once the exact dated NAV becomes available. A different
+amount or incomplete fund setup records the tiers but requires a later
+`/sync_position`. These actions record your statement only: the bot does not
+place or verify an order.
+
+The daily `08:30` NAV job runs on calendar days because a trading day's fund NAV
+may be published later. It requests data only while an estimate is pending and
+requires an exact NAV date; missing data remains pending and produces a data
+availability notice. If `/sync_position` sees pending additions, Telegram asks
+whether the platform snapshot already includes them before replacing the
+position.
 
 Telegram remains the command channel and default notification channel; optional
 Bark, ntfy, and webhook channels can be enabled with environment variables.
@@ -139,6 +163,7 @@ Default scheduler configuration:
 - `AFTER_CLOSE_CHECK_TIME=17:10`
 - `BEFORE_CLOSE_CHECK_TIME=14:50`
 - `DCA_REMINDER_TIME=09:30`
+- `FUND_NAV_PROCESS_TIME=08:30`
 - `AKSHARE_RETRIES=3`
 - `AKSHARE_RETRY_DELAY_SECONDS=0.5`
 - `AKSHARE_LATEST_LOOKBACK_DAYS=45`
@@ -154,8 +179,14 @@ Optional notification channel configuration:
 - `NTFY_TOPIC`
 - `WEBHOOK_URL`
 
-Realtime quotes are used only for the existing before-close drawdown estimate.
-RSI and RSI6 alerts are not implemented here.
+Realtime ETF quotes are used only for before-close drawdown estimates. One
+Eastmoney batch snapshot is reused for all ETF symbols in the same run; failures
+are briefly cached, and Sina is the realtime fallback. Confirmed `qfq` history
+still fails closed if Eastmoney is unavailable. Exact feeder-fund NAV has no
+independent Sina equivalent, so it stays pending rather than guessing. RSI and
+RSI6 alerts are not implemented here. The bot does not poll realtime endpoints:
+it performs one scheduled before-close pass, skips already completed plan/date
+work, and requests fund NAV only while a dated estimate is pending.
 
 ## Planned Stack
 

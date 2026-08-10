@@ -81,6 +81,7 @@ TZ=Asia/Shanghai
 AFTER_CLOSE_CHECK_TIME=17:10
 BEFORE_CLOSE_CHECK_TIME=14:50
 DCA_REMINDER_TIME=09:30
+FUND_NAV_PROCESS_TIME=08:30
 ```
 
 Keep `.env` on the VPS only. Do not commit real secrets.

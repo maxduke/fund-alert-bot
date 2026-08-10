@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pandas as pd
@@ -15,19 +15,26 @@ from fund_alert_bot.checks import (
 )
 from fund_alert_bot.db import (
     add_rule,
+    apply_manual_add_estimate,
     delete_rule,
     get_active_drawdown_cycle,
+    get_fund_settings,
+    get_position_snapshot,
     initialize_database,
     list_drawdown_tier_records,
+    list_manual_add_actions,
+    list_pending_position_items,
     list_retryable_drawdown_plan_alert_events,
     list_rules,
     open_connection,
     persist_drawdown_plan_evaluation,
+    reconcile_position_snapshot,
     record_alert_notification_result,
+    record_manual_addition,
     upsert_fund_fee,
     upsert_position_snapshot,
 )
-from fund_alert_bot.market_data import AssetType, Instrument, PriceBasis
+from fund_alert_bot.market_data import AssetType, FundNav, Instrument, PriceBasis
 from fund_alert_bot.rules.drawdown_plan import DrawdownTier
 
 
@@ -249,6 +256,188 @@ def test_new_peak_closes_old_cycle_and_rearms_tier(
         ("2024-01-03", None),
     ]
     assert [row["tier_key"] for row in second_tiers] == ["0.15"]
+
+
+def test_manual_add_estimate_applies_exact_nav_once(tmp_path: Path) -> None:
+    sqlite_path = tmp_path / "bot.sqlite3"
+    _add_plan(sqlite_path)
+    with open_connection(sqlite_path) as connection:
+        upsert_fund_fee(
+            connection,
+            fund_symbol="000001",
+            fee_mode="rate",
+            fee_value=0.01,
+        )
+        upsert_position_snapshot(
+            connection,
+            fund_symbol="000001",
+            units=100,
+            average_unit_cost=2,
+        )
+        confirmed = evaluate_drawdown_plan_rule(
+            connection,
+            list_rules(connection)[0],
+            _history([100, 84]),
+            expected_date=date(2024, 1, 2),
+        )
+        assert confirmed.notification is not None
+        estimate_id, recorded = record_manual_addition(
+            connection,
+            rule_id=1,
+            cycle_id=confirmed.cycle_id,
+            source_alert_event_id=confirmed.notification.event_id,
+            fund_symbol="000001",
+            tiers=(DrawdownTier(0.15, 5000, "0.15"),),
+            action_at=datetime(2024, 1, 2, 10, tzinfo=UTC),
+            create_estimate=True,
+            cutoff_choice="before",
+            effective_date="2024-01-02",
+        )
+        with pytest.raises(ValueError, match="does not match"):
+            apply_manual_add_estimate(
+                connection,
+                estimate_id=estimate_id,
+                nav=FundNav(
+                    "000001",
+                    date(2024, 1, 2),
+                    float("nan"),
+                    "akshare_eastmoney",
+                ),
+            )
+        applied = apply_manual_add_estimate(
+            connection,
+            estimate_id=estimate_id,
+            nav=FundNav("000001", date(2024, 1, 2), 2, "akshare_eastmoney"),
+        )
+        repeated = apply_manual_add_estimate(
+            connection,
+            estimate_id=estimate_id,
+            nav=FundNav("000001", date(2024, 1, 2), 2, "akshare_eastmoney"),
+        )
+        position = get_position_snapshot(connection, "000001")
+        actions = list_manual_add_actions(connection, confirmed.cycle_id)
+        occurrence = connection.execute(
+            "SELECT status, settlement_alert_event_id FROM manual_add_estimates"
+        ).fetchone()
+
+    assert recorded == ("0.15",)
+    assert applied is not None
+    assert repeated is None
+    assert position["units"] == pytest.approx(100 + (5000 / 1.01) / 2)
+    assert position["average_unit_cost"] == pytest.approx(
+        5200 / (100 + (5000 / 1.01) / 2)
+    )
+    assert position["is_estimated"] == 1
+    assert [row["tier_key"] for row in actions] == ["0.15"]
+    assert occurrence["status"] == "applied"
+    assert occurrence["settlement_alert_event_id"] == applied["event_id"]
+
+
+def test_position_sync_can_reconcile_pending_manual_estimate(tmp_path: Path) -> None:
+    sqlite_path = tmp_path / "bot.sqlite3"
+    _add_plan(sqlite_path)
+    with open_connection(sqlite_path) as connection:
+        upsert_fund_fee(
+            connection,
+            fund_symbol="000001",
+            fee_mode="fixed",
+            fee_value=1,
+        )
+        upsert_position_snapshot(
+            connection,
+            fund_symbol="000001",
+            units=0,
+            average_unit_cost=0,
+        )
+        confirmed = evaluate_drawdown_plan_rule(
+            connection,
+            list_rules(connection)[0],
+            _history([100, 84]),
+            expected_date=date(2024, 1, 2),
+        )
+        assert confirmed.notification is not None
+        estimate_id, _recorded = record_manual_addition(
+            connection,
+            rule_id=1,
+            cycle_id=confirmed.cycle_id,
+            source_alert_event_id=confirmed.notification.event_id,
+            fund_symbol="000001",
+            tiers=(DrawdownTier(0.15, 5000, "0.15"),),
+            action_at=datetime(2024, 1, 2, 10, tzinfo=UTC),
+            create_estimate=True,
+            cutoff_choice="before",
+            effective_date="2024-01-02",
+        )
+        item_keys = tuple(
+            str(item["key"])
+            for item in list_pending_position_items(connection, "000001")
+        )
+        position = reconcile_position_snapshot(
+            connection,
+            fund_symbol="000001",
+            units=2500,
+            average_unit_cost=2,
+            expected_item_keys=item_keys,
+            included=True,
+            synced_at=datetime(2024, 1, 3, tzinfo=UTC),
+        )
+        occurrence = connection.execute(
+            "SELECT status FROM manual_add_estimates WHERE id = ?",
+            (estimate_id,),
+        ).fetchone()
+
+    assert item_keys == (f"estimate:{estimate_id}",)
+    assert occurrence["status"] == "reconciled_by_sync"
+    assert position["units"] == 2500
+    assert position["is_estimated"] == 0
+
+
+def test_manual_add_without_setup_requires_and_reconciles_position_sync(
+    tmp_path: Path,
+) -> None:
+    sqlite_path = tmp_path / "bot.sqlite3"
+    _add_plan(sqlite_path)
+    with open_connection(sqlite_path) as connection:
+        confirmed = evaluate_drawdown_plan_rule(
+            connection,
+            list_rules(connection)[0],
+            _history([100, 84]),
+            expected_date=date(2024, 1, 2),
+        )
+        assert confirmed.notification is not None
+        estimate_id, recorded = record_manual_addition(
+            connection,
+            rule_id=1,
+            cycle_id=confirmed.cycle_id,
+            source_alert_event_id=confirmed.notification.event_id,
+            fund_symbol="000001",
+            tiers=(DrawdownTier(0.15, 5000, "0.15"),),
+            action_at=datetime(2024, 1, 2, 10, tzinfo=UTC),
+            create_estimate=False,
+        )
+        settings = get_fund_settings(connection, "000001")
+        item_keys = tuple(
+            str(item["key"])
+            for item in list_pending_position_items(connection, "000001")
+        )
+        reconcile_position_snapshot(
+            connection,
+            fund_symbol="000001",
+            units=2500,
+            average_unit_cost=2,
+            expected_item_keys=item_keys,
+            included=True,
+            synced_at=datetime(2024, 1, 3, tzinfo=UTC),
+        )
+        remaining = list_pending_position_items(connection, "000001")
+        reconciled_settings = get_fund_settings(connection, "000001")
+
+    assert estimate_id is None
+    assert recorded == ("0.15",)
+    assert settings["position_sync_required_since"] is not None
+    assert item_keys == (f"action:{confirmed.cycle_id}:0.15",)
+    assert remaining == []
+    assert reconciled_settings["position_sync_required_since"] is None
 
 
 def test_confirmed_evaluation_rejects_empty_plan_name(tmp_path: Path) -> None:

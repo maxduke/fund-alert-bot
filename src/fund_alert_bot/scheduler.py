@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Collection
-from datetime import date, datetime, time, tzinfo
+from datetime import date, datetime, time, timedelta, tzinfo
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
@@ -14,9 +14,11 @@ from fund_alert_bot.checks import (
     DrawdownPlanCheckResult,
     RuleNoDataSkip,
     evaluate_dca_rules,
+    evaluate_drawdown_plan_prealerts,
     evaluate_drawdown_plan_rules,
     evaluate_drawdown_rules,
     evaluate_profit_rules,
+    process_manual_add_estimates,
     reserve_drawdown_plan_data_unavailable_notice,
 )
 from fund_alert_bot.config import NotificationSettings
@@ -44,10 +46,12 @@ LOGGER = logging.getLogger(__name__)
 DEFAULT_AFTER_CLOSE_CHECK_TIME = "17:10"
 DEFAULT_BEFORE_CLOSE_CHECK_TIME = "14:50"
 DEFAULT_DCA_REMINDER_TIME = "09:30"
+DEFAULT_FUND_NAV_PROCESS_TIME = "08:30"
 MARKET_AFTER_CLOSE_JOB_ID = "market-after-close-check"
 MARKET_BEFORE_CLOSE_JOB_ID = "market-before-close-check"
 DRAW_DOWN_AFTER_CLOSE_JOB_ID = MARKET_AFTER_CLOSE_JOB_ID
 DCA_MORNING_JOB_ID = "dca-morning-reminder-check"
+FUND_NAV_PROCESS_JOB_ID = "fund-nav-process"
 WEEKDAY_CRON_FILTER = "mon-fri"
 
 
@@ -74,6 +78,12 @@ def parse_dca_reminder_time(raw_value: str) -> time:
     """Parse DCA_REMINDER_TIME as HH:MM."""
 
     return _parse_hhmm_time(raw_value, name="DCA_REMINDER_TIME")
+
+
+def parse_fund_nav_process_time(raw_value: str) -> time:
+    """Parse FUND_NAV_PROCESS_TIME as HH:MM."""
+
+    return _parse_hhmm_time(raw_value, name="FUND_NAV_PROCESS_TIME")
 
 
 def _parse_hhmm_time(raw_value: str, *, name: str) -> time:
@@ -135,6 +145,7 @@ def register_jobs(
     check_time: str = DEFAULT_AFTER_CLOSE_CHECK_TIME,
     before_close_check_time: str = DEFAULT_BEFORE_CLOSE_CHECK_TIME,
     dca_reminder_time: str = DEFAULT_DCA_REMINDER_TIME,
+    fund_nav_process_time: str = DEFAULT_FUND_NAV_PROCESS_TIME,
     market_data_provider: MarketDataProvider | None = None,
     market_calendar: MarketCalendar | None = None,
     notification_settings: NotificationSettings | None = None,
@@ -144,6 +155,7 @@ def register_jobs(
     parsed_time = parse_after_close_check_time(check_time)
     parsed_before_close_time = parse_before_close_check_time(before_close_check_time)
     parsed_dca_time = parse_dca_reminder_time(dca_reminder_time)
+    parsed_fund_nav_time = parse_fund_nav_process_time(fund_nav_process_time)
     if market_data_provider is None:
         market_data_provider = AkshareMarketDataProvider()
     if market_calendar is None:
@@ -175,6 +187,34 @@ def register_jobs(
         "Registered scheduled market reminder check for %s at %s %s",
         WEEKDAY_CRON_FILTER,
         parsed_time.strftime("%H:%M"),
+        timezone,
+    )
+
+    scheduler.add_job(
+        run_scheduled_fund_nav_process,
+        trigger=create_daily_dca_trigger(
+            reminder_time=parsed_fund_nav_time,
+            timezone=timezone,
+        ),
+        id=FUND_NAV_PROCESS_JOB_ID,
+        name="Feeder-fund exact-date NAV processing",
+        kwargs={
+            "application": application,
+            "sqlite_path": sqlite_path,
+            "allowed_user_ids": frozenset(allowed_user_ids),
+            "market_data_provider": market_data_provider,
+            "market_calendar": market_calendar,
+            "timezone": timezone,
+            "notification_settings": notification_settings,
+        },
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        misfire_grace_time=3600,
+    )
+    LOGGER.info(
+        "Registered feeder-fund NAV processing daily at %s %s",
+        parsed_fund_nav_time.strftime("%H:%M"),
         timezone,
     )
 
@@ -252,7 +292,8 @@ async def run_scheduled_before_close_check(
         "Scheduled realtime drawdown check started date=%s",
         check_date.isoformat(),
     )
-    result = None
+    drawdown_result = None
+    plan_result = None
     try:
         if market_calendar is None:
             market_calendar = CNMarketCalendar()
@@ -266,15 +307,60 @@ async def run_scheduled_before_close_check(
 
         with open_connection(sqlite_path) as connection:
             initialize_database(connection)
-            result = evaluate_drawdown_rules(
+            drawdown_result = evaluate_drawdown_rules(
                 connection,
                 market_data_provider,
                 today=check_date,
                 require_new_data_date=check_date,
                 include_latest=True,
             )
+            plan_rules = [
+                row
+                for row in list_enabled_rules(connection)
+                if row["type"] == "drawdown_plan"
+            ]
+            try:
+                confirmed_plan_day = bool(
+                    plan_rules
+                ) and market_calendar.confirmed_status(check_date)
+                confirmed_date = (
+                    _previous_confirmed_trading_day(market_calendar, check_date)
+                    if confirmed_plan_day
+                    else None
+                )
+            except MarketCalendarUnavailableError as exc:
+                plan_result = DrawdownPlanCheckResult(
+                    checked_rules=len(plan_rules),
+                    notifications=[],
+                    no_data_skips=[
+                        RuleNoDataSkip(
+                            rule_id=int(row["id"]),
+                            symbol=str(row["symbol"]),
+                            message=str(exc),
+                        )
+                        for row in plan_rules
+                    ],
+                    errors=[],
+                )
+            else:
+                plan_result = (
+                    evaluate_drawdown_plan_prealerts(
+                        connection,
+                        market_data_provider,
+                        market_date=check_date,
+                        confirmed_date=confirmed_date,
+                    )
+                    if confirmed_date is not None
+                    else DrawdownPlanCheckResult(len(plan_rules), [], [], [])
+                )
+            data_notice = reserve_drawdown_plan_data_unavailable_notice(
+                connection,
+                evaluation_date=check_date,
+                result=plan_result,
+                phase="before_close",
+            )
 
-        for status in result.statuses:
+        for status in drawdown_result.statuses:
             LOGGER.info(
                 "Realtime drawdown status rule_id=%s symbol=%s drawdown=%.2f%% "
                 "latest_price=%s latest_date=%s peak_price=%s peak_date=%s",
@@ -286,14 +372,17 @@ async def run_scheduled_before_close_check(
                 status.peak_price,
                 status.peak_date,
             )
-        for skip in result.no_data_skips:
+        for skip in [
+            *drawdown_result.no_data_skips,
+            *plan_result.no_data_skips,
+        ]:
             LOGGER.info(
                 "Scheduled realtime drawdown check skipped rule_id=%s symbol=%s: %s",
                 skip.rule_id,
                 skip.symbol,
                 skip.message,
             )
-        for error in result.errors:
+        for error in [*drawdown_result.errors, *plan_result.errors]:
             LOGGER.warning(
                 "Scheduled realtime drawdown check error rule_id=%s symbol=%s: %s",
                 error.rule_id,
@@ -305,24 +394,30 @@ async def run_scheduled_before_close_check(
             application=application,
             sqlite_path=sqlite_path,
             allowed_user_ids=allowed_user_ids,
-            notifications=result.notifications,
+            notifications=[
+                *drawdown_result.notifications,
+                *plan_result.notifications,
+                *([] if data_notice is None else [data_notice]),
+            ],
             notification_settings=notification_settings,
         )
     except Exception:
         LOGGER.exception("Scheduled realtime drawdown check failed")
         raise
     finally:
-        if result is None:
+        if drawdown_result is None or plan_result is None:
             LOGGER.info("Scheduled realtime drawdown check ended")
         else:
             LOGGER.info(
-                "Scheduled realtime drawdown check ended: checked_rules=%d "
+                "Scheduled realtime drawdown check ended: drawdown_rules=%d "
+                "plan_rules=%d "
                 "new_alerts=%d duplicate_alerts=%d no_data_skips=%d errors=%d",
-                result.checked_rules,
-                len(result.notifications),
-                result.skipped_duplicates,
-                len(result.no_data_skips),
-                len(result.errors),
+                drawdown_result.checked_rules,
+                plan_result.checked_rules,
+                len(drawdown_result.notifications) + len(plan_result.notifications),
+                drawdown_result.skipped_duplicates,
+                len(drawdown_result.no_data_skips) + len(plan_result.no_data_skips),
+                len(drawdown_result.errors) + len(plan_result.errors),
             )
 
 
@@ -482,6 +577,84 @@ async def run_scheduled_drawdown_check(
     await run_scheduled_market_check(**kwargs)
 
 
+async def run_scheduled_fund_nav_process(
+    *,
+    application: Application[Any, Any, Any, Any, Any, Any],
+    sqlite_path: str | Path,
+    allowed_user_ids: Collection[int],
+    market_data_provider: MarketDataProvider,
+    market_calendar: MarketCalendar,
+    timezone: str | tzinfo,
+    run_date: date | None = None,
+    notification_settings: NotificationSettings | None = None,
+) -> None:
+    """Settle pending manual additions from exact-date feeder-fund NAVs."""
+
+    processing_date = run_date or _current_date(timezone)
+    LOGGER.info("Feeder-fund NAV processing started date=%s", processing_date)
+    result = None
+    try:
+        await retry_pending_drawdown_plan_notifications(
+            application=application,
+            sqlite_path=sqlite_path,
+            allowed_user_ids=allowed_user_ids,
+            notification_settings=notification_settings,
+        )
+        with open_connection(sqlite_path) as connection:
+            initialize_database(connection)
+            result = process_manual_add_estimates(
+                connection,
+                market_data_provider,
+                market_calendar,
+                processing_date=processing_date,
+            )
+            data_notice = reserve_drawdown_plan_data_unavailable_notice(
+                connection,
+                evaluation_date=processing_date,
+                result=result,
+                phase="fund_nav",
+            )
+        for skip in result.no_data_skips:
+            LOGGER.info(
+                "Fund NAV unavailable rule_id=%s symbol=%s: %s",
+                skip.rule_id,
+                skip.symbol,
+                skip.message,
+            )
+        for error in result.errors:
+            LOGGER.warning(
+                "Fund NAV processing error rule_id=%s symbol=%s: %s",
+                error.rule_id,
+                error.symbol,
+                error.message,
+            )
+        await send_scheduled_notifications(
+            application=application,
+            sqlite_path=sqlite_path,
+            allowed_user_ids=allowed_user_ids,
+            notifications=[
+                *result.notifications,
+                *([] if data_notice is None else [data_notice]),
+            ],
+            notification_settings=notification_settings,
+        )
+    except Exception:
+        LOGGER.exception("Feeder-fund NAV processing failed")
+        raise
+    finally:
+        if result is None:
+            LOGGER.info("Feeder-fund NAV processing ended")
+        else:
+            LOGGER.info(
+                "Feeder-fund NAV processing ended checked=%d applied=%d "
+                "no_data=%d errors=%d",
+                result.checked_estimates,
+                len(result.notifications),
+                len(result.no_data_skips),
+                len(result.errors),
+            )
+
+
 async def run_scheduled_dca_check(
     *,
     application: Application[Any, Any, Any, Any, Any, Any],
@@ -596,6 +769,19 @@ async def retry_pending_drawdown_plan_notifications(
         notification_settings=notification_settings,
     )
     return len(notifications)
+
+
+def _previous_confirmed_trading_day(
+    market_calendar: MarketCalendar,
+    check_date: date,
+) -> date:
+    for days_back in range(1, 367):
+        candidate = check_date - timedelta(days=days_back)
+        if market_calendar.confirmed_status(candidate):
+            return candidate
+    raise MarketCalendarUnavailableError(
+        f"No prior confirmed CN trading day found before {check_date.isoformat()}."
+    )
 
 
 def _current_date(timezone: str | tzinfo) -> date:
