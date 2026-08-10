@@ -1109,6 +1109,14 @@ def apply_manual_add_estimate(
         position = get_position_snapshot(connection, str(occurrence["fund_symbol"]))
         if position is None:
             raise sqlite3.IntegrityError("Position snapshot is missing.")
+        settings = get_fund_settings(connection, str(occurrence["fund_symbol"]))
+        if (
+            settings is not None
+            and settings["position_sync_required_since"] is not None
+        ) or position["position_sync_required_since"] is not None:
+            raise sqlite3.IntegrityError(
+                "Position sync is required before applying pending estimates."
+            )
         gross_amount = float(occurrence["gross_amount"])
         fee_value = float(occurrence["fee_value"])
         net_amount = (

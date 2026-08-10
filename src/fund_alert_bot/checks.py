@@ -631,6 +631,22 @@ def process_manual_add_estimates(
         if processing_date <= effective_date:
             continue
         try:
+            settings = get_fund_settings(connection, fund_symbol)
+            position = get_position_snapshot(connection, fund_symbol)
+            if (
+                settings is not None
+                and settings["position_sync_required_since"] is not None
+            ) or (
+                position is not None
+                and position["position_sync_required_since"] is not None
+            ):
+                LOGGER.info(
+                    "Manual add estimate deferred estimate_id=%s fund_symbol=%s "
+                    "reason=position_sync_required",
+                    occurrence["id"],
+                    fund_symbol,
+                )
+                continue
             if not market_calendar.confirmed_status(effective_date):
                 raise ValueError(
                     f"Effective date {effective_date} is not a confirmed open day."
