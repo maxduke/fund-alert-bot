@@ -73,6 +73,7 @@ from fund_alert_bot.rules.drawdown_plan import (
     DrawdownPlanConfig,
     DrawdownTier,
     evaluate_drawdown_plan,
+    format_plan_amount,
     format_plan_percent,
     parse_drawdown_plan_config,
     required_history_start,
@@ -603,7 +604,7 @@ def load_manual_add_selection(
 def format_manual_add_confirmation(selection: ManualAddSelection) -> str:
     """Show exactly what a later callback would record."""
 
-    total = sum(float(tier.amount) for tier in selection.tiers)
+    total = sum((tier.amount for tier in selection.tiers), start=0)
     lines = [
         "Confirm a completed manual addition",
         "",
@@ -611,10 +612,11 @@ def format_manual_add_confirmation(selection: ManualAddSelection) -> str:
         f"Fund: {selection.fund_symbol}",
         "Selected tiers:",
         *(
-            f"• -{format_plan_percent(tier.drawdown)} → ¥{tier.amount:,.2f}"
+            f"• -{format_plan_percent(tier.drawdown)} → "
+            f"{format_plan_amount(tier.amount)}"
             for tier in selection.tiers
         ),
-        f"Configured gross total: ¥{total:,.2f}",
+        f"Configured gross total: {format_plan_amount(total)}",
         f"Position estimate readiness: {selection.readiness}",
         "",
         "Continue only if you already submitted the fund subscription.",
@@ -975,11 +977,11 @@ def build_drawdown_plan_preview(
         f"Lookback: {command.config.lookback_days} calendar days",
         "Tiers (incremental):",
         *(
-            f"-{format_plan_percent(tier.drawdown)} → ¥{tier.amount:,.2f}"
+            f"-{format_plan_percent(tier.drawdown)} → {format_plan_amount(tier.amount)}"
             for tier in command.config.tiers
         ),
         "Maximum one-cycle total: "
-        f"¥{sum(tier.amount for tier in command.config.tiers):,.2f}",
+        f"{format_plan_amount(sum(tier.amount for tier in command.config.tiers))}",
         "MA250 / 20-session slope: context only",
         f"Plan readiness: {readiness}",
     ]
@@ -1077,7 +1079,7 @@ def format_plan_overview(
                     if next_tier is None
                     else "Next open tier: "
                     f"-{format_plan_percent(next_tier.drawdown)} / "
-                    f"¥{next_tier.amount:,.2f}"
+                    f"{format_plan_amount(next_tier.amount)}"
                 ),
                 *_format_position_lines(status),
             )
@@ -1140,7 +1142,7 @@ def format_plan_details(result: DrawdownPlanStatusResult) -> str:
                 state = "open"
             lines.append(
                 f"• -{format_plan_percent(tier.drawdown)} / "
-                f"¥{tier.amount:,.2f}: {state}"
+                f"{format_plan_amount(tier.amount)}: {state}"
             )
         next_tier = _next_open_tier(status)
         if next_tier is None:

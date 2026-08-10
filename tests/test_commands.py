@@ -159,8 +159,8 @@ def test_parse_valid_dca_command_with_english_weekday() -> None:
 
 def test_fractional_drawdown_tiers_keep_precision_in_actions_and_confirmation() -> None:
     tiers = (
-        DrawdownTier(0.151, 100.25, "0.151"),
-        DrawdownTier(0.154, 100.25, "0.154"),
+        DrawdownTier(0.151, 100.005, "0.151"),
+        DrawdownTier(0.154, 100.006, "0.154"),
     )
 
     rows = _drawdown_plan_action_rows(1, 2, tiers)
@@ -180,11 +180,12 @@ def test_fractional_drawdown_tiers_keep_precision_in_actions_and_confirmation() 
     )
 
     assert [rows[1][0][0], rows[2][0][0]] == [
-        "仅记录 -15.1% ¥100.25",
-        "仅记录 -15.4% ¥100.25",
+        "仅记录 -15.1% ¥100.005",
+        "仅记录 -15.4% ¥100.006",
     ]
-    assert "• -15.1% → ¥100.25" in confirmation
-    assert "• -15.4% → ¥100.25" in confirmation
+    assert "• -15.1% → ¥100.005" in confirmation
+    assert "• -15.4% → ¥100.006" in confirmation
+    assert "Configured gross total: ¥200.011" in confirmation
 
 
 def test_drawdown_tier_callbacks_use_bounded_indexes() -> None:
@@ -1005,7 +1006,7 @@ def test_drawdown_plan_preview_is_read_only_and_shows_total_and_readiness() -> N
     finally:
         connection.close()
 
-    assert "Maximum one-cycle total: ¥15,000.00" in preview
+    assert "Maximum one-cycle total: ¥15,000" in preview
     assert "Plan readiness: SETUP_REQUIRED" in preview
     assert "Current drawdown preview: -20.0%" in preview
     assert "Confirm only if these codes" in preview
@@ -1216,11 +1217,11 @@ def test_plans_and_check_show_plan_state_without_mutation(tmp_path) -> None:
         ]
 
     assert "Drawdown: -20.0%" in message.replies[0]
-    assert "Next open tier: -15% / ¥5,000.00" in message.replies[0]
+    assert "Next open tier: -15% / ¥5,000" in message.replies[0]
     assert "Drawdown Add Plan status (read-only)" in message.replies[1]
     assert "Read-only Drawdown Add Plans checked: 1" in message.replies[1]
     assert "No enabled drawdown_from_high" not in message.replies[1]
-    assert "• -15% / ¥5,000.00: open" in message.replies[1]
+    assert "• -15% / ¥5,000: open" in message.replies[1]
     assert counts == [0, 0, 0]
 
 
