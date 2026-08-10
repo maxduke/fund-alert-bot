@@ -479,7 +479,24 @@ def evaluate_drawdown_plan_prealerts(
                     expected_date=confirmed_date,
                 )
                 if catch_up.notification is not None:
-                    notifications.append(catch_up.notification)
+                    catch_up_text = catch_up.notification.text.split(
+                        "\nOnly after you actually subscribe, record it with:",
+                        maxsplit=1,
+                    )[0]
+                    notifications.append(
+                        AlertNotification(
+                            event_id=catch_up.notification.event_id,
+                            title=catch_up.notification.title,
+                            text=(
+                                f"{catch_up_text}\n"
+                                "Delayed confirmation for the previous trading day; "
+                                "action buttons are unavailable.\n"
+                                "If you bought, wait for the fund platform to settle, "
+                                "then run /sync_position.\n"
+                                "This is a reminder only. No trade has been placed."
+                            ),
+                        )
+                    )
                 config, active_cycle, recorded_tier_keys = _load_drawdown_plan_state(
                     connection, rule
                 )

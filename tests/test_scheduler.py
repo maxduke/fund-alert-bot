@@ -485,7 +485,11 @@ def test_before_close_catches_up_missed_confirmed_plan_tiers(tmp_path: Path) -> 
     assert cycle["last_evaluated_date"] == "2024-01-02"
     assert [row["tier_key"] for row in tiers] == ["0.15", "0.2"]
     assert len(application.bot.messages) == 1
-    assert "Buy-plan reminder — A500" in application.bot.messages[0]["text"]
+    message = application.bot.messages[0]
+    assert "Buy-plan reminder — A500" in message["text"]
+    assert "/mark_added" not in message["text"]
+    assert "/sync_position" in message["text"]
+    assert "reply_markup" not in message
     assert all("pre_alert" not in row["alert_key"] for row in events)
 
 
