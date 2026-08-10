@@ -592,6 +592,8 @@ def get_drawdown_plan_action_event(
     rule_id: int,
     event_id: int | None = None,
     data_date: str | None = None,
+    cycle_id: int | None = None,
+    required_tier_keys: Sequence[str] = (),
 ) -> sqlite3.Row | None:
     """Return one enabled plan event eligible to start a manual-add action."""
 
@@ -603,6 +605,20 @@ def get_drawdown_plan_action_event(
     if data_date is not None:
         filters.append("json_extract(e.payload_json, '$.data_date') = ?")
         values.append(data_date)
+    if cycle_id is not None:
+        filters.append("json_extract(e.payload_json, '$.cycle_id') = ?")
+        values.append(cycle_id)
+    for tier_key in required_tier_keys:
+        filters.append(
+            """
+            EXISTS (
+                SELECT 1
+                FROM json_each(e.payload_json, '$.crossed_tiers') AS tier
+                WHERE json_extract(tier.value, '$.key') = ?
+            )
+            """
+        )
+        values.append(tier_key)
     return connection.execute(
         f"""
         SELECT

@@ -485,11 +485,18 @@ def load_manual_add_selection(
 ) -> ManualAddSelection:
     """Load and validate eligible tiers from a stored same-day alert event."""
 
+    active = get_active_drawdown_cycle(connection, plan_id)
+    if active is None:
+        raise CommandParseError(
+            "No eligible same-day plan reminder was found. Use /sync_position "
+            "after your platform position updates."
+        )
     event = get_drawdown_plan_action_event(
         connection,
         rule_id=plan_id,
         event_id=event_id,
         data_date=action_date.isoformat(),
+        cycle_id=int(active["id"]),
     )
     if event is None:
         raise CommandParseError(
@@ -501,11 +508,36 @@ def load_manual_add_selection(
         asset_type=str(event["asset_type"]),
         params=_load_params(str(event["params_json"])),
     )
+    if event_id is None and tier_percentages:
+        requested = tuple(
+            tier
+            for tier in config.tiers
+            if any(
+                math.isclose(
+                    tier.drawdown * 100,
+                    percentage,
+                    rel_tol=0,
+                    abs_tol=1e-10,
+                )
+                for percentage in tier_percentages
+            )
+        )
+        if len(requested) != len(tier_percentages):
+            raise CommandParseError("One or more selected tiers are not configured.")
+        event = get_drawdown_plan_action_event(
+            connection,
+            rule_id=plan_id,
+            data_date=action_date.isoformat(),
+            cycle_id=int(active["id"]),
+            required_tier_keys=tuple(tier.key for tier in requested),
+        )
+        if event is None:
+            raise CommandParseError(
+                "Selected tiers are not all present in a same-day reminder."
+            )
     payload = json.loads(str(event["payload_json"]))
-    active = get_active_drawdown_cycle(connection, plan_id)
     if (
-        active is None
-        or int(payload.get("cycle_id", -1)) != int(active["id"])
+        int(payload.get("cycle_id", -1)) != int(active["id"])
         or str(payload.get("data_date")) != action_date.isoformat()
     ):
         raise CommandParseError(
@@ -537,7 +569,7 @@ def load_manual_add_selection(
         )
         if len(selected) != len(tier_percentages):
             raise CommandParseError(
-                "Selected tiers are not all present in the latest same-day reminder."
+                "Selected tiers are not all present in a same-day reminder."
             )
     if not selected:
         raise CommandParseError("No eligible tiers were selected.")

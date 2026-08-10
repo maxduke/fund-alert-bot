@@ -23,6 +23,7 @@ from fund_alert_bot.commands import (
     evaluate_profit_rules,
     format_check_summary,
     format_rules_list,
+    load_manual_add_selection,
     parse_add_dca_args,
     parse_add_drawdown_args,
     parse_add_drawdown_plan_args,
@@ -641,6 +642,43 @@ def test_mark_added_records_one_pending_estimate_after_confirmation(tmp_path) ->
     assert len(actions) == 1
     assert actions[0]["tier_key"] == "0.15"
     assert all("waiting for exact dated NAV" in edit for edit in query.edits)
+
+
+def test_mark_added_fallback_matches_earlier_same_day_multi_tier_alert(
+    tmp_path,
+) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    rule_id = _prepare_ready_plan_alert(
+        sqlite_path,
+        closes=[100, 80],
+        expected_date=date(2024, 1, 2),
+    )
+
+    with open_connection(sqlite_path) as connection:
+        original = connection.execute("SELECT * FROM alert_events").fetchone()
+        payload = json.loads(str(original["payload_json"]))
+        payload["crossed_tiers"] = payload["crossed_tiers"][:1]
+        payload["total_amount"] = 5000
+        connection.execute(
+            """
+            INSERT INTO alert_events (
+                rule_id, alert_key, title, message, payload_json, triggered_at
+            )
+            VALUES (?, ?, 'close', 'close', ?, '2024-01-02T08:00:00Z')
+            """,
+            (rule_id, "later-subset", json.dumps(payload)),
+        )
+        connection.commit()
+
+        selection = load_manual_add_selection(
+            connection,
+            plan_id=rule_id,
+            action_date=date(2024, 1, 2),
+            tier_percentages=(15, 20),
+        )
+
+    assert selection.event_id == original["id"]
+    assert [tier.key for tier in selection.tiers] == ["0.15", "0.2"]
 
 
 def test_mark_added_after_cutoff_uses_next_confirmed_open_day(tmp_path) -> None:
