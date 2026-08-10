@@ -1353,6 +1353,7 @@ def build_command_handlers(
     position_sync_drafts: dict[str, PositionSyncDraft] = {}
     clock = now_factory or (lambda: datetime.now(UTC))
     timezone_info = ZoneInfo(timezone)
+    cn_market_timezone = ZoneInfo("Asia/Shanghai")
 
     async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context
@@ -1648,7 +1649,7 @@ def build_command_handlers(
             return
         try:
             command = parse_mark_added_args(getattr(context, "args", ()))
-            action_date = _clock_now(clock).astimezone(timezone_info).date()
+            action_date = _clock_now(clock).astimezone(cn_market_timezone).date()
             with open_connection(sqlite_path) as connection:
                 initialize_database(connection)
                 selection = load_manual_add_selection(
@@ -1719,7 +1720,7 @@ def build_command_handlers(
                     connection,
                     plan_id=plan_id,
                     event_id=event_id,
-                    action_date=_clock_now(clock).astimezone(timezone_info).date(),
+                    action_date=_clock_now(clock).astimezone(cn_market_timezone).date(),
                     select_all=selector == "all",
                     tier_index=tier_index,
                 )
@@ -1758,7 +1759,7 @@ def build_command_handlers(
         if draft.completed_message is not None:
             await query.edit_message_text(draft.completed_message)
             return
-        now = _clock_now(clock).astimezone(timezone_info)
+        now = _clock_now(clock).astimezone(cn_market_timezone)
         if now.date() != draft.selection.market_date:
             await query.edit_message_text(
                 "This reminder expired after its market date. Use /sync_position "
@@ -1845,9 +1846,9 @@ def build_command_handlers(
             return
         if action != "match" or draft.selection.readiness != "READY":
             return
-        local_now = _clock_now(clock).astimezone(timezone_info)
+        cn_now = _clock_now(clock).astimezone(cn_market_timezone)
         cutoff = time.fromisoformat(draft.selection.cutoff)
-        if local_now.timetz().replace(tzinfo=None) < cutoff:
+        if cn_now.timetz().replace(tzinfo=None) < cutoff:
             await commit_manual_add(
                 query,
                 draft,

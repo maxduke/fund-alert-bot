@@ -861,7 +861,8 @@ def test_mark_added_after_cutoff_uses_next_confirmed_open_day(tmp_path) -> None:
         market_calendar=FakeMarketCalendar(
             open_dates={date(2024, 1, 5), date(2024, 1, 8)}
         ),
-        now_factory=lambda: datetime(2024, 1, 5, 7, 10, tzinfo=UTC),
+        timezone="America/New_York",
+        now_factory=lambda: datetime(2024, 1, 5, 9, 10, tzinfo=UTC),
     )
     message = FakeMessage()
     update = SimpleNamespace(
