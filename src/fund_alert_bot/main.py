@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import sys
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from fund_alert_bot.commands import create_application
 from fund_alert_bot.config import load_settings
@@ -67,6 +69,7 @@ def run() -> None:
             application=application,
             sqlite_path=settings.sqlite_path,
             allowed_user_ids=settings.telegram_allowed_user_ids,
+            action_date=datetime.now(ZoneInfo(settings.timezone)).date(),
             notification_settings=settings.notifications,
         )
         scheduler.start()

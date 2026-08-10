@@ -92,6 +92,12 @@ def test_compose_preserves_schedule_environment_overrides() -> None:
         assert f"${{{name}:-{default}}}" in compose
 
 
+def test_startup_retry_uses_configured_timezone_date() -> None:
+    source = (Path(__file__).parents[1] / "src/fund_alert_bot/main.py").read_text()
+
+    assert "action_date=datetime.now(ZoneInfo(settings.timezone)).date()" in source
+
+
 def test_akshare_settings_from_environment(monkeypatch) -> None:
     monkeypatch.setenv("AKSHARE_RETRIES", "5")
     monkeypatch.setenv("AKSHARE_RETRY_DELAY_SECONDS", "1.25")
