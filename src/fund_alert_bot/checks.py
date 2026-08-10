@@ -751,6 +751,11 @@ def derive_plan_readiness(
         for item, absent in (
             ("fund fee", settings is None or settings["fee_mode"] is None),
             ("position snapshot", position is None),
+            (
+                "position sync required",
+                settings is not None
+                and settings["position_sync_required_since"] is not None,
+            ),
         )
         if absent
     )

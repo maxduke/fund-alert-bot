@@ -752,6 +752,13 @@ def record_manual_addition(
             position = get_position_snapshot(connection, fund_symbol)
             if settings is None or settings["fee_mode"] is None or position is None:
                 raise sqlite3.IntegrityError("Plan setup is no longer READY.")
+            if (
+                settings["position_sync_required_since"] is not None
+                or position["position_sync_required_since"] is not None
+            ):
+                raise sqlite3.IntegrityError(
+                    "Position sync is required before another estimate."
+                )
             gross_amount = sum(float(tier.amount) for tier in new_tiers)
             fee_mode = str(settings["fee_mode"])
             fee_value = float(settings["fee_value"])

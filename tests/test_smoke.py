@@ -80,6 +80,18 @@ def test_scheduler_settings_from_environment(monkeypatch) -> None:
     assert settings.fund_nav_process_time == "08:45"
 
 
+def test_compose_preserves_schedule_environment_overrides() -> None:
+    compose = (Path(__file__).parents[1] / "docker-compose.yml").read_text()
+
+    for name, default in (
+        ("AFTER_CLOSE_CHECK_TIME", "17:10"),
+        ("BEFORE_CLOSE_CHECK_TIME", "14:50"),
+        ("DCA_REMINDER_TIME", "09:30"),
+        ("FUND_NAV_PROCESS_TIME", "08:30"),
+    ):
+        assert f"${{{name}:-{default}}}" in compose
+
+
 def test_akshare_settings_from_environment(monkeypatch) -> None:
     monkeypatch.setenv("AKSHARE_RETRIES", "5")
     monkeypatch.setenv("AKSHARE_RETRY_DELAY_SECONDS", "1.25")

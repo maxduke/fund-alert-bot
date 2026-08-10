@@ -9,6 +9,7 @@ import pandas as pd
 import pytest
 
 from fund_alert_bot.checks import (
+    derive_plan_readiness,
     evaluate_drawdown_plan_rule,
     evaluate_drawdown_plan_rules,
     read_drawdown_plan_statuses,
@@ -447,6 +448,71 @@ def test_manual_add_without_setup_requires_and_reconciles_position_sync(
     assert item_keys == (f"action:{confirmed.cycle_id}:0.15",)
     assert remaining == []
     assert reconciled_settings["position_sync_required_since"] is None
+
+
+def test_unresolved_manual_add_blocks_later_position_estimate(tmp_path: Path) -> None:
+    sqlite_path = tmp_path / "bot.sqlite3"
+    _add_plan(sqlite_path)
+    with open_connection(sqlite_path) as connection:
+        upsert_fund_fee(
+            connection,
+            fund_symbol="000001",
+            fee_mode="rate",
+            fee_value=0.0015,
+        )
+        upsert_position_snapshot(
+            connection,
+            fund_symbol="000001",
+            units=1000,
+            average_unit_cost=1.2,
+        )
+        rule = list_rules(connection)[0]
+        first = evaluate_drawdown_plan_rule(
+            connection,
+            rule,
+            _history([100, 84]),
+            expected_date=date(2024, 1, 2),
+        )
+        record_manual_addition(
+            connection,
+            rule_id=1,
+            cycle_id=first.cycle_id,
+            source_alert_event_id=first.notification.event_id,
+            fund_symbol="000001",
+            tiers=(DrawdownTier(0.15, 5000, "0.15"),),
+            action_at=datetime(2024, 1, 2, 10, tzinfo=UTC),
+            create_estimate=False,
+        )
+        readiness = derive_plan_readiness(connection, "000001")
+        second = evaluate_drawdown_plan_rule(
+            connection,
+            rule,
+            _history([100, 84, 79]),
+            expected_date=date(2024, 1, 3),
+        )
+
+        with pytest.raises(sqlite3.IntegrityError, match="Position sync is required"):
+            record_manual_addition(
+                connection,
+                rule_id=1,
+                cycle_id=second.cycle_id,
+                source_alert_event_id=second.notification.event_id,
+                fund_symbol="000001",
+                tiers=(DrawdownTier(0.20, 10000, "0.2"),),
+                action_at=datetime(2024, 1, 3, 10, tzinfo=UTC),
+                create_estimate=True,
+                cutoff_choice="before",
+                effective_date="2024-01-03",
+            )
+
+        actions = list_manual_add_actions(connection, first.cycle_id)
+        estimate_count = connection.execute(
+            "SELECT COUNT(*) FROM manual_add_estimates"
+        ).fetchone()[0]
+
+    assert [row["tier_key"] for row in actions] == ["0.15"]
+    assert estimate_count == 0
+    assert readiness == ("SETUP_REQUIRED", ("position sync required",))
 
 
 def test_confirmed_evaluation_rejects_empty_plan_name(tmp_path: Path) -> None:
