@@ -292,6 +292,7 @@ def evaluate_drawdown_plan_rule(
     *,
     expected_date: date,
     same_day_actions: bool = True,
+    initialize_only: bool = False,
 ) -> DrawdownPlanRuleResult:
     """Evaluate and atomically persist one drawdown plan."""
 
@@ -315,16 +316,18 @@ def evaluate_drawdown_plan_rule(
         active_cycle=active_cycle,
         recorded_tier_keys=recorded_tier_keys,
     )
-    alert = build_drawdown_plan_alert(
-        rule_id=rule_id,
-        reference_symbol=reference_symbol,
-        name=name,
-        config=config,
-        evaluation=evaluation,
-    )
+    alert = None
+    if not initialize_only:
+        alert = build_drawdown_plan_alert(
+            rule_id=rule_id,
+            reference_symbol=reference_symbol,
+            name=name,
+            config=config,
+            evaluation=evaluation,
+        )
     if alert is not None and not same_day_actions:
         alert["message"] = format_delayed_drawdown_plan_message(str(alert["message"]))
-    tiers = evaluation.newly_crossed_tiers
+    tiers = () if initialize_only else evaluation.newly_crossed_tiers
     cycle_id, event_id = persist_drawdown_plan_evaluation(
         connection,
         rule_id=rule_id,
@@ -493,10 +496,18 @@ def evaluate_drawdown_plan_prealerts(
                 market_data_provider,
                 end_date=confirmed_date,
             )
-            if (
-                active_cycle is None
-                or active_cycle.last_evaluated_date < confirmed_date
-            ):
+            if active_cycle is None:
+                evaluate_drawdown_plan_rule(
+                    connection,
+                    rule,
+                    history,
+                    expected_date=confirmed_date,
+                    initialize_only=True,
+                )
+                config, active_cycle, recorded_tier_keys = _load_drawdown_plan_state(
+                    connection, rule
+                )
+            elif active_cycle.last_evaluated_date < confirmed_date:
                 catch_up = evaluate_drawdown_plan_rule(
                     connection,
                     rule,

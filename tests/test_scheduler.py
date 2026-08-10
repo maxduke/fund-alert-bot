@@ -390,15 +390,15 @@ def test_scheduled_before_close_plan_prealert_does_not_consume_tiers(
     _add_drawdown_plan(sqlite_path)
     application = FakeApplication()
     provider = FakeProvider(
-        _plan_history([100]),
+        _plan_history([100, 80]),
         realtime_quote=RealtimeQuote(
             symbol="510300",
             price=79,
-            previous_close=100,
+            previous_close=80,
             volume=100,
             amount=1000,
             source="eastmoney",
-            fetched_at=datetime(2024, 1, 2, 6, 50, tzinfo=ZoneInfo("UTC")),
+            fetched_at=datetime(2024, 1, 3, 6, 50, tzinfo=ZoneInfo("UTC")),
         ),
     )
     market_calendar = FakeMarketCalendar(is_trading_day=True)
@@ -412,7 +412,7 @@ def test_scheduled_before_close_plan_prealert_does_not_consume_tiers(
                 market_data_provider=provider,
                 market_calendar=market_calendar,
                 timezone="Asia/Shanghai",
-                run_date=date(2024, 1, 2),
+                run_date=date(2024, 1, 3),
             )
         )
 
@@ -429,7 +429,7 @@ def test_scheduled_before_close_plan_prealert_does_not_consume_tiers(
 
     assert len(application.bot.messages) == 1
     assert "Realtime estimate before close" in application.bot.messages[0]["text"]
-    assert event["alert_key"] == "1:drawdown_plan:pre_alert:2024-01-02"
+    assert event["alert_key"] == "1:drawdown_plan:pre_alert:2024-01-03"
     assert event["notification_status"] == "sent"
     assert cycle_count == 1
     assert tier_count == 0
