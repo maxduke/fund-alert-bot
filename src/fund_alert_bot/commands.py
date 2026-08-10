@@ -2120,7 +2120,15 @@ def build_command_handlers(
             return
         message = format_position_snapshot(row, None)
         if choice == "not_included":
-            message += "\nPending estimates remain eligible for dated-NAV processing."
+            if any(key.startswith("estimate:") for key in draft.item_keys):
+                message += (
+                    "\nPending estimates remain eligible for dated-NAV processing."
+                )
+            if any(key.startswith("action:") for key in draft.item_keys):
+                message += (
+                    "\nUnestimated manual additions still require another "
+                    "/sync_position after the platform units settle."
+                )
         draft.completed_message = message
         await query.edit_message_text(message)
 
