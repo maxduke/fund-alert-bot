@@ -18,6 +18,7 @@ from fund_alert_bot.checks import (
     evaluate_drawdown_plan_rules,
     evaluate_drawdown_rules,
     evaluate_profit_rules,
+    format_delayed_drawdown_plan_message,
     process_manual_add_estimates,
     reserve_drawdown_plan_data_unavailable_notice,
 )
@@ -447,6 +448,7 @@ async def run_scheduled_market_check(
             application=application,
             sqlite_path=sqlite_path,
             allowed_user_ids=allowed_user_ids,
+            action_date=check_date,
             notification_settings=notification_settings,
         )
         if market_calendar is None:
@@ -598,6 +600,7 @@ async def run_scheduled_fund_nav_process(
             application=application,
             sqlite_path=sqlite_path,
             allowed_user_ids=allowed_user_ids,
+            action_date=processing_date,
             notification_settings=notification_settings,
         )
         with open_connection(sqlite_path) as connection:
@@ -674,6 +677,7 @@ async def run_scheduled_dca_check(
             application=application,
             sqlite_path=sqlite_path,
             allowed_user_ids=allowed_user_ids,
+            action_date=check_date,
             notification_settings=notification_settings,
         )
         with open_connection(sqlite_path) as connection:
@@ -747,6 +751,7 @@ async def retry_pending_drawdown_plan_notifications(
     application: Application[Any, Any, Any, Any, Any, Any],
     sqlite_path: str | Path,
     allowed_user_ids: Collection[int],
+    action_date: date,
     notification_settings: NotificationSettings | None = None,
 ) -> int:
     """Retry durable plan reminders independently of market-day evaluation."""
@@ -757,7 +762,12 @@ async def retry_pending_drawdown_plan_notifications(
             AlertNotification(
                 event_id=int(row["id"]),
                 title=str(row["title"]),
-                text=str(row["message"]),
+                text=(
+                    format_delayed_drawdown_plan_message(str(row["message"]))
+                    if row["data_date"] is not None
+                    and str(row["data_date"]) < action_date.isoformat()
+                    else str(row["message"])
+                ),
             )
             for row in list_retryable_drawdown_plan_alert_events(connection)
         ]

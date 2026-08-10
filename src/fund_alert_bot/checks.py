@@ -323,18 +323,7 @@ def evaluate_drawdown_plan_rule(
         evaluation=evaluation,
     )
     if alert is not None and not same_day_actions:
-        alert_text = str(alert["message"]).split(
-            "\nOnly after you actually subscribe, record it with:",
-            maxsplit=1,
-        )[0]
-        alert["message"] = (
-            f"{alert_text}\n"
-            "Delayed confirmation for the previous trading day; "
-            "action buttons are unavailable.\n"
-            "If you bought, wait for the fund platform to settle, then run "
-            "/sync_position.\n"
-            "This is a reminder only. No trade has been placed."
-        )
+        alert["message"] = format_delayed_drawdown_plan_message(str(alert["message"]))
     tiers = evaluation.newly_crossed_tiers
     cycle_id, event_id = persist_drawdown_plan_evaluation(
         connection,
@@ -387,6 +376,24 @@ def evaluate_drawdown_plan_rule(
         cycle_id=cycle_id,
         evaluation=evaluation,
         notification=notification,
+    )
+
+
+def format_delayed_drawdown_plan_message(message: str) -> str:
+    """Remove expired same-day actions from a delayed plan reminder."""
+
+    alert_text, marker, _remainder = message.partition(
+        "\nOnly after you actually subscribe, record it with:"
+    )
+    if not marker:
+        return message
+    return (
+        f"{alert_text}\n"
+        "Delayed confirmation for an earlier trading day; "
+        "action buttons are unavailable.\n"
+        "If you bought, wait for the fund platform to settle, then run "
+        "/sync_position.\n"
+        "This is a reminder only. No trade has been placed."
     )
 
 

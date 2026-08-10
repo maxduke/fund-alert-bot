@@ -1658,7 +1658,12 @@ def list_retryable_drawdown_plan_alert_events(
     return list(
         connection.execute(
             """
-            SELECT e.id, e.title, e.message, e.notification_status
+            SELECT
+                e.id,
+                e.title,
+                e.message,
+                e.notification_status,
+                json_extract(e.payload_json, '$.data_date') AS data_date
             FROM alert_events AS e
             JOIN rules AS r ON r.id = e.rule_id
             WHERE

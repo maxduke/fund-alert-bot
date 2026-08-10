@@ -532,11 +532,44 @@ def test_failed_before_close_prealert_is_not_retried_after_expiry(
             application=application,
             sqlite_path=sqlite_path,
             allowed_user_ids={123},
+            action_date=date(2024, 1, 3),
         )
     )
 
     assert retried == 0
     assert application.bot.messages == []
+
+
+def test_retry_expired_close_plan_alert_strips_same_day_command(
+    tmp_path: Path,
+) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    _add_drawdown_plan(sqlite_path)
+    with open_connection(sqlite_path) as connection:
+        result = evaluate_drawdown_plan_rule(
+            connection,
+            list_rules(connection)[0],
+            _plan_history([100, 80]),
+            expected_date=date(2024, 1, 2),
+        )
+        assert result.notification is not None
+
+    application = FakeApplication()
+    retried = asyncio.run(
+        scheduler.retry_pending_drawdown_plan_notifications(
+            application=application,
+            sqlite_path=sqlite_path,
+            allowed_user_ids={123},
+            action_date=date(2024, 1, 3),
+        )
+    )
+
+    assert retried == 1
+    assert len(application.bot.messages) == 1
+    message = application.bot.messages[0]
+    assert "/mark_added" not in message["text"]
+    assert "/sync_position" in message["text"]
+    assert "reply_markup" not in message
 
 
 def test_before_close_plan_uses_sina_when_eastmoney_quote_fails_validation(
