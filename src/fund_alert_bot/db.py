@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from fund_alert_bot.rules.drawdown_plan import format_plan_percent
+from fund_alert_bot.rules.drawdown_plan import format_plan_amount, format_plan_percent
 
 ALERT_NOTIFICATION_PENDING = "pending"
 ALERT_NOTIFICATION_SENT = "sent"
@@ -1151,7 +1151,7 @@ def apply_manual_add_estimate(
                 f"Fund: {occurrence['fund_symbol']}",
                 "Configured tiers: "
                 + ", ".join("-" + format_plan_percent(str(key)) for key in tier_keys),
-                f"Gross amount: ¥{gross_amount:,.2f}",
+                f"Gross amount: {format_plan_amount(gross_amount)}",
                 f"Effective date: {occurrence['effective_date']}",
                 f"Unit NAV: {nav_value:.12g} on {nav.date}",
                 f"NAV source: {nav.source}",
