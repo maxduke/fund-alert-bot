@@ -722,6 +722,7 @@ def test_scheduled_fund_nav_process_applies_pending_add_once(tmp_path: Path) -> 
             tiers=(DrawdownTier(0.15, 5000, "0.15"),),
             action_at=datetime(2024, 1, 2, 14, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
             create_estimate=True,
+            cutoff_time="15:00",
             cutoff_choice="before",
             effective_date="2024-01-02",
         )

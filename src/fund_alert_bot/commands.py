@@ -1787,6 +1787,7 @@ def build_command_handlers(
                     tiers=draft.selection.tiers,
                     action_at=now,
                     create_estimate=create_estimate,
+                    cutoff_time=(draft.selection.cutoff if create_estimate else None),
                     cutoff_choice=cutoff_choice,
                     effective_date=(
                         None if effective_date is None else effective_date.isoformat()

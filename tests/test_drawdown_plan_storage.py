@@ -302,6 +302,7 @@ def test_manual_add_estimate_applies_exact_nav_once(tmp_path: Path) -> None:
             tiers=(DrawdownTier(0.151, 5000.005, "0.151"),),
             action_at=datetime(2024, 1, 2, 10, tzinfo=UTC),
             create_estimate=True,
+            cutoff_time="15:00",
             cutoff_choice="before",
             effective_date="2024-01-02",
         )
@@ -380,6 +381,7 @@ def test_position_sync_can_reconcile_pending_manual_estimate(tmp_path: Path) -> 
             tiers=(DrawdownTier(0.15, 5000, "0.15"),),
             action_at=datetime(2024, 1, 2, 10, tzinfo=UTC),
             create_estimate=True,
+            cutoff_time="15:00",
             cutoff_choice="before",
             effective_date="2024-01-02",
         )
@@ -506,6 +508,7 @@ def test_unresolved_manual_add_blocks_later_position_estimate(tmp_path: Path) ->
                 tiers=(DrawdownTier(0.20, 10000, "0.2"),),
                 action_at=datetime(2024, 1, 3, 10, tzinfo=UTC),
                 create_estimate=True,
+                cutoff_time="15:00",
                 cutoff_choice="before",
                 effective_date="2024-01-03",
             )
@@ -552,6 +555,7 @@ def test_position_sync_marker_defers_older_pending_estimate(tmp_path: Path) -> N
             tiers=(DrawdownTier(0.15, 5000, "0.15"),),
             action_at=datetime(2024, 1, 2, 10, tzinfo=UTC),
             create_estimate=True,
+            cutoff_time="15:00",
             cutoff_choice="before",
             effective_date="2024-01-02",
         )

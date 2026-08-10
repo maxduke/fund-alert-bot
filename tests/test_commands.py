@@ -51,6 +51,7 @@ from fund_alert_bot.db import (
     list_rules,
     open_connection,
     record_manual_addition,
+    upsert_fund_cutoff,
     upsert_fund_fee,
     upsert_position_snapshot,
 )
@@ -680,6 +681,12 @@ def test_mark_added_records_one_pending_estimate_after_confirmation(tmp_path) ->
             SimpleNamespace(args=[str(rule_id), "15"]),
         )
     )
+    with open_connection(sqlite_path) as connection:
+        upsert_fund_cutoff(
+            connection,
+            fund_symbol="000001",
+            subscription_cutoff="13:00",
+        )
     callback_data = message.reply_markups[0].inline_keyboard[0][0].callback_data
     query = FakeCallbackQuery(callback_data)
     callback_update = SimpleNamespace(
@@ -699,6 +706,7 @@ def test_mark_added_records_one_pending_estimate_after_confirmation(tmp_path) ->
     assert "Continue only if you already submitted" in message.replies[0]
     assert len(estimates) == 1
     assert estimates[0]["gross_amount"] == 5000
+    assert estimates[0]["cutoff_time"] == "15:00"
     assert estimates[0]["effective_date"] == "2024-01-02"
     assert estimates[0]["status"] == "pending"
     assert len(actions) == 1

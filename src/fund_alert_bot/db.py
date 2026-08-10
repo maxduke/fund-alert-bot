@@ -677,6 +677,7 @@ def record_manual_addition(
     tiers: Sequence[Any],
     action_at: datetime,
     create_estimate: bool,
+    cutoff_time: str | None = None,
     cutoff_choice: str | None = None,
     effective_date: str | None = None,
 ) -> tuple[int | None, tuple[str, ...]]:
@@ -685,9 +686,11 @@ def record_manual_addition(
     if not tiers:
         raise ValueError("At least one drawdown tier must be selected.")
     if create_estimate and (
-        cutoff_choice not in {"before", "after"} or effective_date is None
+        cutoff_time is None
+        or cutoff_choice not in {"before", "after"}
+        or effective_date is None
     ):
-        raise ValueError("A pending estimate requires a cutoff choice and date.")
+        raise ValueError("A pending estimate requires a cutoff time, choice, and date.")
 
     action_text = _timestamp_text(action_at)
     action_date = action_at.date().isoformat()
@@ -797,7 +800,7 @@ def record_manual_addition(
                     fee_value,
                     action_text,
                     action_date,
-                    str(settings["subscription_cutoff"]),
+                    cutoff_time,
                     cutoff_choice,
                     effective_date,
                     now,
