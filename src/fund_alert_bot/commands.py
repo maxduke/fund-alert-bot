@@ -73,6 +73,7 @@ from fund_alert_bot.rules.drawdown_plan import (
     DrawdownPlanConfig,
     DrawdownTier,
     evaluate_drawdown_plan,
+    format_plan_percent,
     parse_drawdown_plan_config,
     required_history_start,
 )
@@ -609,7 +610,10 @@ def format_manual_add_confirmation(selection: ManualAddSelection) -> str:
         f"Plan: {selection.name} ({selection.plan_id})",
         f"Fund: {selection.fund_symbol}",
         "Selected tiers:",
-        *(f"• -{tier.drawdown:.0%} → ¥{tier.amount:,.2f}" for tier in selection.tiers),
+        *(
+            f"• -{format_plan_percent(tier.drawdown)} → ¥{tier.amount:,.2f}"
+            for tier in selection.tiers
+        ),
         f"Configured gross total: ¥{total:,.2f}",
         f"Position estimate readiness: {selection.readiness}",
         "",
@@ -971,7 +975,7 @@ def build_drawdown_plan_preview(
         f"Lookback: {command.config.lookback_days} calendar days",
         "Tiers (incremental):",
         *(
-            f"-{tier.drawdown:.0%} → ¥{tier.amount:,.2f}"
+            f"-{format_plan_percent(tier.drawdown)} → ¥{tier.amount:,.2f}"
             for tier in command.config.tiers
         ),
         "Maximum one-cycle total: "
@@ -1003,7 +1007,10 @@ def build_drawdown_plan_preview(
             reference_symbol=command.reference_symbol,
             expected_date=latest_date,
         )
-        reached = [f"-{tier.drawdown:.0%}" for tier in evaluation.newly_crossed_tiers]
+        reached = [
+            f"-{format_plan_percent(tier.drawdown)}"
+            for tier in evaluation.newly_crossed_tiers
+        ]
         lines.extend(
             (
                 "",
@@ -1068,7 +1075,8 @@ def format_plan_overview(
                 (
                     "Next open tier: all tiers already reminded"
                     if next_tier is None
-                    else f"Next open tier: -{next_tier.drawdown:.0%} / "
+                    else "Next open tier: "
+                    f"-{format_plan_percent(next_tier.drawdown)} / "
                     f"¥{next_tier.amount:,.2f}"
                 ),
                 *_format_position_lines(status),
@@ -1130,7 +1138,10 @@ def format_plan_details(result: DrawdownPlanStatusResult) -> str:
                 state = "reminded; no add recorded"
             else:
                 state = "open"
-            lines.append(f"• -{tier.drawdown:.0%} / ¥{tier.amount:,.2f}: {state}")
+            lines.append(
+                f"• -{format_plan_percent(tier.drawdown)} / "
+                f"¥{tier.amount:,.2f}: {state}"
+            )
         next_tier = _next_open_tier(status)
         if next_tier is None:
             lines.append("Next level: all tiers already reminded")
@@ -1138,7 +1149,7 @@ def format_plan_details(result: DrawdownPlanStatusResult) -> str:
             distance = max(0.0, next_tier.drawdown - evaluation.drawdown)
             lines.extend(
                 (
-                    f"Next level: -{next_tier.drawdown:.0%}",
+                    f"Next level: -{format_plan_percent(next_tier.drawdown)}",
                     f"Distance to next level: {distance * 100:.1f} percentage points",
                 )
             )
@@ -1798,7 +1809,9 @@ def build_command_handlers(
         except (ValueError, sqlite3.IntegrityError) as exc:
             await query.edit_message_text(f"Addition was not recorded: {exc}")
             return
-        tier_text = ", ".join(f"-{float(key):.0%}" for key in recorded_keys)
+        tier_text = ", ".join(
+            f"-{format_plan_percent(float(key))}" for key in recorded_keys
+        )
         if not recorded_keys:
             message = "These tiers were already recorded; no duplicate was created."
         elif estimate_id is None:

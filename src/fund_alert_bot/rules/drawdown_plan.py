@@ -321,7 +321,7 @@ def build_drawdown_plan_pre_alert(
     if not tiers:
         return None
     tier_lines = [
-        f"-{_format_percent(tier.drawdown)} → {_format_amount(tier.amount)}"
+        f"-{format_plan_percent(tier.drawdown)} → {format_plan_amount(tier.amount)}"
         for tier in tiers
     ]
     fetched_at = quote.fetched_at.astimezone(ZoneInfo("Asia/Shanghai"))
@@ -343,7 +343,8 @@ def build_drawdown_plan_pre_alert(
             "🎯 Tiers currently reached:",
             *tier_lines,
             "",
-            f"Configured additional amount: {_format_amount(evaluation.total_amount)}",
+            "Configured additional amount: "
+            f"{format_plan_amount(evaluation.total_amount)}",
             "",
             "📈 Long-term trend from confirmed closes",
             *_format_trend(config, evaluation),
@@ -409,7 +410,7 @@ def build_drawdown_plan_alert(
         return None
 
     tier_lines = [
-        f"-{_format_percent(tier.drawdown)} → {_format_amount(tier.amount)}"
+        f"-{format_plan_percent(tier.drawdown)} → {format_plan_amount(tier.amount)}"
         for tier in tiers
     ]
     trend_lines = _format_trend(config, evaluation)
@@ -441,7 +442,7 @@ def build_drawdown_plan_alert(
             *tier_lines,
             "",
             "Total additional amount now due: "
-            f"{_format_amount(evaluation.total_amount)}",
+            f"{format_plan_amount(evaluation.total_amount)}",
             "",
             "📈 Long-term trend",
             *trend_lines,
@@ -712,14 +713,17 @@ def _has_positive_activity(volume: object, amount: object) -> bool:
     return False
 
 
-def _format_amount(amount: int | float) -> str:
-    if float(amount).is_integer():
-        return f"¥{amount:,.0f}"
-    return f"¥{amount:,.2f}"
+def format_plan_amount(amount: int | float) -> str:
+    """Format a configured RMB amount without hiding its precision."""
+
+    return f"¥{format(Decimal(str(amount)).normalize(), ',f')}"
 
 
-def _format_percent(value: float) -> str:
-    return f"{value * 100:g}%"
+def format_plan_percent(value: float) -> str:
+    """Format a configured drawdown fraction without rounding its tier."""
+
+    percentage = (Decimal(str(value)) * 100).normalize()
+    return f"{format(percentage, 'f')}%"
 
 
 def _tier_command_text(tiers: Sequence[DrawdownTier]) -> str:

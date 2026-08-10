@@ -51,6 +51,8 @@ from fund_alert_bot.rules.drawdown_plan import (
     build_drawdown_plan_pre_alert,
     evaluate_drawdown_plan,
     evaluate_drawdown_plan_realtime,
+    format_plan_amount,
+    format_plan_percent,
     parse_drawdown_plan_config,
     required_history_start,
 )
@@ -767,7 +769,9 @@ def _drawdown_plan_action_rows(
         rows.extend(
             (
                 (
-                    f"仅记录 -{tier.drawdown:.0%} ¥{tier.amount:,.0f}",
+                    "仅记录 "
+                    f"-{format_plan_percent(tier.drawdown)} "
+                    f"{format_plan_amount(tier.amount)}",
                     f"drawdown_add:{rule_id}:{event_id}:tier:{tier.key}",
                 ),
             )

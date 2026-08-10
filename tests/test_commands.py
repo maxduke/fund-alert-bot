@@ -8,13 +8,17 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-from fund_alert_bot.checks import evaluate_drawdown_plan_rule
+from fund_alert_bot.checks import (
+    _drawdown_plan_action_rows,
+    evaluate_drawdown_plan_rule,
+)
 from fund_alert_bot.commands import (
     DCA_RULE_TYPE,
     DRAW_DOWN_RULE_TYPE,
     PROFIT_RULE_TYPE,
     TEST_NOTIFICATION_MESSAGE,
     CommandParseError,
+    ManualAddSelection,
     build_command_handlers,
     build_drawdown_plan_preview,
     dca_params,
@@ -22,6 +26,7 @@ from fund_alert_bot.commands import (
     evaluate_drawdown_rules,
     evaluate_profit_rules,
     format_check_summary,
+    format_manual_add_confirmation,
     format_rules_list,
     load_manual_add_selection,
     parse_add_dca_args,
@@ -144,6 +149,36 @@ def test_parse_valid_dca_command_with_english_weekday() -> None:
     assert command.name == "创业板"
     assert command.weekday == "THU"
     assert command.amount == 1000
+
+
+def test_fractional_drawdown_tiers_keep_precision_in_actions_and_confirmation() -> None:
+    tiers = (
+        DrawdownTier(0.151, 100.25, "0.151"),
+        DrawdownTier(0.154, 100.25, "0.154"),
+    )
+
+    rows = _drawdown_plan_action_rows(1, 2, tiers)
+    confirmation = format_manual_add_confirmation(
+        ManualAddSelection(
+            plan_id=1,
+            event_id=2,
+            cycle_id=3,
+            fund_symbol="000001",
+            name="A500",
+            tiers=tiers,
+            readiness="READY",
+            missing_setup=(),
+            cutoff="15:00",
+            market_date=date(2024, 1, 2),
+        )
+    )
+
+    assert [rows[1][0][0], rows[2][0][0]] == [
+        "仅记录 -15.1% ¥100.25",
+        "仅记录 -15.4% ¥100.25",
+    ]
+    assert "• -15.1% → ¥100.25" in confirmation
+    assert "• -15.4% → ¥100.25" in confirmation
 
 
 def test_parse_drawdown_plan_with_quoted_name_and_optional_lookback() -> None:
