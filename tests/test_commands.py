@@ -856,6 +856,12 @@ def test_mark_added_keeps_printed_high_precision_percentage_exact(tmp_path) -> N
     assert [tier.key for tier in selection.tiers] == ["0.7949398787921911"]
 
 
+def test_mark_added_scientific_percentage_preserves_exact_tier_key() -> None:
+    command = parse_mark_added_args(["7", "1E-98"])
+
+    assert command.tier_keys == ("0." + "0" * 99 + "1",)
+
+
 def test_mark_added_after_cutoff_uses_next_confirmed_open_day(tmp_path) -> None:
     sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
     rule_id = _prepare_ready_plan_alert(

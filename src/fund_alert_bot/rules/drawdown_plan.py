@@ -18,6 +18,7 @@ from fund_alert_bot.market_data.models import AssetType, RealtimeQuote
 _THRESHOLD_TOLERANCE = 1e-12
 _PRICE_RELATIVE_TOLERANCE = 1e-4
 _PRICE_ABSOLUTE_TOLERANCE = 1e-6
+_MAX_FIXED_DECIMAL_CHARS = 24
 _SYMBOL_PATTERN = re.compile(r"[0-9]{6}")
 _REALTIME_SOURCES = frozenset({"eastmoney", "sina_fallback"})
 _CONFIRMED_HISTORY_SOURCES = frozenset({"akshare_eastmoney"})
@@ -619,7 +620,9 @@ def _read_tiers(raw_tiers: object) -> tuple[DrawdownTier, ...]:
         tiers.append(
             DrawdownTier(
                 drawdown=drawdown,
-                amount=int(amount) if amount.is_integer() else amount,
+                amount=(
+                    int(amount) if amount.is_integer() and amount <= 2**53 else amount
+                ),
                 key=_canonical_number(drawdown),
             )
         )
@@ -716,14 +719,22 @@ def _has_positive_activity(volume: object, amount: object) -> bool:
 def format_plan_amount(amount: int | float) -> str:
     """Format a configured RMB amount without hiding its precision."""
 
-    return f"¥{format(Decimal(str(amount)).normalize(), ',f')}"
+    return f"¥{_format_exact_decimal(amount, grouped=True)}"
 
 
 def format_plan_percent(value: float | str) -> str:
     """Format a configured drawdown fraction without rounding its tier."""
 
-    percentage = (Decimal(str(value)) * 100).normalize()
-    return f"{format(percentage, 'f')}%"
+    percentage = Decimal(str(value)) * 100
+    return f"{_format_exact_decimal(percentage)}%"
+
+
+def _format_exact_decimal(value: object, *, grouped: bool = False) -> str:
+    decimal = Decimal(str(value)).normalize()
+    fixed = format(decimal, ",f" if grouped else "f")
+    if len(fixed) <= _MAX_FIXED_DECIMAL_CHARS:
+        return fixed
+    return format(decimal, "E")
 
 
 def _tier_command_text(tiers: Sequence[DrawdownTier]) -> str:

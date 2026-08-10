@@ -10,6 +10,7 @@ from fund_alert_bot.market_data import AssetType, RealtimeQuote
 from fund_alert_bot.rules.drawdown_plan import (
     ActiveDrawdownCycle,
     DrawdownPlanConfig,
+    DrawdownPlanEvaluation,
     DrawdownTier,
     _tier_command_text,
     build_drawdown_plan_alert,
@@ -48,6 +49,40 @@ def test_mark_added_fallback_keeps_canonical_tier_precision() -> None:
     tier = DrawdownTier(0.123456789, 100.25, "0.123456789")
 
     assert _tier_command_text((tier,)) == "12.3456789"
+
+
+def test_scientific_tiers_keep_confirmed_alert_within_telegram_limit() -> None:
+    config = _config([(index * 1e-100, 1) for index in range(1, 51)])
+    evaluation = DrawdownPlanEvaluation(
+        latest_date=date(2024, 1, 2),
+        latest_price=80,
+        peak_date=date(2024, 1, 1),
+        peak_price=100,
+        drawdown=0.2,
+        sma=None,
+        above_sma=None,
+        distance_to_sma=None,
+        sma_slope=None,
+        source="akshare_eastmoney",
+        coverage_start=date(2024, 1, 1),
+        cycle_initialized=False,
+        cycle_changed=False,
+        newly_crossed_tiers=config.tiers,
+        total_amount=50,
+    )
+
+    alert = build_drawdown_plan_alert(
+        rule_id=7,
+        reference_symbol="510300",
+        name="A500",
+        config=config,
+        evaluation=evaluation,
+    )
+
+    assert alert is not None
+    assert "1E-98%" in alert["message"]
+    assert "/mark_added 7 1E-98," in alert["message"]
+    assert len(str(alert["message"])) <= 4096
 
 
 @pytest.mark.parametrize(
