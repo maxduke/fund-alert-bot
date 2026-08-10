@@ -291,6 +291,7 @@ def evaluate_drawdown_plan_rule(
     history: pd.DataFrame,
     *,
     expected_date: date,
+    same_day_actions: bool = True,
 ) -> DrawdownPlanRuleResult:
     """Evaluate and atomically persist one drawdown plan."""
 
@@ -321,6 +322,19 @@ def evaluate_drawdown_plan_rule(
         config=config,
         evaluation=evaluation,
     )
+    if alert is not None and not same_day_actions:
+        alert_text = str(alert["message"]).split(
+            "\nOnly after you actually subscribe, record it with:",
+            maxsplit=1,
+        )[0]
+        alert["message"] = (
+            f"{alert_text}\n"
+            "Delayed confirmation for the previous trading day; "
+            "action buttons are unavailable.\n"
+            "If you bought, wait for the fund platform to settle, then run "
+            "/sync_position.\n"
+            "This is a reminder only. No trade has been placed."
+        )
     tiers = evaluation.newly_crossed_tiers
     cycle_id, event_id = persist_drawdown_plan_evaluation(
         connection,
@@ -363,7 +377,11 @@ def evaluate_drawdown_plan_rule(
             event_id=event_id,
             title=str(alert["title"]),
             text=str(alert["message"]),
-            telegram_actions=_drawdown_plan_action_rows(rule_id, event_id, tiers),
+            telegram_actions=(
+                _drawdown_plan_action_rows(rule_id, event_id, tiers)
+                if same_day_actions
+                else ()
+            ),
         )
     return DrawdownPlanRuleResult(
         cycle_id=cycle_id,
@@ -477,26 +495,10 @@ def evaluate_drawdown_plan_prealerts(
                     rule,
                     history,
                     expected_date=confirmed_date,
+                    same_day_actions=False,
                 )
                 if catch_up.notification is not None:
-                    catch_up_text = catch_up.notification.text.split(
-                        "\nOnly after you actually subscribe, record it with:",
-                        maxsplit=1,
-                    )[0]
-                    notifications.append(
-                        AlertNotification(
-                            event_id=catch_up.notification.event_id,
-                            title=catch_up.notification.title,
-                            text=(
-                                f"{catch_up_text}\n"
-                                "Delayed confirmation for the previous trading day; "
-                                "action buttons are unavailable.\n"
-                                "If you bought, wait for the fund platform to settle, "
-                                "then run /sync_position.\n"
-                                "This is a reminder only. No trade has been placed."
-                            ),
-                        )
-                    )
+                    notifications.append(catch_up.notification)
                 config, active_cycle, recorded_tier_keys = _load_drawdown_plan_state(
                     connection, rule
                 )

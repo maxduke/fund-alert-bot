@@ -480,7 +480,9 @@ def test_before_close_catches_up_missed_confirmed_plan_tiers(tmp_path: Path) -> 
         tiers = connection.execute(
             "SELECT tier_key FROM drawdown_tier_records ORDER BY drawdown"
         ).fetchall()
-        events = connection.execute("SELECT alert_key FROM alert_events").fetchall()
+        events = connection.execute(
+            "SELECT alert_key, message FROM alert_events"
+        ).fetchall()
 
     assert cycle["last_evaluated_date"] == "2024-01-02"
     assert [row["tier_key"] for row in tiers] == ["0.15", "0.2"]
@@ -491,6 +493,8 @@ def test_before_close_catches_up_missed_confirmed_plan_tiers(tmp_path: Path) -> 
     assert "/sync_position" in message["text"]
     assert "reply_markup" not in message
     assert all("pre_alert" not in row["alert_key"] for row in events)
+    assert all("/mark_added" not in row["message"] for row in events)
+    assert any("/sync_position" in row["message"] for row in events)
 
 
 def test_failed_before_close_prealert_is_not_retried_after_expiry(
