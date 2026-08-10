@@ -341,6 +341,7 @@ def test_manual_add_estimate_applies_exact_nav_once(tmp_path: Path) -> None:
     assert [row["tier_key"] for row in actions] == ["0.151"]
     assert "Configured tiers: -15.1%" in applied["message"]
     assert "Gross amount: ¥5,000.005" in applied["message"]
+    assert "Captured subscription fee: rate:1%" in applied["message"]
     assert occurrence["status"] == "applied"
     assert occurrence["settlement_alert_event_id"] == applied["event_id"]
 

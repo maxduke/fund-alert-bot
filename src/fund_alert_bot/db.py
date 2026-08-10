@@ -1144,6 +1144,11 @@ def apply_manual_add_estimate(
             ),
         )
         tier_keys = json.loads(str(occurrence["tier_keys_json"]))
+        fee = (
+            f"rate:{format_plan_percent(fee_value)}"
+            if str(occurrence["fee_mode"]) == "rate"
+            else f"fixed:{format_plan_amount(fee_value)}"
+        )
         message = "\n".join(
             (
                 "✅ Manual addition estimate updated",
@@ -1152,6 +1157,7 @@ def apply_manual_add_estimate(
                 "Configured tiers: "
                 + ", ".join("-" + format_plan_percent(str(key)) for key in tier_keys),
                 f"Gross amount: {format_plan_amount(gross_amount)}",
+                f"Captured subscription fee: {fee}",
                 f"Effective date: {occurrence['effective_date']}",
                 f"Unit NAV: {nav_value:.12g} on {nav.date}",
                 f"NAV source: {nav.source}",

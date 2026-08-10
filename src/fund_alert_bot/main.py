@@ -14,7 +14,7 @@ from fund_alert_bot.market_data import AkshareMarketDataProvider, CNMarketCalend
 from fund_alert_bot.scheduler import (
     create_scheduler,
     register_jobs,
-    retry_pending_drawdown_plan_notifications,
+    run_scheduled_fund_nav_process,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -65,11 +65,14 @@ def run() -> None:
             market_calendar=market_calendar,
             notification_settings=settings.notifications,
         )
-        await retry_pending_drawdown_plan_notifications(
+        await run_scheduled_fund_nav_process(
             application=application,
             sqlite_path=settings.sqlite_path,
             allowed_user_ids=settings.telegram_allowed_user_ids,
-            action_date=datetime.now(ZoneInfo(settings.timezone)).date(),
+            market_data_provider=market_data_provider,
+            market_calendar=market_calendar,
+            timezone=settings.timezone,
+            run_date=datetime.now(ZoneInfo(settings.timezone)).date(),
             notification_settings=settings.notifications,
         )
         scheduler.start()

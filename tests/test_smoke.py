@@ -92,10 +92,11 @@ def test_compose_preserves_schedule_environment_overrides() -> None:
         assert f"${{{name}:-{default}}}" in compose
 
 
-def test_startup_retry_uses_configured_timezone_date() -> None:
+def test_startup_processes_fund_nav_with_configured_timezone_date() -> None:
     source = (Path(__file__).parents[1] / "src/fund_alert_bot/main.py").read_text()
 
-    assert "action_date=datetime.now(ZoneInfo(settings.timezone)).date()" in source
+    assert "await run_scheduled_fund_nav_process(" in source
+    assert "run_date=datetime.now(ZoneInfo(settings.timezone)).date()" in source
 
 
 def test_akshare_settings_from_environment(monkeypatch) -> None:
