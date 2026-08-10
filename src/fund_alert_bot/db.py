@@ -974,7 +974,7 @@ def reconcile_position_snapshot(
     units: float,
     average_unit_cost: float,
     expected_item_keys: Sequence[str],
-    included: bool,
+    all_included: bool,
     synced_at: datetime,
 ) -> sqlite3.Row:
     """Apply an exact snapshot after verifying the displayed pending set."""
@@ -1016,7 +1016,7 @@ def reconcile_position_snapshot(
             """,
             (fund_symbol, units, average_unit_cost, sync_time, now, now),
         )
-        if included:
+        if all_included:
             estimate_ids = [
                 int(key.split(":", 1)[1])
                 for key in current_keys

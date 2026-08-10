@@ -2012,8 +2012,10 @@ def build_command_handlers(
             from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
             lines = [
-                "Pending additions exist. Does this platform snapshot include all "
-                "items below?",
+                "Pending additions exist. Classify this platform snapshot:",
+                "Choose All only if every item below is included. Choose None only "
+                "if no item below is included. If it includes some items, cancel and "
+                "sync again after all items settle.",
                 "",
                 *(
                     f"• {item['kind']} / {item['date']} / "
@@ -2034,8 +2036,14 @@ def build_command_handlers(
                         ],
                         [
                             InlineKeyboardButton(
-                                "尚未包含",
-                                callback_data=f"position_sync:{token}:not_included",
+                                "均未包含",
+                                callback_data=f"position_sync:{token}:none_included",
+                            )
+                        ],
+                        [
+                            InlineKeyboardButton(
+                                "只包含部分（取消）",
+                                callback_data=f"position_sync:{token}:partial",
                             )
                         ],
                         [
@@ -2093,11 +2101,18 @@ def build_command_handlers(
                 "This position confirmation expired. Rerun /sync_position."
             )
             return
-        if choice == "cancel":
+        if choice in {"cancel", "partial"}:
             position_sync_drafts.pop(token, None)
-            await query.edit_message_text("Position sync cancelled.")
+            message = "Position sync cancelled."
+            if choice == "partial":
+                message += (
+                    " This snapshot includes only some pending additions; rerun "
+                    "/sync_position after all listed additions settle. Nothing was "
+                    "changed."
+                )
+            await query.edit_message_text(message)
             return
-        if choice not in {"included", "not_included"}:
+        if choice not in {"included", "none_included"}:
             return
         if draft.completed_message is not None:
             await query.edit_message_text(draft.completed_message)
@@ -2111,14 +2126,14 @@ def build_command_handlers(
                     units=draft.command.units,
                     average_unit_cost=draft.command.average_unit_cost,
                     expected_item_keys=draft.item_keys,
-                    included=choice == "included",
+                    all_included=choice == "included",
                     synced_at=now,
                 )
         except sqlite3.IntegrityError as exc:
             await query.edit_message_text(str(exc))
             return
         message = format_position_snapshot(row, None)
-        if choice == "not_included":
+        if choice == "none_included":
             if any(key.startswith("estimate:") for key in draft.item_keys):
                 message += (
                     "\nPending estimates remain eligible for dated-NAV processing."

@@ -45,7 +45,9 @@ from fund_alert_bot.db import (
     add_rule,
     connect,
     get_active_drawdown_cycle,
+    get_position_snapshot,
     init_db,
+    list_pending_position_items,
     list_rules,
     open_connection,
     record_manual_addition,
@@ -945,7 +947,7 @@ def test_sync_position_persists_exact_snapshot_and_shows_dated_value(tmp_path) -
     assert "Position value: ¥1,500.00" in message.replies[0]
 
 
-def test_sync_not_included_keeps_unestimated_manual_add_sync_warning(tmp_path) -> None:
+def test_sync_none_included_keeps_unestimated_manual_add_sync_warning(tmp_path) -> None:
     sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
     rule_id = _prepare_ready_plan_alert(
         sqlite_path,
@@ -969,7 +971,6 @@ def test_sync_not_included_keeps_unestimated_manual_add_sync_warning(tmp_path) -
             action_at=datetime(2024, 1, 2, 8, tzinfo=UTC),
             create_estimate=False,
         )
-
     handlers = build_command_handlers(
         {123},
         sqlite_path=sqlite_path,
@@ -1003,8 +1004,74 @@ def test_sync_not_included_keeps_unestimated_manual_add_sync_warning(tmp_path) -
     )
 
     assert "¥5,000.005" in message.replies[0]
+    assert "Choose None only if no item below is included" in message.replies[0]
     assert "still require another /sync_position" in query.edits[-1]
     assert "eligible for dated-NAV processing" not in query.edits[-1]
+
+
+def test_partial_position_sync_changes_nothing(tmp_path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    rule_id = _prepare_ready_plan_alert(
+        sqlite_path,
+        closes=[100, 84],
+        expected_date=date(2024, 1, 2),
+        tiers=[{"drawdown": 0.15, "amount": 5000}],
+    )
+    with open_connection(sqlite_path) as connection:
+        cycle = get_active_drawdown_cycle(connection, rule_id)
+        event = connection.execute("SELECT id FROM alert_events").fetchone()
+        record_manual_addition(
+            connection,
+            rule_id=rule_id,
+            cycle_id=int(cycle["id"]),
+            source_alert_event_id=int(event["id"]),
+            fund_symbol="000001",
+            tiers=(DrawdownTier(0.15, 5000, "0.15"),),
+            action_at=datetime(2024, 1, 2, 8, tzinfo=UTC),
+            create_estimate=False,
+        )
+        before_position = dict(get_position_snapshot(connection, "000001"))
+
+    handlers = build_command_handlers(
+        {123},
+        sqlite_path=sqlite_path,
+        now_factory=lambda: datetime(2024, 1, 3, 8, tzinfo=UTC),
+    )
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        effective_message=message,
+    )
+    asyncio.run(
+        _handler_by_command(handlers, "sync_position").callback(
+            update,
+            SimpleNamespace(args=["000001", "1100", "1.1"]),
+        )
+    )
+    query = FakeCallbackQuery(
+        message.reply_markups[0].inline_keyboard[2][0].callback_data
+    )
+    callback_update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        callback_query=query,
+    )
+    asyncio.run(
+        _callback_by_name(handlers, "position_sync_callback").callback(
+            callback_update,
+            SimpleNamespace(),
+        )
+    )
+
+    with open_connection(sqlite_path) as connection:
+        position = dict(get_position_snapshot(connection, "000001"))
+        pending = list_pending_position_items(connection, "000001")
+
+    assert position == before_position
+    assert len(pending) == 1
+    assert "only some pending additions" in query.edits[-1]
+    assert "Nothing was changed" in query.edits[-1]
 
 
 def test_closed_position_does_not_request_eastmoney_nav(tmp_path) -> None:

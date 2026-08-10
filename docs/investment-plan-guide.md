@@ -710,21 +710,25 @@ Telegram requires one of these confirmations:
 
 ```text
 [同步数据已包含以上交易]
-[同步数据尚未包含以上交易]
+[同步数据一笔都未包含以上交易]
+[同步数据只包含部分（取消）]
 [取消]
 ```
 
 **Already included** writes the user-supplied position and marks those pending
 occurrences `reconciled_by_sync`, so their later NAV cannot add units again.
-**Not yet included** writes the same position but leaves the occurrences pending
-to apply after exact-date NAV arrives. The position replacement and occurrence
-decisions happen atomically and repeated callbacks return the stored outcome.
+**None included** means no displayed item is represented by the snapshot. It
+writes the position but leaves every occurrence pending to apply after its exact
+dated NAV arrives. **Partially included** cancels without changing anything; run
+`/sync_position` again after every displayed item settles. The position
+replacement and occurrence decisions happen atomically and repeated callbacks
+return the stored outcome.
 
 A `SETUP_REQUIRED` manual addition marked **Position Sync required** is cleared
 only when the user confirms that the new platform snapshot includes it. Choosing
-not included leaves that warning visible. If the user cannot truthfully classify
-all displayed pending items together, they cancel and synchronize after the
-platform has settled them rather than guessing.
+none included leaves that warning visible. If the snapshot contains only some
+displayed items, choose the partial option; the bot changes nothing, and the user
+synchronizes again after the platform has settled them rather than guessing.
 
 ## Delivery and persistence
 

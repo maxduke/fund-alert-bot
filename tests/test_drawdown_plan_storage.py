@@ -393,7 +393,7 @@ def test_position_sync_can_reconcile_pending_manual_estimate(tmp_path: Path) -> 
             units=2500,
             average_unit_cost=2,
             expected_item_keys=item_keys,
-            included=True,
+            all_included=True,
             synced_at=datetime(2024, 1, 3, tzinfo=UTC),
         )
         occurrence = connection.execute(
@@ -441,7 +441,7 @@ def test_manual_add_without_setup_requires_and_reconciles_position_sync(
             units=2500,
             average_unit_cost=2,
             expected_item_keys=item_keys,
-            included=True,
+            all_included=True,
             synced_at=datetime(2024, 1, 3, tzinfo=UTC),
         )
         remaining = list_pending_position_items(connection, "000001")
