@@ -669,12 +669,21 @@ async def run_scheduled_fund_nav_process(
                 ],
                 errors=[*settlement_result.errors, *position_profit_result.errors],
             )
-            fund_nav_notice = reserve_drawdown_plan_data_unavailable_notice(
-                connection,
-                evaluation_date=processing_date,
-                result=result,
-                phase="fund_nav",
-            )
+            affected_by_date: dict[date, list[Any]] = {}
+            for item in [*result.no_data_skips, *result.errors]:
+                affected_by_date.setdefault(
+                    item.data_date or processing_date, []
+                ).append(item)
+            fund_nav_notices = []
+            for data_date, affected in sorted(affected_by_date.items()):
+                notice = reserve_drawdown_plan_data_unavailable_notice(
+                    connection,
+                    evaluation_date=data_date,
+                    result=ManualAddSettlementResult(0, [], affected, []),
+                    phase="fund_nav",
+                )
+                if notice is not None:
+                    fund_nav_notices.append(notice)
         for skip in result.no_data_skips:
             LOGGER.info(
                 "Fund NAV unavailable rule_id=%s symbol=%s: %s",
@@ -696,7 +705,7 @@ async def run_scheduled_fund_nav_process(
             notifications=[
                 *result.notifications,
                 *position_profit_result.notifications,
-                *([] if fund_nav_notice is None else [fund_nav_notice]),
+                *fund_nav_notices,
             ],
             notification_settings=notification_settings,
         )

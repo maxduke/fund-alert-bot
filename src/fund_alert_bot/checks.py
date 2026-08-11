@@ -233,9 +233,7 @@ def reserve_drawdown_plan_data_unavailable_notice(
         "after_close": "After-close confirmation",
         "fund_nav": "Feeder-fund NAV settlement",
     }[phase]
-    affected_dates = sorted({item.data_date or evaluation_date for item in affected})
-    date_key = "+".join(item.isoformat() for item in affected_dates)
-    alert_key = f"data_unavailable:{phase}:{date_key}"
+    alert_key = f"data_unavailable:{phase}:{evaluation_date.isoformat()}"
     notice_name = (
         "Feeder-fund data unavailable"
         if phase == "fund_nav"
@@ -244,12 +242,10 @@ def reserve_drawdown_plan_data_unavailable_notice(
     lines = [
         f"⚠️ {notice_name}",
         "",
-        f"Data date{'s' if len(affected_dates) > 1 else ''}: "
-        + ", ".join(item.isoformat() for item in affected_dates),
+        f"Data date: {evaluation_date.isoformat()}",
         f"{phase_label} could not evaluate:",
         *(
-            f"• {(item.data_date or evaluation_date).isoformat()} / "
-            f"{item.symbol}: {item.message}"
+            f"• {evaluation_date.isoformat()} / {item.symbol}: {item.message}"
             for item in affected
         ),
         "",
@@ -272,16 +268,13 @@ def reserve_drawdown_plan_data_unavailable_notice(
             message=message,
             payload={
                 "phase": phase,
-                "data_date": (
-                    affected_dates[0].isoformat() if len(affected_dates) == 1 else None
-                ),
-                "data_dates": [item.isoformat() for item in affected_dates],
+                "data_date": evaluation_date.isoformat(),
                 "affected_plans": [
                     {
                         "rule_id": item.rule_id,
                         "symbol": item.symbol,
                         "reason": item.message,
-                        "data_date": (item.data_date or evaluation_date).isoformat(),
+                        "data_date": evaluation_date.isoformat(),
                     }
                     for item in affected
                 ],
