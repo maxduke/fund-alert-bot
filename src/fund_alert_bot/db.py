@@ -2754,6 +2754,12 @@ def _ensure_standard_notification_recovery_migration(
             """
             SELECT MIN(id) FROM alert_events
             WHERE notification_attempted_at IS NOT NULL
+                AND COALESCE(json_extract(payload_json, '$.phase'), '') = ''
+                AND title IN (
+                    'DCA reminder',
+                    'Drawdown reminder',
+                    'Price-Gain reminder'
+                )
             """
         ).fetchone()[0]
     # Pre-v1 pending rows have no per-event provenance; never guess that an

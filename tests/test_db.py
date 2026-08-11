@@ -365,6 +365,15 @@ def test_init_db_preserves_delivery_aware_pending_event(tmp_path: Path) -> None:
             """,
             (
                 (
+                    "tracked-drawdown-plan",
+                    "Buy-plan reminder",
+                    "older non-standard attempted event",
+                    '{"phase":"confirmed"}',
+                    "2026-06-30T00:00:00+00:00",
+                    "sent",
+                    "2026-06-30T00:01:00+00:00",
+                ),
+                (
                     "migrated-history",
                     "Drawdown reminder",
                     "already sent",
@@ -415,10 +424,10 @@ def test_init_db_preserves_delivery_aware_pending_event(tmp_path: Path) -> None:
         init_db(connection)
 
         retryable = list_retryable_standard_alert_events(connection)
-        assert [int(row["id"]) for row in retryable] == [3, 5, 6]
+        assert [int(row["id"]) for row in retryable] == [4, 6, 7]
         assert str(retryable[2]["title"]) == "Reminder recovery notice"
         position_status = connection.execute(
-            "SELECT notification_status FROM alert_events WHERE id = 2"
+            "SELECT notification_status FROM alert_events WHERE id = 3"
         ).fetchone()
         assert position_status["notification_status"] == ALERT_NOTIFICATION_PENDING
 
