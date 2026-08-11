@@ -602,6 +602,14 @@ def test_standard_notification_retry_survives_restart_and_keeps_current_dca_acti
             asset_type="cn_open_fund",
             params={"weekday": "monday", "amount": 1000},
         )
+        legacy_dca_rule_id = add_rule(
+            connection,
+            type="dca_reminder",
+            symbol="159915",
+            name="Legacy DCA",
+            asset_type="cn_etf",
+            params={"weekday": "monday", "amount": 500},
+        )
         reserve_alert_event(
             connection,
             rule_id=profit_rule_id,
@@ -624,6 +632,14 @@ def test_standard_notification_retry_survives_restart_and_keeps_current_dca_acti
             alert_key="dca:pending",
             title="DCA reminder",
             message="DCA pending",
+            payload={"due_date": "2024-01-08", "fund_symbol": "000001"},
+        )
+        reserve_alert_event(
+            connection,
+            rule_id=legacy_dca_rule_id,
+            alert_key="legacy-dca:pending",
+            title="DCA reminder",
+            message="Legacy DCA pending",
             payload={"due_date": "2024-01-08"},
         )
         connection.execute(
@@ -635,6 +651,26 @@ def test_standard_notification_retry_survives_restart_and_keeps_current_dca_acti
                       'next', 'pending', '2024-01-08', '2024-01-08')
             """,
             (dca_rule_id,),
+        )
+        assert delete_rule(connection, legacy_dca_rule_id)
+        replacement_rule_id = add_rule(
+            connection,
+            type="dca_reminder",
+            symbol="000002",
+            name="Replacement feeder",
+            asset_type="cn_open_fund",
+            params={"weekday": "monday", "amount": 500},
+        )
+        assert replacement_rule_id == legacy_dca_rule_id
+        connection.execute(
+            """
+            INSERT INTO scheduled_dca_occurrences (
+                rule_id, fund_symbol, due_date, gross_amount, fee_mode,
+                fee_value, holiday_policy, status, created_at, updated_at
+            ) VALUES (?, '000002', '2024-01-08', 500, 'rate', 0,
+                      'next', 'pending', '2024-01-08', '2024-01-08')
+            """,
+            (replacement_rule_id,),
         )
         assert delete_rule(connection, profit_rule_id)
         connection.commit()
@@ -648,15 +684,17 @@ def test_standard_notification_retry_survives_restart_and_keeps_current_dca_acti
         )
     )
 
-    assert retried == 2
+    assert retried == 3
     assert [message["text"] for message in application.bot.messages] == [
         "profit pending",
         "DCA pending",
+        "Legacy DCA pending",
     ]
     markup = application.bot.messages[1]["reply_markup"]
     assert markup.inline_keyboard[0][0].callback_data == (
         f"dca_skip:{dca_rule_id}:2024-01-08"
     )
+    assert "reply_markup" not in application.bot.messages[2]
     assert (
         asyncio.run(
             scheduler.retry_pending_standard_notifications(

@@ -2591,6 +2591,9 @@ def list_retryable_standard_alert_events(
             LEFT JOIN scheduled_dca_occurrences AS o
                 ON o.rule_id = e.rule_id
                 AND o.due_date = json_extract(e.payload_json, '$.due_date')
+                AND o.fund_symbol = json_extract(
+                    e.payload_json, '$.fund_symbol'
+                )
             WHERE
                 (
                     e.notification_status = ?
