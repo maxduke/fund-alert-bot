@@ -601,7 +601,7 @@ def test_realtime_plan_rejects_quote_fetched_on_another_market_date() -> None:
         expected_date=date(2024, 1, 1),
     )
 
-    with pytest.raises(ValueError, match="not fetched on the market date"):
+    with pytest.raises(ValueError, match="timestamp is not on the market date"):
         evaluate_drawdown_plan_realtime(
             confirmed,
             config,

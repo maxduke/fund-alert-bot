@@ -216,14 +216,16 @@ Optional notification channel configuration:
 - `NTFY_TOPIC`
 - `WEBHOOK_URL`
 
-Realtime ETF quotes are used only for before-close drawdown estimates. One
-Eastmoney batch snapshot is reused for all ETF symbols in the same run; failures
-are briefly cached, and Sina is the realtime fallback. Confirmed `qfq` history
-still fails closed if Eastmoney is unavailable. Exact feeder-fund NAV has no
-independent Sina equivalent, so it stays pending rather than guessing. RSI and
-RSI6 alerts are not implemented here. The bot does not poll realtime endpoints:
-it performs one scheduled before-close pass, skips already completed plan/date
-work, and requests fund NAV only while a dated estimate is pending.
+Realtime ETF quotes are used only for before-close drawdown estimates. Each
+Reference ETF uses one bounded, per-symbol Eastmoney request; a failure opens a
+brief global Eastmoney cooldown so the remaining plans do not repeat requests.
+Sina is the bounded per-symbol fallback, and both sources must supply their own
+quote timestamp. Confirmed `qfq` history still fails closed if Eastmoney is
+unavailable. Exact feeder-fund NAV has no independent Sina equivalent, so it
+stays pending rather than guessing. RSI and RSI6 alerts are not implemented
+here. The bot does not poll realtime endpoints: it performs one scheduled
+before-close pass, skips already completed plan/date work, and requests fund NAV
+only while a dated estimate is pending.
 
 ## Planned Stack
 

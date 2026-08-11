@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import math
+import re
 import time
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pandas as pd
+import requests
 
 from fund_alert_bot.market_data.exceptions import (
     EmptyMarketDataError,
@@ -24,6 +27,11 @@ from fund_alert_bot.market_data.models import (
 )
 from fund_alert_bot.market_data.normalize import NORMALIZED_COLUMNS, normalize_history
 from fund_alert_bot.market_data.provider import DateLike, MarketDataProvider
+
+_EASTMONEY_QUOTE_URL = "https://push2.eastmoney.com/api/qt/stock/get"
+_SINA_QUOTE_URL = "https://hq.sinajs.cn/list={symbol}"
+_REALTIME_HTTP_TIMEOUT_SECONDS = 8
+_CN_TIMEZONE = ZoneInfo("Asia/Shanghai")
 
 
 class AkshareMarketDataProvider(MarketDataProvider):
@@ -41,6 +49,7 @@ class AkshareMarketDataProvider(MarketDataProvider):
         eastmoney_failure_ttl_seconds: float = 30.0,
         today_factory: Callable[[], date] = date.today,
         now_factory: Callable[[], datetime] | None = None,
+        http_get: Callable[..., Any] | None = None,
     ) -> None:
         if retries < 1:
             raise ValueError("retries must be at least 1")
@@ -71,14 +80,14 @@ class AkshareMarketDataProvider(MarketDataProvider):
         self._eastmoney_failure_ttl_seconds = eastmoney_failure_ttl_seconds
         self._today_factory = today_factory
         self._now_factory = now_factory or (lambda: datetime.now(UTC))
+        self._http_get = http_get or requests.get
         self._realtime_spot_cache: dict[
             AssetType, tuple[float, datetime, pd.DataFrame]
         ] = {}
-        self._sina_etf_spot_cache: (
-            tuple[float, datetime, pd.DataFrame | None] | None
-        ) = None
+        self._etf_quote_cache: dict[tuple[str, str], tuple[float, RealtimeQuote]] = {}
         self._fund_nav_cache: dict[str, tuple[float, pd.DataFrame | None]] = {}
-        self._eastmoney_failed_at: dict[str, float] = {}
+        self._eastmoney_failed_at: float | None = None
+        self._sina_failed_at: float | None = None
 
     def get_history(
         self,
@@ -119,25 +128,15 @@ class AkshareMarketDataProvider(MarketDataProvider):
         return result
 
     def get_etf_realtime_quote(self, instrument: Instrument) -> RealtimeQuote:
-        """Return an ETF quote from Eastmoney or the Sina pre-alert fallback."""
+        """Return one bounded per-symbol ETF quote with a Sina fallback."""
 
         if self._resolve_asset_type(instrument.asset_type) is not AssetType.CN_ETF:
             raise UnsupportedAssetTypeError("Realtime plan quotes require cn_etf.")
 
-        symbol = _strip_exchange_prefix(instrument.symbol)
-        snapshot = self._fetch_raw_realtime(AssetType.CN_ETF)
-        if snapshot is not None:
-            raw_data, fetched_at = snapshot
-            row = _find_realtime_row(raw_data, symbol)
-            if row is not None and _read_realtime_float(row, "最新价") is not None:
-                return self._build_etf_quote(
-                    row,
-                    symbol=symbol,
-                    source="eastmoney",
-                    fetched_at=fetched_at,
-                )
-
-        return self.get_sina_etf_realtime_quote(instrument)
+        try:
+            return self._get_eastmoney_etf_quote(instrument)
+        except MarketDataFetchError:
+            return self.get_sina_etf_realtime_quote(instrument)
 
     def get_sina_etf_realtime_quote(self, instrument: Instrument) -> RealtimeQuote:
         """Return the Sina fallback separately after Eastmoney validation fails."""
@@ -145,19 +144,24 @@ class AkshareMarketDataProvider(MarketDataProvider):
         if self._resolve_asset_type(instrument.asset_type) is not AssetType.CN_ETF:
             raise UnsupportedAssetTypeError("Realtime plan quotes require cn_etf.")
         symbol = _strip_exchange_prefix(instrument.symbol)
-        sina_data, fetched_at = self._fetch_sina_etf_realtime()
-        sina_row = _find_realtime_row(
-            sina_data,
-            _format_sina_etf_symbol(symbol),
-        )
-        if sina_row is None:
-            raise EmptyMarketDataError(f"No realtime ETF quote returned for {symbol}.")
-        return self._build_etf_quote(
-            sina_row,
-            symbol=symbol,
-            source="sina_fallback",
-            fetched_at=fetched_at,
-        )
+        cached = self._read_etf_quote_cache("sina", symbol)
+        if cached is not None:
+            return cached
+        self._raise_if_source_cooling_down("Sina", self._sina_failed_at)
+        try:
+            response = self._http_get(
+                _SINA_QUOTE_URL.format(symbol=_format_sina_etf_symbol(symbol)),
+                headers={"Referer": "https://finance.sina.com.cn"},
+                timeout=_REALTIME_HTTP_TIMEOUT_SECONDS,
+            )
+            response.raise_for_status()
+            quote = _parse_sina_etf_quote(response, symbol)
+        except Exception as exc:  # noqa: BLE001
+            self._sina_failed_at = time.monotonic()
+            raise MarketDataFetchError("Sina realtime ETF quote failed.") from exc
+        self._sina_failed_at = None
+        self._write_etf_quote_cache("sina", symbol, quote)
+        return quote
 
     def get_latest(self, instrument: Instrument) -> dict[str, object] | None:
         """Return the latest normalized row, preferring realtime spot data."""
@@ -247,6 +251,22 @@ class AkshareMarketDataProvider(MarketDataProvider):
         if asset_type is AssetType.CN_OPEN_FUND:
             return None
 
+        if asset_type is AssetType.CN_ETF:
+            try:
+                quote = self.get_etf_realtime_quote(instrument)
+            except MarketDataFetchError:
+                return None
+            return {
+                "date": pd.Timestamp(quote.fetched_at.astimezone(_CN_TIMEZONE).date()),
+                "open": None,
+                "high": None,
+                "low": None,
+                "close": quote.price,
+                "volume": quote.volume,
+                "amount": quote.amount,
+                "source": f"{quote.source}_realtime",
+            }
+
         snapshot = self._fetch_raw_realtime(asset_type)
         if snapshot is None:
             return None
@@ -261,11 +281,12 @@ class AkshareMarketDataProvider(MarketDataProvider):
 
         row = matched.iloc[0]
         close = _read_realtime_float(row, "最新价")
-        if close is None:
+        data_date = _read_realtime_date(row)
+        if close is None or data_date is None:
             return None
 
         return {
-            "date": pd.Timestamp(self._today_factory()),
+            "date": pd.Timestamp(data_date),
             "open": _read_first_realtime_float(row, "开盘价", "今开"),
             "high": _read_first_realtime_float(row, "最高价", "最高"),
             "low": _read_first_realtime_float(row, "最低价", "最低"),
@@ -275,23 +296,66 @@ class AkshareMarketDataProvider(MarketDataProvider):
             "source": "akshare_realtime",
         }
 
-    def _build_etf_quote(
+    def _get_eastmoney_etf_quote(self, instrument: Instrument) -> RealtimeQuote:
+        symbol = _strip_exchange_prefix(instrument.symbol)
+        cached = self._read_etf_quote_cache("eastmoney", symbol)
+        if cached is not None:
+            return cached
+        self._raise_if_source_cooling_down("Eastmoney", self._eastmoney_failed_at)
+        try:
+            response = self._http_get(
+                _EASTMONEY_QUOTE_URL,
+                params={
+                    "fltt": "2",
+                    "invt": "2",
+                    "fields": "f43,f44,f45,f46,f47,f48,f57,f58,f60,f86",
+                    "secid": f"{_eastmoney_etf_market_id(symbol)}.{symbol}",
+                },
+                timeout=_REALTIME_HTTP_TIMEOUT_SECONDS,
+            )
+            response.raise_for_status()
+            quote = _parse_eastmoney_etf_quote(response.json(), symbol)
+        except Exception as exc:  # noqa: BLE001
+            self._eastmoney_failed_at = time.monotonic()
+            raise MarketDataFetchError("Eastmoney realtime ETF quote failed.") from exc
+        self._eastmoney_failed_at = None
+        self._write_etf_quote_cache("eastmoney", symbol, quote)
+        return quote
+
+    def _read_etf_quote_cache(
         self,
-        row: pd.Series,
-        *,
-        symbol: str,
         source: str,
-        fetched_at: datetime,
-    ) -> RealtimeQuote:
-        return RealtimeQuote(
-            symbol=symbol,
-            price=_read_realtime_float(row, "最新价"),
-            previous_close=_read_realtime_float(row, "昨收"),
-            volume=_read_realtime_float(row, "成交量"),
-            amount=_read_realtime_float(row, "成交额"),
-            source=source,
-            fetched_at=fetched_at,
-        )
+        symbol: str,
+    ) -> RealtimeQuote | None:
+        cached = self._etf_quote_cache.get((source, symbol))
+        if cached is None:
+            return None
+        cached_at, quote = cached
+        if time.monotonic() - cached_at <= self._realtime_spot_ttl_seconds:
+            return quote
+        self._etf_quote_cache.pop((source, symbol), None)
+        return None
+
+    def _write_etf_quote_cache(
+        self,
+        source: str,
+        symbol: str,
+        quote: RealtimeQuote,
+    ) -> None:
+        if self._realtime_spot_ttl_seconds > 0:
+            self._etf_quote_cache[(source, symbol)] = (time.monotonic(), quote)
+
+    def _raise_if_source_cooling_down(
+        self,
+        source: str,
+        failed_at: float | None,
+    ) -> None:
+        if failed_at is not None and (
+            time.monotonic() - failed_at <= self._eastmoney_failure_ttl_seconds
+        ):
+            raise MarketDataFetchError(
+                f"Recent {source} request failed; retry suppressed."
+            )
 
     def _fetch_raw_realtime(
         self,
@@ -304,11 +368,11 @@ class AkshareMarketDataProvider(MarketDataProvider):
         ak_module = self._akshare
         try:
             if asset_type is AssetType.CN_INDEX:
-                raw_data = self._call_with_retry(ak_module.stock_zh_index_spot_em)
-            elif asset_type is AssetType.CN_ETF:
-                raw_data = self._call_with_retry(ak_module.fund_etf_spot_em)
+                raw_data = self._call_eastmoney_with_retry(
+                    ak_module.stock_zh_index_spot_em
+                )
             elif asset_type is AssetType.CN_STOCK:
-                raw_data = self._call_with_retry(ak_module.stock_zh_a_spot_em)
+                raw_data = self._call_eastmoney_with_retry(ak_module.stock_zh_a_spot_em)
             else:
                 return None
         except (AttributeError, MarketDataFetchError):
@@ -372,7 +436,7 @@ class AkshareMarketDataProvider(MarketDataProvider):
 
         if asset_type is AssetType.CN_INDEX:
             return (
-                self._call_with_retry(
+                self._call_eastmoney_with_retry(
                     ak_module.stock_zh_index_daily_em,
                     symbol=_format_cn_index_symbol(instrument.symbol),
                 ),
@@ -387,7 +451,7 @@ class AkshareMarketDataProvider(MarketDataProvider):
             )
         if asset_type is AssetType.CN_STOCK:
             return (
-                self._call_with_retry(
+                self._call_eastmoney_with_retry(
                     ak_module.stock_zh_a_hist,
                     symbol=instrument.symbol,
                     period="daily",
@@ -419,7 +483,6 @@ class AkshareMarketDataProvider(MarketDataProvider):
         try:
             raw_data = self._call_eastmoney_with_retry(
                 self._akshare.fund_open_fund_info_em,
-                failure_group="fund_nav",
                 symbol=symbol,
                 indicator="\u5355\u4f4d\u51c0\u503c\u8d70\u52bf",
             )
@@ -445,7 +508,6 @@ class AkshareMarketDataProvider(MarketDataProvider):
             return (
                 self._call_eastmoney_with_retry(
                     ak_module.fund_etf_hist_em,
-                    failure_group="etf_history",
                     symbol=instrument.symbol,
                     period="daily",
                     start_date=start_date,
@@ -458,7 +520,6 @@ class AkshareMarketDataProvider(MarketDataProvider):
         try:
             raw_data = self._call_eastmoney_with_retry(
                 ak_module.fund_etf_hist_em,
-                failure_group="etf_history",
                 symbol=instrument.symbol,
                 period="daily",
                 start_date=start_date,
@@ -478,34 +539,6 @@ class AkshareMarketDataProvider(MarketDataProvider):
             ),
             "akshare",
         )
-
-    def _fetch_sina_etf_realtime(self) -> tuple[pd.DataFrame, datetime]:
-        if self._sina_etf_spot_cache is not None:
-            cached_at, fetched_at, raw_data = self._sina_etf_spot_cache
-            if time.monotonic() - cached_at <= self._realtime_spot_ttl_seconds:
-                if raw_data is None:
-                    raise MarketDataFetchError(
-                        "Recent Sina realtime request failed; retry suppressed."
-                    )
-                return raw_data, fetched_at
-
-        try:
-            raw_data = self._call_with_retry(
-                self._akshare.fund_etf_category_sina,
-                symbol="ETF\u57fa\u91d1",
-            )
-        except MarketDataFetchError:
-            if self._realtime_spot_ttl_seconds > 0:
-                self._sina_etf_spot_cache = (
-                    time.monotonic(),
-                    self._now_factory(),
-                    None,
-                )
-            raise
-        fetched_at = self._now_factory()
-        if self._realtime_spot_ttl_seconds > 0:
-            self._sina_etf_spot_cache = (time.monotonic(), fetched_at, raw_data)
-        return raw_data, fetched_at
 
     def _call_with_retry(
         self,
@@ -530,25 +563,16 @@ class AkshareMarketDataProvider(MarketDataProvider):
     def _call_eastmoney_with_retry(
         self,
         func: Callable[..., pd.DataFrame],
-        *,
-        failure_group: str,
         **kwargs: object,
     ) -> pd.DataFrame:
-        now = time.monotonic()
-        failed_at = self._eastmoney_failed_at.get(failure_group)
-        if failed_at is not None and (
-            now - failed_at <= self._eastmoney_failure_ttl_seconds
-        ):
-            raise MarketDataFetchError(
-                "Recent Eastmoney request failed; retry suppressed."
-            )
+        self._raise_if_source_cooling_down("Eastmoney", self._eastmoney_failed_at)
         try:
             result = self._call_with_retry(func, **kwargs)
         except MarketDataFetchError:
             if self._eastmoney_failure_ttl_seconds > 0:
-                self._eastmoney_failed_at[failure_group] = time.monotonic()
+                self._eastmoney_failed_at = time.monotonic()
             raise
-        self._eastmoney_failed_at.pop(failure_group, None)
+        self._eastmoney_failed_at = None
         return result
 
     def _filter_by_date(
@@ -637,6 +661,16 @@ def _read_first_realtime_float(row: pd.Series, *columns: str) -> float | None:
     return None
 
 
+def _read_realtime_date(row: pd.Series) -> date | None:
+    for column in ("数据日期", "更新时间", "时间戳"):
+        if column not in row or pd.isna(row[column]):
+            continue
+        value = pd.to_datetime(row[column], errors="coerce")
+        if not pd.isna(value):
+            return value.date()
+    return None
+
+
 def _find_realtime_row(raw_data: pd.DataFrame | None, symbol: str) -> pd.Series | None:
     if raw_data is None or raw_data.empty or "\u4ee3\u7801" not in raw_data.columns:
         return None
@@ -646,3 +680,90 @@ def _find_realtime_row(raw_data: pd.DataFrame | None, symbol: str) -> pd.Series 
     if matched.empty:
         return None
     return matched.iloc[0]
+
+
+def _eastmoney_etf_market_id(symbol: str) -> int:
+    if symbol.startswith("5"):
+        return 1
+    if symbol.startswith("1"):
+        return 0
+    raise ValueError(f"Unsupported CN ETF exchange for symbol {symbol}.")
+
+
+def _parse_eastmoney_etf_quote(
+    payload: object,
+    symbol: str,
+) -> RealtimeQuote:
+    if not isinstance(payload, dict) or not isinstance(payload.get("data"), dict):
+        raise ValueError("Eastmoney realtime response has no quote data.")
+    data = payload["data"]
+    if str(data.get("f57", "")) != symbol:
+        raise ValueError("Eastmoney realtime response symbol does not match.")
+    timestamp = _read_unix_timestamp(data.get("f86"))
+    price = _read_positive_float(data.get("f43"), "Eastmoney latest price")
+    return RealtimeQuote(
+        symbol=symbol,
+        price=price,
+        previous_close=_read_mapping_float(data, "f60"),
+        volume=_read_mapping_float(data, "f47"),
+        amount=_read_mapping_float(data, "f48"),
+        source="eastmoney",
+        fetched_at=timestamp,
+    )
+
+
+def _parse_sina_etf_quote(response: Any, symbol: str) -> RealtimeQuote:
+    content = getattr(response, "content", b"")
+    text = (
+        bytes(content).decode("gb18030")
+        if content
+        else str(getattr(response, "text", ""))
+    )
+    match = re.search(r'var hq_str_([a-z]{2}\d{6})="([^"]*)"', text)
+    if match is None:
+        raise ValueError("Sina realtime response has no quote data.")
+    if match.group(1) != _format_sina_etf_symbol(symbol):
+        raise ValueError("Sina realtime response symbol does not match.")
+    values = match.group(2).split(",")
+    if len(values) < 32:
+        raise ValueError("Sina realtime response is incomplete.")
+    quote_time = datetime.strptime(
+        f"{values[30]} {values[31]}",
+        "%Y-%m-%d %H:%M:%S",
+    ).replace(tzinfo=_CN_TIMEZONE)
+    price = _read_positive_float(values[3], "Sina latest price")
+    return RealtimeQuote(
+        symbol=symbol,
+        price=price,
+        previous_close=_read_text_float(values[2]),
+        volume=_read_text_float(values[8]),
+        amount=_read_text_float(values[9]),
+        source="sina_fallback",
+        fetched_at=quote_time,
+    )
+
+
+def _read_unix_timestamp(value: object) -> datetime:
+    timestamp = _read_text_float(value)
+    if timestamp is None or timestamp <= 0:
+        raise ValueError("Realtime response has no valid timestamp.")
+    return datetime.fromtimestamp(timestamp, tz=UTC)
+
+
+def _read_mapping_float(values: dict[str, object], key: str) -> float | None:
+    return _read_text_float(values.get(key))
+
+
+def _read_positive_float(value: object, label: str) -> float:
+    number = _read_text_float(value)
+    if number is None or number <= 0:
+        raise ValueError(f"{label} must be positive and finite.")
+    return number
+
+
+def _read_text_float(value: object) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
