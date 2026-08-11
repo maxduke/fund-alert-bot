@@ -669,18 +669,11 @@ async def run_scheduled_fund_nav_process(
                 ],
                 errors=[*settlement_result.errors, *position_profit_result.errors],
             )
-            settlement_notice = reserve_drawdown_plan_data_unavailable_notice(
-                connection,
-                evaluation_date=processing_date,
-                result=settlement_result,
-                phase="fund_nav",
-            )
-            profit_notice = reserve_drawdown_plan_data_unavailable_notice(
+            fund_nav_notice = reserve_drawdown_plan_data_unavailable_notice(
                 connection,
                 evaluation_date=(position_profit_result.data_date or processing_date),
-                result=position_profit_result,
+                result=result,
                 phase="fund_nav",
-                key_scope="price_gain",
             )
         for skip in result.no_data_skips:
             LOGGER.info(
@@ -703,8 +696,7 @@ async def run_scheduled_fund_nav_process(
             notifications=[
                 *result.notifications,
                 *position_profit_result.notifications,
-                *([] if settlement_notice is None else [settlement_notice]),
-                *([] if profit_notice is None else [profit_notice]),
+                *([] if fund_nav_notice is None else [fund_nav_notice]),
             ],
             notification_settings=notification_settings,
         )

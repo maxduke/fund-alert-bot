@@ -165,6 +165,7 @@ def test_thresholds_are_once_per_continuous_positive_position_cycle(tmp_path) ->
             processing_date=date(2024, 1, 3),
         )
         assert len(first.notifications) == 1
+        assert "NAV source: akshare_eastmoney" in first.notifications[0].text
         assert "20.0%\n• 30.0%" in first.notifications[0].text
         assert list_position_profit_threshold_keys(
             connection,
@@ -268,17 +269,6 @@ def test_stale_nav_and_missing_position_never_emit(tmp_path) -> None:
                 evaluation_date=stale.data_date,
                 result=stale,
                 phase="fund_nav",
-                key_scope="price_gain",
-            )
-            is not None
-        )
-        assert (
-            reserve_drawdown_plan_data_unavailable_notice(
-                connection,
-                evaluation_date=stale.data_date,
-                result=stale,
-                phase="fund_nav",
-                key_scope="price_gain",
             )
             is None
         )

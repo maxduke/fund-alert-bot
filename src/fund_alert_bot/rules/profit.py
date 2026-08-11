@@ -154,6 +154,7 @@ def build_position_profit_alert(
             "",
             f"Fund: {symbol} / {name}",
             f"Data date: {nav_date}",
+            f"NAV source: {nav.source}",
             f"Unit NAV: {_format_number(nav_value)}",
             f"Average unit cost ({accuracy}): {_format_number(cost)}",
             f"Gain since configured position cost: {profit_rate:+.1%}",

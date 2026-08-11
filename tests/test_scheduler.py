@@ -11,7 +11,12 @@ import pandas as pd
 import pytest
 
 from fund_alert_bot import commands, scheduler
-from fund_alert_bot.checks import evaluate_drawdown_plan_rule
+from fund_alert_bot.checks import (
+    ManualAddSettlementResult,
+    ProfitCheckResult,
+    RuleNoDataSkip,
+    evaluate_drawdown_plan_rule,
+)
 from fund_alert_bot.config import NotificationSettings
 from fund_alert_bot.db import (
     add_rule,
@@ -769,6 +774,101 @@ def test_scheduled_fund_nav_process_applies_pending_add_once(tmp_path: Path) -> 
     assert provider.nav_calls == [("000001", date(2024, 1, 2))]
     assert len(application.bot.messages) == 1
     assert "Manual addition estimate updated" in application.bot.messages[0]["text"]
+
+
+def test_scheduled_fund_nav_process_combines_data_failure_notice(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    with open_connection(sqlite_path) as connection:
+        initialize_database(connection)
+        settlement_rule_id = add_rule(
+            connection,
+            type="dca_reminder",
+            symbol="000001",
+            name="A500 feeder",
+            asset_type="cn_open_fund",
+            params={"amount": 1000, "weekday": 1},
+        )
+        profit_rule_id = add_rule(
+            connection,
+            type="profit_reminder",
+            symbol="000002",
+            name="Growth feeder",
+            asset_type="cn_open_fund",
+            params={"cost": "auto", "thresholds": [0.2]},
+        )
+
+    settlement_result = ManualAddSettlementResult(
+        checked_estimates=1,
+        notifications=[],
+        no_data_skips=[RuleNoDataSkip(settlement_rule_id, "000001", "NAV unavailable")],
+        errors=[],
+    )
+    profit_result = ProfitCheckResult(
+        checked_rules=1,
+        notifications=[],
+        skipped_duplicates=0,
+        no_data_skips=[RuleNoDataSkip(profit_rule_id, "000002", "NAV unavailable")],
+        errors=[],
+        data_date=date(2024, 1, 2),
+    )
+    empty_result = ManualAddSettlementResult(0, [], [], [])
+    monkeypatch.setattr(
+        scheduler,
+        "process_scheduled_dca_occurrences",
+        lambda *args, **kwargs: settlement_result,
+    )
+    monkeypatch.setattr(
+        scheduler, "process_manual_add_estimates", lambda *args, **kwargs: empty_result
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "evaluate_position_profit_rules",
+        lambda *args, **kwargs: profit_result,
+    )
+
+    async def no_retry(**kwargs: object) -> int:
+        del kwargs
+        return 0
+
+    sent = []
+
+    async def capture_notifications(**kwargs: object) -> None:
+        sent.extend(kwargs["notifications"])
+
+    monkeypatch.setattr(
+        scheduler, "retry_pending_drawdown_plan_notifications", no_retry
+    )
+    monkeypatch.setattr(
+        scheduler, "retry_pending_position_profit_notifications", no_retry
+    )
+    monkeypatch.setattr(
+        scheduler, "send_scheduled_notifications", capture_notifications
+    )
+
+    asyncio.run(
+        scheduler.run_scheduled_fund_nav_process(
+            application=FakeApplication(),
+            sqlite_path=sqlite_path,
+            allowed_user_ids={123},
+            market_data_provider=object(),
+            market_calendar=object(),
+            timezone="Asia/Shanghai",
+            run_date=date(2024, 1, 3),
+        )
+    )
+
+    assert len(sent) == 1
+    assert "000001: NAV unavailable" in sent[0].text
+    assert "000002: NAV unavailable" in sent[0].text
+    with open_connection(sqlite_path) as connection:
+        event_keys = [
+            row["alert_key"]
+            for row in connection.execute("SELECT alert_key FROM alert_events")
+        ]
+    assert event_keys == ["data_unavailable:fund_nav:2024-01-02"]
 
 
 def test_scheduled_market_check_notifies_once_when_plan_close_is_missing(
