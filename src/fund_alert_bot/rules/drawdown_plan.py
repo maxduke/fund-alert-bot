@@ -19,6 +19,7 @@ _THRESHOLD_TOLERANCE = 1e-12
 _PRICE_RELATIVE_TOLERANCE = 1e-4
 _PRICE_ABSOLUTE_TOLERANCE = 1e-6
 _MAX_FIXED_DECIMAL_CHARS = 24
+_MAX_TIERS = 50
 _SYMBOL_PATTERN = re.compile(r"[0-9]{6}")
 _REALTIME_SOURCES = frozenset({"eastmoney", "sina_fallback"})
 _CONFIRMED_HISTORY_SOURCES = frozenset({"akshare_eastmoney"})
@@ -602,6 +603,8 @@ def _read_tiers(raw_tiers: object) -> tuple[DrawdownTier, ...]:
         or not raw_tiers
     ):
         raise ValueError("tiers must be a non-empty sequence.")
+    if len(raw_tiers) > _MAX_TIERS:
+        raise ValueError(f"tiers must contain at most {_MAX_TIERS} entries.")
 
     tiers: list[DrawdownTier] = []
     previous_drawdown = 0.0

@@ -45,6 +45,11 @@ def test_plan_config_applies_defaults_and_preserves_incremental_amounts() -> Non
     )
 
 
+def test_plan_config_limits_tiers_to_bounded_telegram_actions() -> None:
+    with pytest.raises(ValueError, match="at most 50"):
+        _config([(index / 1000, 1) for index in range(1, 52)])
+
+
 def test_mark_added_fallback_keeps_canonical_tier_precision() -> None:
     tier = DrawdownTier(0.123456789, 100.25, "0.123456789")
 

@@ -87,7 +87,8 @@ Telegram boundary and evaluator boundary:
   symbol;
 - a non-empty display name;
 - positive `lookback_days`;
-- non-empty tiers in strictly ascending drawdown order;
+- between 1 and 50 tiers in strictly ascending drawdown order, keeping Telegram
+  actions and messages within channel limits;
 - unique finite drawdowns strictly between zero and one;
 - positive finite amounts;
 - `sma_window >= 2`;
