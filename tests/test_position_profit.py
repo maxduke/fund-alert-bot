@@ -16,6 +16,7 @@ from fund_alert_bot.commands import CommandParseError, parse_add_profit_args
 from fund_alert_bot.db import (
     add_alert_event,
     add_position_profit_rule,
+    add_rule,
     delete_rule,
     get_active_position_cycle,
     init_db,
@@ -57,6 +58,12 @@ class RecordingBot:
         self.messages.append(dict(kwargs))
 
 
+class LatestProvider:
+    def get_latest(self, instrument: object) -> dict[str, object]:
+        del instrument
+        return {"date": "2024-01-02", "close": 1, "source": "test"}
+
+
 def test_auto_profit_parser_is_strict() -> None:
     command = parse_add_profit_args(
         ["cn_open_fund", "000001", "A500 feeder", "auto", "20,30"]
@@ -73,6 +80,38 @@ def test_auto_profit_parser_is_strict() -> None:
     ):
         with pytest.raises(CommandParseError):
             parse_add_profit_args(args)
+
+
+def test_malformed_legacy_rule_does_not_abort_other_profit_rules(tmp_path) -> None:
+    with open_connection(tmp_path / "fund-alert.sqlite3") as connection:
+        init_db(connection)
+        malformed_id = add_rule(
+            connection,
+            type="profit_reminder",
+            symbol="510300",
+            name="bad",
+            asset_type="cn_etf",
+            params={"cost": 1, "thresholds": [0.2]},
+        )
+        connection.execute(
+            "UPDATE rules SET params_json = '[]' WHERE id = ?",
+            (malformed_id,),
+        )
+        connection.commit()
+        add_rule(
+            connection,
+            type="profit_reminder",
+            symbol="159915",
+            name="valid",
+            asset_type="cn_etf",
+            params={"cost": 1, "thresholds": [0.5]},
+        )
+
+        result = evaluate_profit_rules(connection, LatestProvider())
+
+    assert result.checked_rules == 2
+    assert len(result.errors) == 1
+    assert result.errors[0].rule_id == malformed_id
 
 
 def test_thresholds_are_once_per_continuous_positive_position_cycle(tmp_path) -> None:

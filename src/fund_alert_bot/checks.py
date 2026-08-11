@@ -1241,20 +1241,21 @@ def evaluate_profit_rules(
     """Evaluate enabled profit reminder rules and store new alert events."""
 
     rules = [
-        row
-        for row in list_enabled_rules(connection)
-        if row["type"] == PROFIT_RULE_TYPE
-        and _load_params(str(row["params_json"])).get("cost") != "auto"
+        row for row in list_enabled_rules(connection) if row["type"] == PROFIT_RULE_TYPE
     ]
 
     notifications: list[AlertNotification] = []
     errors: list[RuleCheckError] = []
     no_data_skips: list[RuleNoDataSkip] = []
     skipped_duplicates = 0
+    checked_rules = len(rules)
     latest_cache: dict[MarketDataCacheKey, dict[str, object] | None] = {}
 
     for row in rules:
         try:
+            if _load_params(str(row["params_json"])).get("cost") == "auto":
+                checked_rules -= 1
+                continue
             asset_type = AssetType(row["asset_type"])
             instrument = Instrument(
                 symbol=row["symbol"],
@@ -1328,7 +1329,7 @@ def evaluate_profit_rules(
             )
 
     return ProfitCheckResult(
-        checked_rules=len(rules),
+        checked_rules=checked_rules,
         notifications=notifications,
         skipped_duplicates=skipped_duplicates,
         no_data_skips=no_data_skips,
