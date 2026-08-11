@@ -758,24 +758,70 @@ def has_position_profit_evaluation(
     )
 
 
+def _position_profit_state_matches(
+    connection: sqlite3.Connection,
+    *,
+    rule_id: int,
+    position_cycle_id: int,
+    units: float,
+    average_unit_cost: float,
+    is_estimated: bool,
+) -> bool:
+    rule = connection.execute("SELECT * FROM rules WHERE id = ?", (rule_id,)).fetchone()
+    if rule is None or not bool(rule["enabled"]) or not is_auto_cost_profit_rule(rule):
+        return False
+    cycle = connection.execute(
+        "SELECT fund_symbol, ended_at FROM position_cycles WHERE id = ?",
+        (position_cycle_id,),
+    ).fetchone()
+    position = get_position_snapshot(connection, str(rule["symbol"]))
+    settings = get_fund_settings(connection, str(rule["symbol"]))
+    return bool(
+        cycle is not None
+        and cycle["ended_at"] is None
+        and str(cycle["fund_symbol"]) == str(rule["symbol"])
+        and position is not None
+        and float(position["units"]) == units
+        and float(position["average_unit_cost"]) == average_unit_cost
+        and bool(position["is_estimated"]) == is_estimated
+        and position["position_sync_required_since"] is None
+        and (settings is None or settings["position_sync_required_since"] is None)
+    )
+
+
 def record_position_profit_evaluation(
     connection: sqlite3.Connection,
     *,
     rule_id: int,
     position_cycle_id: int,
     nav_date: str,
+    position: Any,
 ) -> None:
     """Remember one successful no-alert evaluation."""
 
-    connection.execute(
-        """
-        INSERT OR IGNORE INTO position_profit_evaluations (
-            rule_id, position_cycle_id, nav_date, created_at
-        ) VALUES (?, ?, ?, ?)
-        """,
-        (rule_id, position_cycle_id, nav_date, _utc_now_text()),
-    )
-    connection.commit()
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        if not _position_profit_state_matches(
+            connection,
+            rule_id=rule_id,
+            position_cycle_id=position_cycle_id,
+            units=float(position["units"]),
+            average_unit_cost=float(position["average_unit_cost"]),
+            is_estimated=bool(position["is_estimated"]),
+        ):
+            raise sqlite3.IntegrityError("Position-linked gain state changed.")
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO position_profit_evaluations (
+                rule_id, position_cycle_id, nav_date, created_at
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (rule_id, position_cycle_id, nav_date, _utc_now_text()),
+        )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
 
 
 def list_position_profit_statuses(
@@ -829,50 +875,14 @@ def persist_position_profit_alert(
 
     connection.execute("BEGIN IMMEDIATE")
     try:
-        rule = connection.execute(
-            """
-            SELECT enabled, symbol, params_json FROM rules
-            WHERE id = ? AND type = 'profit_reminder'
-            """,
-            (rule_id,),
-        ).fetchone()
-        cycle = connection.execute(
-            "SELECT fund_symbol, ended_at FROM position_cycles WHERE id = ?",
-            (position_cycle_id,),
-        ).fetchone()
-        position = connection.execute(
-            """
-            SELECT units, average_unit_cost, is_estimated,
-                   position_sync_required_since
-            FROM position_snapshots WHERE fund_symbol = ?
-            """,
-            (None if rule is None else rule["symbol"],),
-        ).fetchone()
-        settings = connection.execute(
-            """
-            SELECT position_sync_required_since
-            FROM fund_settings WHERE fund_symbol = ?
-            """,
-            (None if rule is None else rule["symbol"],),
-        ).fetchone()
         payload = alert["payload"]
-        if (
-            rule is None
-            or not bool(rule["enabled"])
-            or json.loads(str(rule["params_json"])).get("cost") != "auto"
-            or cycle is None
-            or cycle["ended_at"] is not None
-            or str(cycle["fund_symbol"]) != str(rule["symbol"])
-            or position is None
-            or float(position["units"]) != float(payload["position_units"])
-            or float(position["average_unit_cost"])
-            != float(payload["average_unit_cost"])
-            or bool(position["is_estimated"]) != (payload["accuracy"] == "estimated")
-            or position["position_sync_required_since"] is not None
-            or (
-                settings is not None
-                and settings["position_sync_required_since"] is not None
-            )
+        if not _position_profit_state_matches(
+            connection,
+            rule_id=rule_id,
+            position_cycle_id=position_cycle_id,
+            units=float(payload["position_units"]),
+            average_unit_cost=float(payload["average_unit_cost"]),
+            is_estimated=payload["accuracy"] == "estimated",
         ):
             raise sqlite3.IntegrityError("Position-linked gain state changed.")
         existing = list_position_profit_threshold_keys(

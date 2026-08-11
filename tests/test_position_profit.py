@@ -375,7 +375,15 @@ def test_same_nav_date_is_not_replayed_after_cost_sync(tmp_path) -> None:
         )
 
 
-def test_concurrent_position_sync_prevents_stale_gain_alert(tmp_path) -> None:
+@pytest.mark.parametrize(
+    ("initial_cost", "synced_cost"),
+    [(1.0, 1.2), (1.2, 1.0)],
+)
+def test_concurrent_position_sync_discards_stale_gain_evaluation(
+    tmp_path,
+    initial_cost: float,
+    synced_cost: float,
+) -> None:
     sqlite_path = tmp_path / "fund-alert.sqlite3"
     with open_connection(sqlite_path) as connection:
         init_db(connection)
@@ -389,7 +397,7 @@ def test_concurrent_position_sync_prevents_stale_gain_alert(tmp_path) -> None:
             connection,
             fund_symbol="000001",
             units=100,
-            average_unit_cost=1,
+            average_unit_cost=initial_cost,
         )
         cycle_id = int(get_active_position_cycle(connection, "000001")["id"])
 
@@ -401,8 +409,8 @@ def test_concurrent_position_sync_prevents_stale_gain_alert(tmp_path) -> None:
                     upsert_position_snapshot(
                         other,
                         fund_symbol="000001",
-                        units=120,
-                        average_unit_cost=1.2,
+                        units=100,
+                        average_unit_cost=synced_cost,
                     )
                 return super().get_fund_nav(instrument, nav_date)
 

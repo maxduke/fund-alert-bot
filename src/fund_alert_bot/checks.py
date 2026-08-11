@@ -1496,6 +1496,7 @@ def evaluate_position_profit_rules(
                     rule_id=rule_id,
                     position_cycle_id=cycle_id,
                     nav_date=nav_date,
+                    position=position,
                 )
                 continue
             alert, thresholds = built
