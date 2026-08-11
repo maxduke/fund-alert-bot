@@ -303,10 +303,6 @@ def test_init_db_does_not_recover_ambiguous_preexisting_history(
             )
             == 1
         )
-        retry_row = connection.execute(
-            "SELECT notification_attempted_at FROM alert_events WHERE id = 1"
-        ).fetchone()
-        assert retry_row["notification_attempted_at"] is not None
         assert [
             int(row["id"]) for row in list_retryable_standard_alert_events(connection)
         ] == [1]
@@ -327,6 +323,50 @@ def test_init_db_does_not_recover_ambiguous_preexisting_history(
         assert [
             int(row["id"]) for row in list_retryable_standard_alert_events(connection)
         ] == [new_event_id]
+
+
+def test_init_db_preserves_delivery_aware_pending_event(tmp_path: Path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+
+    with open_connection(sqlite_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE alert_events (
+                id INTEGER PRIMARY KEY,
+                rule_id INTEGER NOT NULL,
+                alert_key TEXT NOT NULL UNIQUE,
+                title TEXT NOT NULL,
+                message TEXT NOT NULL,
+                payload_json TEXT,
+                triggered_at TEXT NOT NULL,
+                notification_status TEXT NOT NULL DEFAULT 'pending',
+                notification_attempted_at TEXT,
+                notification_sent_at TEXT,
+                notification_result_json TEXT
+            )
+            """
+        )
+        connection.executemany(
+            """
+            INSERT INTO alert_events (
+                rule_id, alert_key, title, message, triggered_at
+            ) VALUES (99, ?, 'Drawdown reminder', ?, ?)
+            """,
+            (
+                ("migrated-history", "already sent", "2024-01-01T00:00:00+00:00"),
+                (
+                    "delivery-aware-pending",
+                    "reserved before crash",
+                    "2026-08-11T00:00:00+00:00",
+                ),
+            ),
+        )
+
+        init_db(connection)
+
+        assert [
+            int(row["id"]) for row in list_retryable_standard_alert_events(connection)
+        ] == [2]
 
 
 def test_rule_helpers_add_list_filter_and_delete_rules(tmp_path: Path) -> None:

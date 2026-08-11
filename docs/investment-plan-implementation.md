@@ -655,11 +655,8 @@ Keep confirmed business state separate from delivery state:
   reopening recorded thresholds;
 - pending and failed simple drawdown, fixed-cost Price-Gain, and DCA reminders
   retry during the next morning NAV process or application startup;
-- the first standard-recovery startup records the existing event high-water
-  mark, so ambiguous pre-existing `pending` rows are not replayed while
-  explicitly failed deliveries remain retryable;
-- re-reserving a failed event keeps its prior attempt timestamp, allowing a
-  second crash before dispatch to remain distinguishable from migrated history;
+- the one-time delivery-state migration marks pre-tracking standard reminders
+  as already handled, while preserving delivery-aware pending and failed events;
 - a recovered DCA action requires the event's persisted fund symbol to match
   the current occurrence, preventing deleted SQLite rule IDs from being reused;
 - expired pre-alerts are not retried;

@@ -21,9 +21,8 @@ SUPPRESSING_ALERT_NOTIFICATION_STATUSES = (
     ALERT_NOTIFICATION_PENDING,
     ALERT_NOTIFICATION_SENT,
 )
-STANDARD_NOTIFICATION_RECOVERY_CUTOFF_KEY = (
-    "standard_notification_recovery_cutoff_event_id"
-)
+STANDARD_NOTIFICATION_RECOVERY_MIGRATION_KEY = "standard_notification_recovery_v1"
+DELIVERY_TRACKING_INTRODUCED_AT = "2026-06-05T14:41:42+00:00"
 
 
 def connect(sqlite_path: str | Path) -> sqlite3.Connection:
@@ -259,15 +258,13 @@ def init_db(connection: sqlite3.Connection) -> None:
         );
         """
     )
-    _ensure_alert_event_delivery_columns(connection)
+    delivery_columns_added = _ensure_alert_event_delivery_columns(connection)
     _ensure_fund_settings_columns(connection)
     now = _utc_now_text()
-    connection.execute(
-        """
-        INSERT OR IGNORE INTO app_metadata (key, value, updated_at)
-        SELECT ?, CAST(COALESCE(MAX(id), 0) AS TEXT), ? FROM alert_events
-        """,
-        (STANDARD_NOTIFICATION_RECOVERY_CUTOFF_KEY, now),
+    _ensure_standard_notification_recovery_migration(
+        connection,
+        delivery_columns_added=delivery_columns_added,
+        now=now,
     )
     connection.execute(
         """
@@ -2256,6 +2253,7 @@ def reserve_alert_event(
                 payload_json = ?,
                 triggered_at = ?,
                 notification_status = ?,
+                notification_attempted_at = NULL,
                 notification_sent_at = NULL,
                 notification_result_json = NULL
             WHERE id = ?
@@ -2595,23 +2593,7 @@ def list_retryable_standard_alert_events(
                     e.payload_json, '$.fund_symbol'
                 )
             WHERE
-                (
-                    e.notification_status = ?
-                    OR (
-                        e.notification_status = ?
-                        AND (
-                            e.notification_attempted_at IS NOT NULL
-                            OR e.id > COALESCE(
-                                (
-                                    SELECT CAST(value AS INTEGER)
-                                    FROM app_metadata
-                                    WHERE key = ?
-                                ),
-                                0
-                            )
-                        )
-                    )
-                )
+                e.notification_status IN (?, ?)
                 AND e.title IN (
                     'DCA reminder',
                     'Drawdown reminder',
@@ -2620,11 +2602,7 @@ def list_retryable_standard_alert_events(
                 AND COALESCE(json_extract(e.payload_json, '$.phase'), '') = ''
             ORDER BY e.id
             """,
-            (
-                ALERT_NOTIFICATION_FAILED,
-                ALERT_NOTIFICATION_PENDING,
-                STANDARD_NOTIFICATION_RECOVERY_CUTOFF_KEY,
-            ),
+            (ALERT_NOTIFICATION_PENDING, ALERT_NOTIFICATION_FAILED),
         ).fetchall()
     )
 
@@ -2728,7 +2706,7 @@ def close_position_from_profit_event(
         raise
 
 
-def _ensure_alert_event_delivery_columns(connection: sqlite3.Connection) -> None:
+def _ensure_alert_event_delivery_columns(connection: sqlite3.Connection) -> bool:
     columns = {
         row["name"]
         for row in connection.execute("PRAGMA table_info(alert_events)").fetchall()
@@ -2739,11 +2717,68 @@ def _ensure_alert_event_delivery_columns(connection: sqlite3.Connection) -> None
         "notification_sent_at": "TEXT",
         "notification_result_json": "TEXT",
     }
+    delivery_columns_added = "notification_status" not in columns
     for column, definition in column_definitions.items():
         if column not in columns:
             connection.execute(
                 f"ALTER TABLE alert_events ADD COLUMN {column} {definition}"
             )
+    return delivery_columns_added
+
+
+def _ensure_standard_notification_recovery_migration(
+    connection: sqlite3.Connection,
+    *,
+    delivery_columns_added: bool,
+    now: str,
+) -> None:
+    if connection.execute(
+        "SELECT 1 FROM app_metadata WHERE key = ?",
+        (STANDARD_NOTIFICATION_RECOVERY_MIGRATION_KEY,),
+    ).fetchone():
+        return
+
+    if delivery_columns_added:
+        connection.execute(
+            """
+            UPDATE alert_events
+            SET notification_status = ?
+            WHERE notification_status = ?
+                AND title IN (
+                    'DCA reminder',
+                    'Drawdown reminder',
+                    'Price-Gain reminder'
+                )
+            """,
+            (ALERT_NOTIFICATION_SENT, ALERT_NOTIFICATION_PENDING),
+        )
+    else:
+        connection.execute(
+            """
+            UPDATE alert_events
+            SET notification_status = ?
+            WHERE notification_status = ?
+                AND notification_attempted_at IS NULL
+                AND triggered_at < ?
+                AND title IN (
+                    'DCA reminder',
+                    'Drawdown reminder',
+                    'Price-Gain reminder'
+                )
+            """,
+            (
+                ALERT_NOTIFICATION_SENT,
+                ALERT_NOTIFICATION_PENDING,
+                DELIVERY_TRACKING_INTRODUCED_AT,
+            ),
+        )
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO app_metadata (key, value, updated_at)
+        VALUES (?, 'complete', ?)
+        """,
+        (STANDARD_NOTIFICATION_RECOVERY_MIGRATION_KEY, now),
+    )
 
 
 def _ensure_fund_settings_columns(connection: sqlite3.Connection) -> None:
