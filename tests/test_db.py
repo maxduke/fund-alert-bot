@@ -276,15 +276,14 @@ def test_init_db_does_not_recover_ambiguous_preexisting_history(
         init_db(connection)
 
         assert list_retryable_standard_alert_events(connection) == []
-        connection.execute(
-            "UPDATE alert_events SET notification_status = 'failed' WHERE id = 1"
+        record_alert_notification_result(
+            connection,
+            event_id=1,
+            results=[{"channel": "telegram", "success": False}],
         )
         assert [
             int(row["id"]) for row in list_retryable_standard_alert_events(connection)
         ] == [1]
-        connection.execute(
-            "UPDATE alert_events SET notification_status = 'sent' WHERE id = 1"
-        )
 
         rule_id = add_rule(
             connection,
@@ -294,6 +293,29 @@ def test_init_db_does_not_recover_ambiguous_preexisting_history(
             asset_type="cn_index",
             params={"lookback_days": 365, "thresholds": [0.15]},
         )
+        assert (
+            reserve_alert_event(
+                connection,
+                rule_id=rule_id,
+                alert_key="old-drawdown",
+                title="Drawdown reminder",
+                message="retry interrupted before delivery",
+            )
+            == 1
+        )
+        retry_row = connection.execute(
+            "SELECT notification_attempted_at FROM alert_events WHERE id = 1"
+        ).fetchone()
+        assert retry_row["notification_attempted_at"] is not None
+        assert [
+            int(row["id"]) for row in list_retryable_standard_alert_events(connection)
+        ] == [1]
+        record_alert_notification_result(
+            connection,
+            event_id=1,
+            results=[{"channel": "telegram", "success": True}],
+        )
+
         new_event_id = reserve_alert_event(
             connection,
             rule_id=rule_id,

@@ -2256,7 +2256,6 @@ def reserve_alert_event(
                 payload_json = ?,
                 triggered_at = ?,
                 notification_status = ?,
-                notification_attempted_at = NULL,
                 notification_sent_at = NULL,
                 notification_result_json = NULL
             WHERE id = ?
@@ -2597,13 +2596,16 @@ def list_retryable_standard_alert_events(
                     e.notification_status = ?
                     OR (
                         e.notification_status = ?
-                        AND e.id > COALESCE(
-                            (
-                                SELECT CAST(value AS INTEGER)
-                                FROM app_metadata
-                                WHERE key = ?
-                            ),
-                            0
+                        AND (
+                            e.notification_attempted_at IS NOT NULL
+                            OR e.id > COALESCE(
+                                (
+                                    SELECT CAST(value AS INTEGER)
+                                    FROM app_metadata
+                                    WHERE key = ?
+                                ),
+                                0
+                            )
                         )
                     )
                 )

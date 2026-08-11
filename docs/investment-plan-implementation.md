@@ -658,6 +658,8 @@ Keep confirmed business state separate from delivery state:
 - the first standard-recovery startup records the existing event high-water
   mark, so ambiguous pre-existing `pending` rows are not replayed while
   explicitly failed deliveries remain retryable;
+- re-reserving a failed event keeps its prior attempt timestamp, allowing a
+  second crash before dispatch to remain distinguishable from migrated history;
 - expired pre-alerts are not retried;
 - Data Availability Notices are deduplicated by phase and trading date;
 - current delivery semantics remain unchanged: success on any enabled channel
