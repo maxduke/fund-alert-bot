@@ -653,6 +653,8 @@ Keep confirmed business state separate from delivery state:
   position estimate;
 - pending and failed Position-Linked Price-Gain Reminders retry without
   reopening recorded thresholds;
+- pending and failed simple drawdown, fixed-cost Price-Gain, and DCA reminders
+  retry during the next morning NAV process or application startup;
 - expired pre-alerts are not retried;
 - Data Availability Notices are deduplicated by phase and trading date;
 - current delivery semantics remain unchanged: success on any enabled channel

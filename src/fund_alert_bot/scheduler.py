@@ -32,6 +32,7 @@ from fund_alert_bot.db import (
     list_enabled_rules,
     list_retryable_drawdown_plan_alert_events,
     list_retryable_position_profit_alert_events,
+    list_retryable_standard_alert_events,
     open_connection,
 )
 from fund_alert_bot.market_data import (
@@ -608,6 +609,12 @@ async def run_scheduled_fund_nav_process(
     LOGGER.info("Feeder-fund NAV processing started date=%s", processing_date)
     result = None
     try:
+        await retry_pending_standard_notifications(
+            application=application,
+            sqlite_path=sqlite_path,
+            allowed_user_ids=allowed_user_ids,
+            notification_settings=notification_settings,
+        )
         await retry_pending_drawdown_plan_notifications(
             application=application,
             sqlite_path=sqlite_path,
@@ -843,6 +850,47 @@ async def retry_pending_drawdown_plan_notifications(
                 ),
             )
             for row in list_retryable_drawdown_plan_alert_events(connection)
+        ]
+    await send_scheduled_notifications(
+        application=application,
+        sqlite_path=sqlite_path,
+        allowed_user_ids=allowed_user_ids,
+        notifications=notifications,
+        notification_settings=notification_settings,
+    )
+    return len(notifications)
+
+
+async def retry_pending_standard_notifications(
+    *,
+    application: Application[Any, Any, Any, Any, Any, Any],
+    sqlite_path: str | Path,
+    allowed_user_ids: Collection[int],
+    notification_settings: NotificationSettings | None = None,
+) -> int:
+    """Retry durable standard reminders after delivery failure or restart."""
+
+    with open_connection(sqlite_path) as connection:
+        initialize_database(connection)
+        notifications = [
+            AlertNotification(
+                event_id=int(row["id"]),
+                title=str(row["title"]),
+                text=str(row["message"]),
+                telegram_actions=(
+                    (
+                        (
+                            "⚠️ Deduction failed / not executed",
+                            f"dca_skip:{row['rule_id']}:{row['due_date']}",
+                        ),
+                    ),
+                )
+                if row["rule_type"] == "dca_reminder"
+                and row["due_date"] is not None
+                and row["occurrence_status"] == "pending"
+                else (),
+            )
+            for row in list_retryable_standard_alert_events(connection)
         ]
     await send_scheduled_notifications(
         application=application,

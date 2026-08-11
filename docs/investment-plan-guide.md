@@ -743,6 +743,11 @@ notification does not undo a confirmed tier. Pending or failed drawdown reminder
 are retried after later scheduled runs or restart until at least one enabled
 channel succeeds.
 
+Simple drawdown, fixed-cost Price-Gain, and DCA reminders also keep their
+delivery state in SQLite. An undelivered reminder is retried by the next morning
+NAV process or application startup; a recovered DCA message only keeps its
+failure button while that scheduled occurrence is still pending.
+
 All market-driven alerts include their market-data date. Missing, stale, or
 insufficient data is reported without creating an incorrect reminder.
 

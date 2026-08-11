@@ -2558,6 +2558,43 @@ def list_retryable_position_profit_alert_events(
     )
 
 
+def list_retryable_standard_alert_events(
+    connection: sqlite3.Connection,
+) -> list[sqlite3.Row]:
+    """Return undelivered standard drawdown, price-gain, and DCA reminders."""
+
+    return list(
+        connection.execute(
+            """
+            SELECT
+                e.id,
+                e.title,
+                e.message,
+                e.rule_id,
+                r.type AS rule_type,
+                json_extract(e.payload_json, '$.due_date') AS due_date,
+                o.status AS occurrence_status
+            FROM alert_events AS e
+            JOIN rules AS r ON r.id = e.rule_id
+            LEFT JOIN scheduled_dca_occurrences AS o
+                ON o.rule_id = e.rule_id
+                AND o.due_date = json_extract(e.payload_json, '$.due_date')
+            WHERE
+                e.notification_status IN (?, ?)
+                AND (
+                    r.type IN ('drawdown_from_high', 'dca_reminder')
+                    OR (
+                        r.type = 'profit_reminder'
+                        AND COALESCE(json_extract(e.payload_json, '$.phase'), '') = ''
+                    )
+                )
+            ORDER BY e.id
+            """,
+            (ALERT_NOTIFICATION_PENDING, ALERT_NOTIFICATION_FAILED),
+        ).fetchall()
+    )
+
+
 def get_position_profit_event(
     connection: sqlite3.Connection,
     event_id: int,
