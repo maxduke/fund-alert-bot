@@ -18,6 +18,7 @@ from fund_alert_bot.db import (
     get_position_snapshot,
     init_db,
     list_enabled_rules,
+    list_retryable_standard_alert_events,
     list_rules,
     open_connection,
     record_alert_notification_result,
@@ -243,6 +244,238 @@ def test_init_db_creates_required_event_and_channel_columns(tmp_path: Path) -> N
         "updated_at",
     }
     assert channel_columns["enabled"]["dflt_value"] == "1"
+
+
+def test_init_db_does_not_recover_ambiguous_preexisting_history(
+    tmp_path: Path,
+) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+
+    with open_connection(sqlite_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE alert_events (
+                id INTEGER PRIMARY KEY,
+                rule_id INTEGER NOT NULL,
+                alert_key TEXT NOT NULL UNIQUE,
+                title TEXT NOT NULL,
+                message TEXT NOT NULL,
+                payload_json TEXT,
+                triggered_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO alert_events (
+                rule_id, alert_key, title, message, triggered_at
+            ) VALUES (99, 'old-drawdown', 'Drawdown reminder', 'already sent',
+                      '2024-01-01T00:00:00+00:00')
+            """
+        )
+        init_db(connection)
+
+        retryable = list_retryable_standard_alert_events(connection)
+        assert [str(row["title"]) for row in retryable] == ["Reminder recovery notice"]
+        record_alert_notification_result(
+            connection,
+            event_id=int(retryable[0]["id"]),
+            results=[{"channel": "telegram", "success": True}],
+        )
+        record_alert_notification_result(
+            connection,
+            event_id=1,
+            results=[{"channel": "telegram", "success": False}],
+        )
+        assert [
+            int(row["id"]) for row in list_retryable_standard_alert_events(connection)
+        ] == [1]
+
+        rule_id = add_rule(
+            connection,
+            type="drawdown_from_high",
+            symbol="399006",
+            name="ChiNext",
+            asset_type="cn_index",
+            params={"lookback_days": 365, "thresholds": [0.15]},
+        )
+        assert (
+            reserve_alert_event(
+                connection,
+                rule_id=rule_id,
+                alert_key="old-drawdown",
+                title="Drawdown reminder",
+                message="retry interrupted before delivery",
+            )
+            == 1
+        )
+        retry_row = connection.execute(
+            "SELECT notification_attempted_at FROM alert_events WHERE id = 1"
+        ).fetchone()
+        assert retry_row["notification_attempted_at"] is not None
+        assert [
+            int(row["id"]) for row in list_retryable_standard_alert_events(connection)
+        ] == [1]
+        record_alert_notification_result(
+            connection,
+            event_id=1,
+            results=[{"channel": "telegram", "success": True}],
+        )
+
+        new_event_id = reserve_alert_event(
+            connection,
+            rule_id=rule_id,
+            alert_key="new-drawdown",
+            title="Drawdown reminder",
+            message="not sent yet",
+        )
+
+        assert [
+            int(row["id"]) for row in list_retryable_standard_alert_events(connection)
+        ] == [new_event_id]
+
+
+def test_init_db_preserves_delivery_aware_pending_event(tmp_path: Path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+
+    with open_connection(sqlite_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE alert_events (
+                id INTEGER PRIMARY KEY,
+                rule_id INTEGER NOT NULL,
+                alert_key TEXT NOT NULL UNIQUE,
+                title TEXT NOT NULL,
+                message TEXT NOT NULL,
+                payload_json TEXT,
+                triggered_at TEXT NOT NULL,
+                notification_status TEXT NOT NULL DEFAULT 'pending',
+                notification_attempted_at TEXT,
+                notification_sent_at TEXT,
+                notification_result_json TEXT
+            )
+            """
+        )
+        connection.executemany(
+            """
+            INSERT INTO alert_events (
+                rule_id, alert_key, title, message, payload_json, triggered_at,
+                notification_status, notification_attempted_at
+            ) VALUES (99, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                (
+                    "tracked-drawdown-plan",
+                    "Buy-plan reminder",
+                    "older non-standard attempted event",
+                    '{"phase":"confirmed"}',
+                    "2026-06-30T00:00:00+00:00",
+                    "sent",
+                    "2026-06-30T00:01:00+00:00",
+                ),
+                (
+                    "migrated-history",
+                    "Drawdown reminder",
+                    "already sent",
+                    None,
+                    "2026-07-01T00:00:00+00:00",
+                    "pending",
+                    None,
+                ),
+                (
+                    "position-profit-pending",
+                    "Price-Gain reminder",
+                    "position alert reserved before crash",
+                    '{"phase":"position_profit"}',
+                    "2026-07-01T01:00:00+00:00",
+                    "pending",
+                    None,
+                ),
+                (
+                    "re-reserved-standard",
+                    "Drawdown reminder",
+                    "failed once and was reserved again",
+                    None,
+                    "2026-07-01T02:00:00+00:00",
+                    "pending",
+                    "2026-07-01T01:59:00+00:00",
+                ),
+                (
+                    "tracked-delivery",
+                    "Drawdown reminder",
+                    "sent with delivery tracking",
+                    None,
+                    "2026-07-02T00:00:00+00:00",
+                    "sent",
+                    "2026-07-02T00:01:00+00:00",
+                ),
+                (
+                    "delivery-aware-pending",
+                    "Drawdown reminder",
+                    "reserved before crash",
+                    None,
+                    "2026-07-03T00:00:00+00:00",
+                    "pending",
+                    None,
+                ),
+            ),
+        )
+
+        init_db(connection)
+
+        retryable = list_retryable_standard_alert_events(connection)
+        assert [int(row["id"]) for row in retryable] == [4, 6, 7]
+        assert str(retryable[2]["title"]) == "Reminder recovery notice"
+        position_status = connection.execute(
+            "SELECT notification_status FROM alert_events WHERE id = 3"
+        ).fetchone()
+        assert position_status["notification_status"] == ALERT_NOTIFICATION_PENDING
+
+
+def test_init_db_uses_notice_when_delivery_boundary_is_unknowable(
+    tmp_path: Path,
+) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+
+    with open_connection(sqlite_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE alert_events (
+                id INTEGER PRIMARY KEY,
+                rule_id INTEGER NOT NULL,
+                alert_key TEXT NOT NULL UNIQUE,
+                title TEXT NOT NULL,
+                message TEXT NOT NULL,
+                payload_json TEXT,
+                triggered_at TEXT NOT NULL,
+                notification_status TEXT NOT NULL DEFAULT 'pending',
+                notification_attempted_at TEXT,
+                notification_sent_at TEXT,
+                notification_result_json TEXT
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO alert_events (
+                rule_id, alert_key, title, message, triggered_at
+            ) VALUES (99, 'ambiguous-pending', 'Drawdown reminder',
+                      'delivery provenance is unavailable',
+                      '2026-07-01T00:00:00+00:00')
+            """
+        )
+
+        init_db(connection)
+
+        events = connection.execute(
+            """
+            SELECT title, notification_status FROM alert_events ORDER BY id
+            """
+        ).fetchall()
+        assert [(row["title"], row["notification_status"]) for row in events] == [
+            ("Drawdown reminder", ALERT_NOTIFICATION_SENT),
+            ("Reminder recovery notice", ALERT_NOTIFICATION_PENDING),
+        ]
 
 
 def test_rule_helpers_add_list_filter_and_delete_rules(tmp_path: Path) -> None:

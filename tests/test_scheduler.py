@@ -20,11 +20,13 @@ from fund_alert_bot.checks import (
 from fund_alert_bot.config import NotificationSettings
 from fund_alert_bot.db import (
     add_rule,
+    delete_rule,
     get_position_snapshot,
     initialize_database,
     list_rules,
     open_connection,
     record_manual_addition,
+    reserve_alert_event,
     upsert_fund_fee,
     upsert_position_snapshot,
 )
@@ -576,6 +578,133 @@ def test_retry_expired_close_plan_alert_strips_same_day_command(
     assert "/mark_added" not in message["text"]
     assert "/sync_position" in message["text"]
     assert "reply_markup" not in message
+
+
+def test_standard_notification_retry_survives_restart_and_keeps_current_dca_action(
+    tmp_path: Path,
+) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    with open_connection(sqlite_path) as connection:
+        initialize_database(connection)
+        profit_rule_id = add_rule(
+            connection,
+            type="profit_reminder",
+            symbol="159915",
+            name="ChiNext ETF",
+            asset_type="cn_etf",
+            params={"cost": 1, "thresholds": [0.2]},
+        )
+        dca_rule_id = add_rule(
+            connection,
+            type="dca_reminder",
+            symbol="000001",
+            name="A500 feeder",
+            asset_type="cn_open_fund",
+            params={"weekday": "monday", "amount": 1000},
+        )
+        legacy_dca_rule_id = add_rule(
+            connection,
+            type="dca_reminder",
+            symbol="159915",
+            name="Legacy DCA",
+            asset_type="cn_etf",
+            params={"weekday": "monday", "amount": 500},
+        )
+        reserve_alert_event(
+            connection,
+            rule_id=profit_rule_id,
+            alert_key="profit:pending",
+            title="Price-Gain reminder",
+            message="profit pending",
+            payload={"latest_date": "2024-01-02"},
+        )
+        reserve_alert_event(
+            connection,
+            rule_id=profit_rule_id,
+            alert_key="fund-nav:pending",
+            title="Data unavailable",
+            message="retried by the fund NAV recovery path",
+            payload={"phase": "fund_nav"},
+        )
+        reserve_alert_event(
+            connection,
+            rule_id=dca_rule_id,
+            alert_key="dca:pending",
+            title="DCA reminder",
+            message="DCA pending",
+            payload={"due_date": "2024-01-08", "fund_symbol": "000001"},
+        )
+        reserve_alert_event(
+            connection,
+            rule_id=legacy_dca_rule_id,
+            alert_key="legacy-dca:pending",
+            title="DCA reminder",
+            message="Legacy DCA pending",
+            payload={"due_date": "2024-01-08"},
+        )
+        connection.execute(
+            """
+            INSERT INTO scheduled_dca_occurrences (
+                rule_id, fund_symbol, due_date, gross_amount, fee_mode,
+                fee_value, holiday_policy, status, created_at, updated_at
+            ) VALUES (?, '000001', '2024-01-08', 1000, 'rate', 0,
+                      'next', 'pending', '2024-01-08', '2024-01-08')
+            """,
+            (dca_rule_id,),
+        )
+        assert delete_rule(connection, legacy_dca_rule_id)
+        replacement_rule_id = add_rule(
+            connection,
+            type="dca_reminder",
+            symbol="000002",
+            name="Replacement feeder",
+            asset_type="cn_open_fund",
+            params={"weekday": "monday", "amount": 500},
+        )
+        assert replacement_rule_id == legacy_dca_rule_id
+        connection.execute(
+            """
+            INSERT INTO scheduled_dca_occurrences (
+                rule_id, fund_symbol, due_date, gross_amount, fee_mode,
+                fee_value, holiday_policy, status, created_at, updated_at
+            ) VALUES (?, '000002', '2024-01-08', 500, 'rate', 0,
+                      'next', 'pending', '2024-01-08', '2024-01-08')
+            """,
+            (replacement_rule_id,),
+        )
+        assert delete_rule(connection, profit_rule_id)
+        connection.commit()
+
+    application = FakeApplication()
+    retried = asyncio.run(
+        scheduler.retry_pending_standard_notifications(
+            application=application,
+            sqlite_path=sqlite_path,
+            allowed_user_ids={123},
+        )
+    )
+
+    assert retried == 3
+    assert [message["text"] for message in application.bot.messages] == [
+        "profit pending",
+        "DCA pending",
+        "Legacy DCA pending",
+    ]
+    markup = application.bot.messages[1]["reply_markup"]
+    assert markup.inline_keyboard[0][0].callback_data == (
+        f"dca_skip:{dca_rule_id}:2024-01-08"
+    )
+    assert "reply_markup" not in application.bot.messages[2]
+    assert (
+        asyncio.run(
+            scheduler.retry_pending_standard_notifications(
+                application=application,
+                sqlite_path=sqlite_path,
+                allowed_user_ids={123},
+            )
+        )
+        == 0
+    )
 
 
 def test_before_close_plan_uses_sina_when_eastmoney_quote_fails_validation(

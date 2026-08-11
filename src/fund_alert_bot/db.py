@@ -21,6 +21,8 @@ SUPPRESSING_ALERT_NOTIFICATION_STATUSES = (
     ALERT_NOTIFICATION_PENDING,
     ALERT_NOTIFICATION_SENT,
 )
+STANDARD_NOTIFICATION_RECOVERY_MIGRATION_KEY = "standard_notification_recovery_v1"
+STANDARD_NOTIFICATION_RECOVERY_NOTICE_TITLE = "Reminder recovery notice"
 
 
 def connect(sqlite_path: str | Path) -> sqlite3.Connection:
@@ -256,9 +258,14 @@ def init_db(connection: sqlite3.Connection) -> None:
         );
         """
     )
-    _ensure_alert_event_delivery_columns(connection)
+    delivery_columns_added = _ensure_alert_event_delivery_columns(connection)
     _ensure_fund_settings_columns(connection)
     now = _utc_now_text()
+    _ensure_standard_notification_recovery_migration(
+        connection,
+        delivery_columns_added=delivery_columns_added,
+        now=now,
+    )
     connection.execute(
         """
         INSERT INTO position_cycles (
@@ -2246,7 +2253,6 @@ def reserve_alert_event(
                 payload_json = ?,
                 triggered_at = ?,
                 notification_status = ?,
-                notification_attempted_at = NULL,
                 notification_sent_at = NULL,
                 notification_result_json = NULL
             WHERE id = ?
@@ -2558,6 +2564,59 @@ def list_retryable_position_profit_alert_events(
     )
 
 
+def list_retryable_standard_alert_events(
+    connection: sqlite3.Connection,
+) -> list[sqlite3.Row]:
+    """Return undelivered standard drawdown, price-gain, and DCA reminders."""
+
+    return list(
+        connection.execute(
+            """
+            SELECT
+                e.id,
+                e.title,
+                e.message,
+                e.rule_id,
+                CASE e.title
+                    WHEN 'DCA reminder' THEN 'dca_reminder'
+                    WHEN 'Drawdown reminder' THEN 'drawdown_from_high'
+                    WHEN 'Price-Gain reminder' THEN 'profit_reminder'
+                END AS rule_type,
+                json_extract(e.payload_json, '$.due_date') AS due_date,
+                o.status AS occurrence_status
+            FROM alert_events AS e
+            LEFT JOIN scheduled_dca_occurrences AS o
+                ON o.rule_id = e.rule_id
+                AND o.due_date = json_extract(e.payload_json, '$.due_date')
+                AND o.fund_symbol = json_extract(
+                    e.payload_json, '$.fund_symbol'
+                )
+            WHERE
+                e.notification_status IN (?, ?)
+                AND (
+                    (
+                        e.title IN (
+                            'DCA reminder',
+                            'Drawdown reminder',
+                            'Price-Gain reminder'
+                        )
+                        AND COALESCE(
+                            json_extract(e.payload_json, '$.phase'), ''
+                        ) = ''
+                    )
+                    OR (
+                        e.title = 'Reminder recovery notice'
+                        AND json_extract(e.payload_json, '$.phase') =
+                            'standard_recovery'
+                    )
+                )
+            ORDER BY e.id
+            """,
+            (ALERT_NOTIFICATION_PENDING, ALERT_NOTIFICATION_FAILED),
+        ).fetchall()
+    )
+
+
 def get_position_profit_event(
     connection: sqlite3.Connection,
     event_id: int,
@@ -2657,7 +2716,7 @@ def close_position_from_profit_event(
         raise
 
 
-def _ensure_alert_event_delivery_columns(connection: sqlite3.Connection) -> None:
+def _ensure_alert_event_delivery_columns(connection: sqlite3.Connection) -> bool:
     columns = {
         row["name"]
         for row in connection.execute("PRAGMA table_info(alert_events)").fetchall()
@@ -2668,11 +2727,115 @@ def _ensure_alert_event_delivery_columns(connection: sqlite3.Connection) -> None
         "notification_sent_at": "TEXT",
         "notification_result_json": "TEXT",
     }
+    delivery_columns_added = "notification_status" not in columns
     for column, definition in column_definitions.items():
         if column not in columns:
             connection.execute(
                 f"ALTER TABLE alert_events ADD COLUMN {column} {definition}"
             )
+    return delivery_columns_added
+
+
+def _ensure_standard_notification_recovery_migration(
+    connection: sqlite3.Connection,
+    *,
+    delivery_columns_added: bool,
+    now: str,
+) -> None:
+    if connection.execute(
+        "SELECT 1 FROM app_metadata WHERE key = ?",
+        (STANDARD_NOTIFICATION_RECOVERY_MIGRATION_KEY,),
+    ).fetchone():
+        return
+
+    first_tracked_id = None
+    if not delivery_columns_added:
+        first_tracked_id = connection.execute(
+            """
+            SELECT MIN(id) FROM alert_events
+            WHERE notification_attempted_at IS NOT NULL
+                AND COALESCE(json_extract(payload_json, '$.phase'), '') = ''
+                AND title IN (
+                    'DCA reminder',
+                    'Drawdown reminder',
+                    'Price-Gain reminder'
+                )
+            """
+        ).fetchone()[0]
+    # Pre-v1 pending rows have no per-event provenance; never guess that an
+    # investment reminder is current when this database has no attempt boundary.
+    id_filter = "" if first_tracked_id is None else "AND id < ?"
+    params: tuple[object, ...] = (
+        ALERT_NOTIFICATION_PENDING,
+        *(() if first_tracked_id is None else (int(first_tracked_id),)),
+    )
+    ambiguous = connection.execute(
+        f"""
+        SELECT COUNT(*) AS event_count, MIN(rule_id) AS rule_id
+        FROM alert_events
+        WHERE notification_status = ?
+            AND notification_attempted_at IS NULL
+            AND COALESCE(json_extract(payload_json, '$.phase'), '') = ''
+            AND title IN (
+                'DCA reminder',
+                'Drawdown reminder',
+                'Price-Gain reminder'
+            )
+            {id_filter}
+        """,
+        params,
+    ).fetchone()
+    ambiguous_count = int(ambiguous["event_count"])
+    if ambiguous_count:
+        connection.execute(
+            f"""
+            UPDATE alert_events
+            SET notification_status = ?
+            WHERE notification_status = ?
+                AND notification_attempted_at IS NULL
+                AND COALESCE(json_extract(payload_json, '$.phase'), '') = ''
+                AND title IN (
+                    'DCA reminder',
+                    'Drawdown reminder',
+                    'Price-Gain reminder'
+                )
+                {id_filter}
+            """,
+            (ALERT_NOTIFICATION_SENT, *params),
+        )
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO alert_events (
+                rule_id, alert_key, title, message, payload_json, triggered_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                int(ambiguous["rule_id"]),
+                "standard_notification_recovery:v1",
+                STANDARD_NOTIFICATION_RECOVERY_NOTICE_TITLE,
+                (
+                    "⚠️ Reminder recovery notice\n\n"
+                    f"{ambiguous_count} older reminder(s) had no reliable "
+                    "delivery record during database upgrade. They were not "
+                    "replayed to avoid stale duplicate reminders.\n\n"
+                    "Please run /check to review the current state."
+                ),
+                _json_text(
+                    {
+                        "phase": "standard_recovery",
+                        "ambiguous_event_count": ambiguous_count,
+                    }
+                ),
+                now,
+            ),
+        )
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO app_metadata (key, value, updated_at)
+        VALUES (?, 'complete', ?)
+        """,
+        (STANDARD_NOTIFICATION_RECOVERY_MIGRATION_KEY, now),
+    )
 
 
 def _ensure_fund_settings_columns(connection: sqlite3.Connection) -> None:
