@@ -81,7 +81,7 @@ def test_auto_profit_parser_is_strict() -> None:
     ):
         with pytest.raises(CommandParseError):
             parse_add_profit_args(args)
-    many_thresholds = ",".join(f"{index / 10:.1f}" for index in range(1, 501))
+    many_thresholds = ",".join(f"{index / 10:.1f}" for index in range(1, 474))
     with pytest.raises(CommandParseError, match="4096-character"):
         parse_add_profit_args(
             ["cn_open_fund", "000001", "A500", "auto", many_thresholds]

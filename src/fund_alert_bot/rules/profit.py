@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import sys
 from collections.abc import Callable, Mapping, Sequence
 from datetime import date
 from types import SimpleNamespace
@@ -126,10 +127,14 @@ def validate_position_profit_notification_size(
         SimpleNamespace(
             symbol=symbol,
             date=date(2099, 12, 31),
-            value=2,
+            value=sys.float_info.max,
             source="akshare_eastmoney",
         ),
-        {"units": 1, "average_unit_cost": 1, "is_estimated": False},
+        {
+            "units": 1,
+            "average_unit_cost": sys.float_info.max / 2,
+            "is_estimated": True,
+        },
         position_cycle_id=2**63 - 1,
         recorded_threshold_keys=set(),
     )
