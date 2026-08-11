@@ -21,6 +21,9 @@ SUPPRESSING_ALERT_NOTIFICATION_STATUSES = (
     ALERT_NOTIFICATION_PENDING,
     ALERT_NOTIFICATION_SENT,
 )
+STANDARD_NOTIFICATION_RECOVERY_CUTOFF_KEY = (
+    "standard_notification_recovery_cutoff_event_id"
+)
 
 
 def connect(sqlite_path: str | Path) -> sqlite3.Connection:
@@ -259,6 +262,13 @@ def init_db(connection: sqlite3.Connection) -> None:
     _ensure_alert_event_delivery_columns(connection)
     _ensure_fund_settings_columns(connection)
     now = _utc_now_text()
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO app_metadata (key, value, updated_at)
+        SELECT ?, CAST(COALESCE(MAX(id), 0) AS TEXT), ? FROM alert_events
+        """,
+        (STANDARD_NOTIFICATION_RECOVERY_CUTOFF_KEY, now),
+    )
     connection.execute(
         """
         INSERT INTO position_cycles (
@@ -2583,7 +2593,20 @@ def list_retryable_standard_alert_events(
                 ON o.rule_id = e.rule_id
                 AND o.due_date = json_extract(e.payload_json, '$.due_date')
             WHERE
-                e.notification_status IN (?, ?)
+                (
+                    e.notification_status = ?
+                    OR (
+                        e.notification_status = ?
+                        AND e.id > COALESCE(
+                            (
+                                SELECT CAST(value AS INTEGER)
+                                FROM app_metadata
+                                WHERE key = ?
+                            ),
+                            0
+                        )
+                    )
+                )
                 AND e.title IN (
                     'DCA reminder',
                     'Drawdown reminder',
@@ -2592,7 +2615,11 @@ def list_retryable_standard_alert_events(
                 AND COALESCE(json_extract(e.payload_json, '$.phase'), '') = ''
             ORDER BY e.id
             """,
-            (ALERT_NOTIFICATION_PENDING, ALERT_NOTIFICATION_FAILED),
+            (
+                ALERT_NOTIFICATION_FAILED,
+                ALERT_NOTIFICATION_PENDING,
+                STANDARD_NOTIFICATION_RECOVERY_CUTOFF_KEY,
+            ),
         ).fetchall()
     )
 

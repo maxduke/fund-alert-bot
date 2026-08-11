@@ -655,6 +655,9 @@ Keep confirmed business state separate from delivery state:
   reopening recorded thresholds;
 - pending and failed simple drawdown, fixed-cost Price-Gain, and DCA reminders
   retry during the next morning NAV process or application startup;
+- the first standard-recovery startup records the existing event high-water
+  mark, so ambiguous pre-existing `pending` rows are not replayed while
+  explicitly failed deliveries remain retryable;
 - expired pre-alerts are not retried;
 - Data Availability Notices are deduplicated by phase and trading date;
 - current delivery semantics remain unchanged: success on any enabled channel
