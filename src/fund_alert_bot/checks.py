@@ -16,6 +16,8 @@ from fund_alert_bot.db import (
     add_drawdown_plan_pre_alert_event,
     alert_exists,
     apply_manual_add_estimate,
+    apply_scheduled_dca_occurrence,
+    create_scheduled_dca_occurrence,
     get_active_drawdown_cycle,
     get_fund_settings,
     get_position_snapshot,
@@ -23,8 +25,11 @@ from fund_alert_bot.db import (
     list_enabled_rules,
     list_manual_add_actions,
     list_pending_manual_add_estimates,
+    list_pending_scheduled_dca_occurrences,
     persist_drawdown_plan_evaluation,
     reserve_alert_event,
+    set_scheduled_dca_effective_date,
+    skip_scheduled_dca_occurrence,
 )
 from fund_alert_bot.market_data import (
     AssetType,
@@ -37,7 +42,11 @@ from fund_alert_bot.market_data import (
     MarketDataProviderError,
     PriceBasis,
 )
-from fund_alert_bot.rules.dca import build_dca_reminder_alert
+from fund_alert_bot.rules.dca import (
+    build_dca_reminder_alert,
+    normalize_weekday,
+    weekday_for_date,
+)
 from fund_alert_bot.rules.drawdown import (
     build_drawdown_alerts,
     calculate_drawdown_from_high,
@@ -224,7 +233,8 @@ def reserve_drawdown_plan_data_unavailable_notice(
         *(f"• {item.symbol}: {item.message}" for item in affected),
         "",
         (
-            "The recorded addition remains pending; no position estimate was applied."
+            "The recorded contribution remains pending; no position estimate "
+            "was applied."
             if phase == "fund_nav"
             else "No tier decision was made for these plans."
         ),
@@ -628,6 +638,8 @@ def process_manual_add_estimates(
     market_calendar: MarketCalendar,
     *,
     processing_date: date,
+    nav_cache: dict[tuple[str, date], Any] | None = None,
+    nav_errors: dict[tuple[str, date], Exception] | None = None,
 ) -> ManualAddSettlementResult:
     """Apply pending additions only from their exact effective dated NAV."""
 
@@ -635,7 +647,8 @@ def process_manual_add_estimates(
     notifications: list[AlertNotification] = []
     no_data_skips: list[RuleNoDataSkip] = []
     errors: list[RuleCheckError] = []
-    navs: dict[tuple[str, date], Any] = {}
+    navs = {} if nav_cache is None else nav_cache
+    cached_errors = {} if nav_errors is None else nav_errors
     for occurrence in occurrences:
         rule_id = int(occurrence["rule_id"])
         fund_symbol = str(occurrence["fund_symbol"])
@@ -664,11 +677,17 @@ def process_manual_add_estimates(
                     f"Effective date {effective_date} is not a confirmed open day."
                 )
             nav_key = (fund_symbol, effective_date)
+            if nav_key in cached_errors:
+                raise cached_errors[nav_key]
             if nav_key not in navs:
-                navs[nav_key] = market_data_provider.get_fund_nav(
-                    Instrument(fund_symbol, fund_symbol, AssetType.CN_OPEN_FUND),
-                    nav_date=effective_date,
-                )
+                try:
+                    navs[nav_key] = market_data_provider.get_fund_nav(
+                        Instrument(fund_symbol, fund_symbol, AssetType.CN_OPEN_FUND),
+                        nav_date=effective_date,
+                    )
+                except MarketDataProviderError as exc:
+                    cached_errors[nav_key] = exc
+                    raise
             applied = apply_manual_add_estimate(
                 connection,
                 estimate_id=int(occurrence["id"]),
@@ -689,6 +708,136 @@ def process_manual_add_estimates(
     return ManualAddSettlementResult(
         checked_estimates=len(occurrences),
         notifications=notifications,
+        no_data_skips=no_data_skips,
+        errors=errors,
+    )
+
+
+def process_scheduled_dca_occurrences(
+    connection: Any,
+    market_data_provider: MarketDataProvider,
+    market_calendar: MarketCalendar,
+    *,
+    processing_date: date,
+    nav_cache: dict[tuple[str, date], Any] | None = None,
+    nav_errors: dict[tuple[str, date], Exception] | None = None,
+) -> ManualAddSettlementResult:
+    """Resolve holidays and quietly apply pending fixed DCA estimates once."""
+
+    occurrences = list_pending_scheduled_dca_occurrences(connection)
+    no_data_skips: list[RuleNoDataSkip] = []
+    errors: list[RuleCheckError] = []
+    navs = {} if nav_cache is None else nav_cache
+    cached_errors = {} if nav_errors is None else nav_errors
+    calendar_status: dict[date, bool] = {}
+    for occurrence in occurrences:
+        rule_id = int(occurrence["rule_id"])
+        fund_symbol = str(occurrence["fund_symbol"])
+        try:
+            effective_text = occurrence["effective_date"]
+            if effective_text is None:
+                due_date = date.fromisoformat(str(occurrence["due_date"]))
+                if str(occurrence["holiday_policy"]) == "skip":
+                    if not market_calendar.confirmed_status(due_date):
+                        skip_scheduled_dca_occurrence(
+                            connection,
+                            rule_id=rule_id,
+                            due_date=due_date.isoformat(),
+                        )
+                        continue
+                    effective_text = due_date.isoformat()
+                    set_scheduled_dca_effective_date(
+                        connection,
+                        occurrence_id=int(occurrence["id"]),
+                        effective_date=effective_text,
+                    )
+                candidate = due_date
+                while candidate < processing_date:
+                    if effective_text is not None:
+                        break
+                    if candidate not in calendar_status:
+                        calendar_status[candidate] = market_calendar.confirmed_status(
+                            candidate
+                        )
+                    if calendar_status[candidate]:
+                        effective_text = candidate.isoformat()
+                        set_scheduled_dca_effective_date(
+                            connection,
+                            occurrence_id=int(occurrence["id"]),
+                            effective_date=effective_text,
+                        )
+                        break
+                    candidate += timedelta(days=1)
+            if effective_text is None:
+                continue
+            effective_date = date.fromisoformat(str(effective_text))
+            if processing_date <= effective_date:
+                continue
+            if effective_date not in calendar_status:
+                calendar_status[effective_date] = market_calendar.confirmed_status(
+                    effective_date
+                )
+            if not calendar_status[effective_date]:
+                raise ValueError(
+                    f"Effective date {effective_date} is not a confirmed open day."
+                )
+            position = get_position_snapshot(connection, fund_symbol)
+            if position is None:
+                LOGGER.info(
+                    "Scheduled DCA deferred occurrence_id=%s fund_symbol=%s "
+                    "reason=position_not_synced",
+                    occurrence["id"],
+                    fund_symbol,
+                )
+                continue
+            settings = get_fund_settings(connection, fund_symbol)
+            if (
+                settings is not None
+                and settings["position_sync_required_since"] is not None
+            ) or position["position_sync_required_since"] is not None:
+                LOGGER.info(
+                    "Scheduled DCA deferred occurrence_id=%s fund_symbol=%s "
+                    "reason=position_sync_required",
+                    occurrence["id"],
+                    fund_symbol,
+                )
+                continue
+            nav_key = (fund_symbol, effective_date)
+            if nav_key in cached_errors:
+                raise cached_errors[nav_key]
+            if nav_key not in navs:
+                try:
+                    navs[nav_key] = market_data_provider.get_fund_nav(
+                        Instrument(fund_symbol, fund_symbol, AssetType.CN_OPEN_FUND),
+                        nav_date=effective_date,
+                    )
+                except MarketDataProviderError as exc:
+                    cached_errors[nav_key] = exc
+                    raise
+            if apply_scheduled_dca_occurrence(
+                connection,
+                occurrence_id=int(occurrence["id"]),
+                nav=navs[nav_key],
+            ):
+                LOGGER.info(
+                    "Scheduled DCA applied rule_id=%s occurrence_id=%s "
+                    "fund_symbol=%s due_date=%s nav_date=%s nav_source=%s "
+                    "gross_amount=%s position_applied=true",
+                    rule_id,
+                    occurrence["id"],
+                    fund_symbol,
+                    occurrence["due_date"],
+                    effective_date,
+                    navs[nav_key].source,
+                    occurrence["gross_amount"],
+                )
+        except (MarketDataProviderError, MarketCalendarUnavailableError) as exc:
+            no_data_skips.append(RuleNoDataSkip(rule_id, fund_symbol, str(exc)))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(RuleCheckError(rule_id, fund_symbol, str(exc)))
+    return ManualAddSettlementResult(
+        checked_estimates=len(occurrences),
+        notifications=[],
         no_data_skips=no_data_skips,
         errors=errors,
     )
@@ -1174,6 +1323,7 @@ def evaluate_dca_rules(
     connection: Any,
     *,
     today: date | None = None,
+    market_calendar: MarketCalendar | None = None,
 ) -> DcaCheckResult:
     """Evaluate enabled DCA reminder rules and store new alert events."""
 
@@ -1188,10 +1338,50 @@ def evaluate_dca_rules(
 
     for row in rules:
         try:
+            occurrence = None
+            if str(row["asset_type"]) == AssetType.CN_OPEN_FUND.value:
+                if market_calendar is None:
+                    raise ValueError("Confirmed CN market calendar is required.")
+                params = _load_params(str(row["params_json"]))
+                if normalize_weekday(str(params["weekday"])) != weekday_for_date(
+                    check_date
+                ):
+                    continue
+                policy = str(params.get("holiday_policy", "next"))
+                try:
+                    open_due_date = market_calendar.confirmed_status(check_date)
+                except MarketCalendarUnavailableError:
+                    open_due_date = None
+                occurrence = create_scheduled_dca_occurrence(
+                    connection,
+                    rule_id=int(row["id"]),
+                    fund_symbol=str(row["symbol"]),
+                    due_date=check_date.isoformat(),
+                    gross_amount=float(params["amount"]),
+                    holiday_policy=policy,
+                    effective_date=(check_date.isoformat() if open_due_date else None),
+                    skipped=open_due_date is False and policy == "skip",
+                )
+                LOGGER.info(
+                    "Scheduled DCA occurrence rule_id=%s fund_symbol=%s "
+                    "due_date=%s effective_date=%s status=%s gross_amount=%s",
+                    row["id"],
+                    row["symbol"],
+                    check_date,
+                    occurrence["effective_date"],
+                    occurrence["status"],
+                    occurrence["gross_amount"],
+                )
             alert = build_dca_reminder_alert(
                 row,
                 check_date,
                 lambda alert_key: alert_exists(connection, alert_key),
+                occurrence_status=(
+                    None if occurrence is None else str(occurrence["status"])
+                ),
+                effective_date=(
+                    None if occurrence is None else occurrence["effective_date"]
+                ),
             )
         except Exception as exc:  # noqa: BLE001
             errors.append(
@@ -1224,6 +1414,16 @@ def evaluate_dca_rules(
                 event_id=event_id,
                 title=str(alert["title"]),
                 text=str(alert["message"]),
+                telegram_actions=(
+                    (
+                        (
+                            "⚠️ Deduction failed / not executed",
+                            f"dca_skip:{row['id']}:{check_date.isoformat()}",
+                        ),
+                    ),
+                )
+                if occurrence is not None and str(occurrence["status"]) == "pending"
+                else (),
             )
         )
 

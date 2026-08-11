@@ -197,6 +197,31 @@ def init_db(connection: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL,
             PRIMARY KEY (cycle_id, tier_key)
         );
+
+        CREATE TABLE IF NOT EXISTS scheduled_dca_occurrences (
+            id INTEGER PRIMARY KEY,
+            rule_id INTEGER NOT NULL REFERENCES rules(id),
+            fund_symbol TEXT NOT NULL,
+            due_date TEXT NOT NULL,
+            gross_amount REAL NOT NULL CHECK (gross_amount > 0),
+            fee_mode TEXT NOT NULL CHECK (fee_mode IN ('rate', 'fixed')),
+            fee_value REAL NOT NULL CHECK (fee_value >= 0),
+            holiday_policy TEXT NOT NULL CHECK (holiday_policy IN ('next', 'skip')),
+            effective_date TEXT,
+            status TEXT NOT NULL DEFAULT 'pending' CHECK (
+                status IN ('pending', 'skipped', 'applied', 'reconciled_by_sync')
+            ),
+            unit_nav REAL,
+            nav_date TEXT,
+            nav_source TEXT,
+            net_amount REAL,
+            added_units REAL,
+            new_average_cost REAL,
+            applied_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(rule_id, due_date)
+        );
         """
     )
     _ensure_alert_event_delivery_columns(connection)
@@ -248,6 +273,89 @@ def add_rule(
     )
     connection.commit()
     return int(cursor.lastrowid)
+
+
+def add_enhanced_dca_rule(
+    connection: sqlite3.Connection,
+    *,
+    fund_symbol: str,
+    name: str,
+    weekday: str,
+    amount: int | float,
+    fee_mode: str,
+    fee_value: float,
+    holiday_policy: str,
+) -> int:
+    """Atomically validate shared settings and add one fixed weekly DCA rule."""
+
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        duplicate = connection.execute(
+            """
+            SELECT id
+            FROM rules
+            WHERE type = 'dca_reminder' AND asset_type = 'cn_open_fund'
+                AND symbol = ? AND enabled = 1
+                AND json_extract(params_json, '$.weekday') = ?
+            LIMIT 1
+            """,
+            (fund_symbol, weekday),
+        ).fetchone()
+        if duplicate is not None:
+            raise sqlite3.IntegrityError(
+                "An enabled fixed DCA rule already uses this fund and weekday."
+            )
+        settings = get_fund_settings(connection, fund_symbol)
+        if (
+            settings is not None
+            and settings["fee_mode"] is not None
+            and (
+                str(settings["fee_mode"]) != fee_mode
+                or not math.isclose(float(settings["fee_value"]), fee_value)
+            )
+        ):
+            raise sqlite3.IntegrityError(
+                "This fund has a different fee; use /set_fund_fee first."
+            )
+        now = _utc_now_text()
+        connection.execute(
+            """
+            INSERT INTO fund_settings (
+                fund_symbol, fee_mode, fee_value, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(fund_symbol) DO UPDATE SET
+                fee_mode = COALESCE(fund_settings.fee_mode, excluded.fee_mode),
+                fee_value = COALESCE(fund_settings.fee_value, excluded.fee_value),
+                updated_at = excluded.updated_at
+            """,
+            (fund_symbol, fee_mode, fee_value, now, now),
+        )
+        cursor = connection.execute(
+            """
+            INSERT INTO rules (
+                type, symbol, name, asset_type, params_json,
+                enabled, created_at, updated_at
+            ) VALUES ('dca_reminder', ?, ?, 'cn_open_fund', ?, 1, ?, ?)
+            """,
+            (
+                fund_symbol,
+                name,
+                _json_text(
+                    {
+                        "weekday": weekday,
+                        "amount": amount,
+                        "holiday_policy": holiday_policy,
+                    }
+                ),
+                now,
+                now,
+            ),
+        )
+        connection.commit()
+        return int(cursor.lastrowid)
+    except Exception:
+        connection.rollback()
+        raise
 
 
 def add_drawdown_plan_rule(
@@ -383,13 +491,15 @@ def delete_rule(connection: sqlite3.Connection, rule_id: int) -> bool:
     """Delete a legacy rule or disable a stateful drawdown plan."""
 
     row = connection.execute(
-        "SELECT type FROM rules WHERE id = ?",
+        "SELECT type, asset_type FROM rules WHERE id = ?",
         (rule_id,),
     ).fetchone()
     if row is None:
         return False
 
-    if row["type"] == "drawdown_plan":
+    if row["type"] == "drawdown_plan" or (
+        row["type"] == "dca_reminder" and row["asset_type"] == "cn_open_fund"
+    ):
         connection.execute(
             "UPDATE rules SET enabled = 0, updated_at = ? WHERE id = ?",
             (_utc_now_text(), rule_id),
@@ -921,6 +1031,297 @@ def list_pending_manual_add_estimates(
     )
 
 
+def create_scheduled_dca_occurrence(
+    connection: sqlite3.Connection,
+    *,
+    rule_id: int,
+    fund_symbol: str,
+    due_date: str,
+    gross_amount: float,
+    holiday_policy: str,
+    effective_date: str | None,
+    skipped: bool,
+) -> sqlite3.Row:
+    """Create one durable assumed DCA occurrence, preserving its first settings."""
+
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        existing = get_scheduled_dca_occurrence(connection, rule_id, due_date)
+        if existing is not None:
+            connection.commit()
+            return existing
+        rule = connection.execute(
+            """
+            SELECT enabled, asset_type, symbol
+            FROM rules WHERE id = ? AND type = 'dca_reminder'
+            """,
+            (rule_id,),
+        ).fetchone()
+        if (
+            rule is None
+            or not bool(rule["enabled"])
+            or str(rule["asset_type"]) != "cn_open_fund"
+            or str(rule["symbol"]) != fund_symbol
+        ):
+            raise sqlite3.IntegrityError("Fixed DCA rule is no longer enabled.")
+        settings = get_fund_settings(connection, fund_symbol)
+        if settings is None or settings["fee_mode"] is None:
+            raise sqlite3.IntegrityError("Fixed DCA fund fee is missing.")
+        fee_mode = str(settings["fee_mode"])
+        fee_value = float(settings["fee_value"])
+        if fee_mode == "fixed" and fee_value >= gross_amount:
+            raise ValueError("Fixed fee must be lower than the DCA amount.")
+        now = _utc_now_text()
+        connection.execute(
+            """
+            INSERT INTO scheduled_dca_occurrences (
+                rule_id, fund_symbol, due_date, gross_amount,
+                fee_mode, fee_value, holiday_policy, effective_date,
+                status, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                rule_id,
+                fund_symbol,
+                due_date,
+                gross_amount,
+                fee_mode,
+                fee_value,
+                holiday_policy,
+                effective_date,
+                "skipped" if skipped else "pending",
+                now,
+                now,
+            ),
+        )
+        row = get_scheduled_dca_occurrence(connection, rule_id, due_date)
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    if row is None:
+        raise RuntimeError("Scheduled DCA occurrence was not persisted.")
+    return row
+
+
+def get_scheduled_dca_occurrence(
+    connection: sqlite3.Connection,
+    rule_id: int,
+    due_date: str,
+) -> sqlite3.Row | None:
+    """Return one scheduled DCA occurrence."""
+
+    return connection.execute(
+        """
+        SELECT * FROM scheduled_dca_occurrences
+        WHERE rule_id = ? AND due_date = ?
+        """,
+        (rule_id, due_date),
+    ).fetchone()
+
+
+def list_pending_scheduled_dca_occurrences(
+    connection: sqlite3.Connection,
+    *,
+    fund_symbol: str | None = None,
+) -> list[sqlite3.Row]:
+    """Return pending fixed DCA occurrences in stable order."""
+
+    where = "WHERE status = 'pending'"
+    values: tuple[object, ...] = ()
+    if fund_symbol is not None:
+        where += " AND fund_symbol = ?"
+        values = (fund_symbol,)
+    return list(
+        connection.execute(
+            f"""
+            SELECT * FROM scheduled_dca_occurrences
+            {where}
+            ORDER BY due_date, id
+            """,
+            values,
+        ).fetchall()
+    )
+
+
+def list_enhanced_dca_statuses(connection: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Return enabled fixed DCA rules with their latest occurrence and position."""
+
+    return list(
+        connection.execute(
+            """
+            SELECT
+                r.id AS rule_id,
+                r.symbol AS fund_symbol,
+                r.name,
+                r.params_json,
+                o.due_date,
+                o.effective_date,
+                o.status,
+                o.gross_amount,
+                o.added_units,
+                o.nav_date,
+                p.is_estimated,
+                p.last_synced_at,
+                p.estimates_since_sync
+            FROM rules AS r
+            LEFT JOIN scheduled_dca_occurrences AS o ON o.id = (
+                SELECT latest.id
+                FROM scheduled_dca_occurrences AS latest
+                WHERE latest.rule_id = r.id
+                ORDER BY latest.due_date DESC, latest.id DESC
+                LIMIT 1
+            )
+            LEFT JOIN position_snapshots AS p ON p.fund_symbol = r.symbol
+            WHERE r.type = 'dca_reminder'
+                AND r.asset_type = 'cn_open_fund'
+                AND r.enabled = 1
+            ORDER BY r.id
+            """
+        ).fetchall()
+    )
+
+
+def set_scheduled_dca_effective_date(
+    connection: sqlite3.Connection,
+    *,
+    occurrence_id: int,
+    effective_date: str,
+) -> None:
+    """Persist the first confirmed open date for a pending occurrence."""
+
+    connection.execute(
+        """
+        UPDATE scheduled_dca_occurrences
+        SET effective_date = COALESCE(effective_date, ?), updated_at = ?
+        WHERE id = ? AND status = 'pending'
+        """,
+        (effective_date, _utc_now_text(), occurrence_id),
+    )
+    connection.commit()
+
+
+def skip_scheduled_dca_occurrence(
+    connection: sqlite3.Connection,
+    *,
+    rule_id: int,
+    due_date: str,
+) -> str:
+    """Skip only a still-pending occurrence and return its resulting state."""
+
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        row = get_scheduled_dca_occurrence(connection, rule_id, due_date)
+        if row is None:
+            connection.commit()
+            return "missing"
+        status = str(row["status"])
+        if status == "pending":
+            connection.execute(
+                """
+                UPDATE scheduled_dca_occurrences
+                SET status = 'skipped', updated_at = ?
+                WHERE id = ? AND status = 'pending'
+                """,
+                (_utc_now_text(), int(row["id"])),
+            )
+            status = "skipped"
+        connection.commit()
+        return status
+    except Exception:
+        connection.rollback()
+        raise
+
+
+def apply_scheduled_dca_occurrence(
+    connection: sqlite3.Connection,
+    *,
+    occurrence_id: int,
+    nav: Any,
+) -> bool:
+    """Apply one exact-date fixed DCA estimate to its position at most once."""
+
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        occurrence = connection.execute(
+            "SELECT * FROM scheduled_dca_occurrences WHERE id = ?",
+            (occurrence_id,),
+        ).fetchone()
+        if occurrence is None or str(occurrence["status"]) != "pending":
+            connection.commit()
+            return False
+        nav_value = float(nav.value)
+        if (
+            str(nav.symbol) != str(occurrence["fund_symbol"])
+            or nav.date.isoformat() != str(occurrence["effective_date"])
+            or str(nav.source) != "akshare_eastmoney"
+            or not math.isfinite(nav_value)
+            or nav_value <= 0
+        ):
+            raise ValueError("Fund NAV does not match the scheduled DCA occurrence.")
+        position = get_position_snapshot(connection, str(occurrence["fund_symbol"]))
+        if position is None:
+            raise sqlite3.IntegrityError("Position snapshot is missing.")
+        settings = get_fund_settings(connection, str(occurrence["fund_symbol"]))
+        if (
+            settings is not None
+            and settings["position_sync_required_since"] is not None
+        ) or position["position_sync_required_since"] is not None:
+            raise sqlite3.IntegrityError(
+                "Position sync is required before applying pending estimates."
+            )
+        gross_amount = float(occurrence["gross_amount"])
+        fee_value = float(occurrence["fee_value"])
+        net_amount = (
+            gross_amount / (1 + fee_value)
+            if str(occurrence["fee_mode"]) == "rate"
+            else gross_amount - fee_value
+        )
+        if net_amount <= 0:
+            raise ValueError("Subscription fee leaves no investable amount.")
+        added_units = net_amount / nav_value
+        old_units = float(position["units"])
+        new_units = old_units + added_units
+        new_average_cost = (
+            old_units * float(position["average_unit_cost"]) + gross_amount
+        ) / new_units
+        now = _utc_now_text()
+        connection.execute(
+            """
+            UPDATE position_snapshots
+            SET units = ?, average_unit_cost = ?, is_estimated = 1,
+                estimates_since_sync = estimates_since_sync + 1, updated_at = ?
+            WHERE fund_symbol = ?
+            """,
+            (new_units, new_average_cost, now, str(occurrence["fund_symbol"])),
+        )
+        connection.execute(
+            """
+            UPDATE scheduled_dca_occurrences
+            SET status = 'applied', unit_nav = ?, nav_date = ?, nav_source = ?,
+                net_amount = ?, added_units = ?, new_average_cost = ?,
+                applied_at = ?, updated_at = ?
+            WHERE id = ? AND status = 'pending'
+            """,
+            (
+                nav_value,
+                nav.date.isoformat(),
+                str(nav.source),
+                net_amount,
+                added_units,
+                new_average_cost,
+                now,
+                now,
+                occurrence_id,
+            ),
+        )
+        connection.commit()
+        return True
+    except Exception:
+        connection.rollback()
+        raise
+
+
 def list_pending_position_items(
     connection: sqlite3.Connection,
     fund_symbol: str,
@@ -939,6 +1340,18 @@ def list_pending_position_items(
             fund_symbol=fund_symbol,
         )
     ]
+    items.extend(
+        {
+            "key": f"dca:{row['id']}",
+            "kind": "scheduled DCA estimate",
+            "date": str(row["due_date"]),
+            "amount": float(row["gross_amount"]),
+        }
+        for row in list_pending_scheduled_dca_occurrences(
+            connection,
+            fund_symbol=fund_symbol,
+        )
+    )
     items.extend(
         {
             "key": f"action:{row['cycle_id']}:{row['tier_key']}",
@@ -1030,6 +1443,11 @@ def reconcile_position_snapshot(
                 for key in current_keys
                 if key.startswith("action:")
             ]
+            dca_ids = [
+                int(key.split(":", 1)[1])
+                for key in current_keys
+                if key.startswith("dca:")
+            ]
             if estimate_ids:
                 connection.executemany(
                     """
@@ -1050,6 +1468,15 @@ def reconcile_position_snapshot(
                         (now, int(cycle_id), tier_key)
                         for cycle_id, tier_key in action_keys
                     ],
+                )
+            if dca_ids:
+                connection.executemany(
+                    """
+                    UPDATE scheduled_dca_occurrences
+                    SET status = 'reconciled_by_sync', updated_at = ?
+                    WHERE id = ? AND status = 'pending'
+                    """,
+                    [(now, occurrence_id) for occurrence_id in dca_ids],
                 )
         unresolved = connection.execute(
             """

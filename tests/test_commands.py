@@ -45,6 +45,7 @@ from fund_alert_bot.db import (
     add_rule,
     connect,
     get_active_drawdown_cycle,
+    get_fund_settings,
     get_position_snapshot,
     init_db,
     list_pending_position_items,
@@ -158,6 +159,32 @@ def test_parse_valid_dca_command_with_english_weekday() -> None:
     assert command.name == "创业板"
     assert command.weekday == "THU"
     assert command.amount == 1000
+
+
+def test_parse_enhanced_dca_command_defaults_holiday_next() -> None:
+    command = parse_add_dca_args(
+        ["110026", '"A500 feeder"', "周四", "2000", "rate:0.12%"]
+    )
+
+    assert command.fund_symbol == "110026"
+    assert command.name == "A500 feeder"
+    assert command.weekday == "THU"
+    assert command.amount == 2000
+    assert command.fee_mode == "rate"
+    assert command.fee_value == pytest.approx(0.0012)
+    assert command.holiday_policy == "next"
+    assert dca_params(command) == {
+        "weekday": "THU",
+        "amount": 2000,
+        "holiday_policy": "next",
+    }
+
+
+def test_parse_enhanced_dca_rejects_fixed_fee_consuming_amount() -> None:
+    with pytest.raises(CommandParseError, match="lower than"):
+        parse_add_dca_args(
+            ["110026", "A500", "周四", "100", "fixed:100", "holiday:skip"]
+        )
 
 
 def test_fractional_drawdown_tiers_keep_precision_in_actions_and_confirmation() -> None:
@@ -605,7 +632,11 @@ def test_list_shows_dca_rule() -> None:
 
 def test_add_dca_command_persists_rule(tmp_path) -> None:
     sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
-    handlers = build_command_handlers({123}, sqlite_path=sqlite_path)
+    handlers = build_command_handlers(
+        {123},
+        sqlite_path=sqlite_path,
+        market_data_provider=FakeProvider(_history(["2024-01-02"], [1])),
+    )
     message = FakeMessage()
     update = SimpleNamespace(
         effective_user=SimpleNamespace(id=123),
@@ -627,6 +658,81 @@ def test_add_dca_command_persists_rule(tmp_path) -> None:
     assert message.replies == [
         "Added DCA rule id=1 name=创业板 weekday=THU amount=1000"
     ]
+
+
+def test_add_enhanced_dca_persists_settings_and_plans_instructions(tmp_path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    provider = FakeProvider(_history(["2024-01-02"], [1]))
+    provider.get_fund_type = lambda _symbol: "指数型-股票"
+    handlers = build_command_handlers(
+        {123},
+        sqlite_path=sqlite_path,
+        market_data_provider=provider,
+    )
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        effective_message=message,
+    )
+    context = SimpleNamespace(
+        bot=FakeBot(),
+        args=["110026", '"A500 feeder"', "周四", "2000", "rate:0.12%"],
+    )
+
+    asyncio.run(_handler_by_command(handlers, "add_dca").callback(update, context))
+    asyncio.run(
+        _handler_by_command(handlers, "plans").callback(
+            update,
+            SimpleNamespace(bot=FakeBot(), args=[]),
+        )
+    )
+
+    with open_connection(sqlite_path) as connection:
+        rule = list_rules(connection)[0]
+        settings = get_fund_settings(connection, "110026")
+
+    assert rule["asset_type"] == "cn_open_fund"
+    assert rule["symbol"] == "110026"
+    assert settings["fee_mode"] == "rate"
+    assert settings["fee_value"] == pytest.approx(0.0012)
+    assert "Position readiness: SETUP_REQUIRED" in message.replies[0]
+    assert "Verified fund type: 指数型-股票" in message.replies[0]
+    assert "A500 feeder (fixed DCA 1)" in message.replies[1]
+    assert "remember /sync_position" in message.replies[1]
+
+
+def test_add_enhanced_dca_rejects_qdii_metadata(tmp_path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    provider = FakeProvider(_history(["2024-01-02"], [1]))
+    provider.get_fund_type = lambda _symbol: "QDII-普通股票"
+    handlers = build_command_handlers(
+        {123},
+        sqlite_path=sqlite_path,
+        market_data_provider=provider,
+    )
+    message = FakeMessage()
+
+    asyncio.run(
+        _handler_by_command(handlers, "add_dca").callback(
+            SimpleNamespace(
+                effective_user=SimpleNamespace(id=123),
+                effective_chat=SimpleNamespace(id=456),
+                effective_message=message,
+            ),
+            SimpleNamespace(
+                bot=FakeBot(),
+                args=["110026", "Global", "周四", "2000", "rate:0%"],
+            ),
+        )
+    )
+
+    with open_connection(sqlite_path) as connection:
+        init_db(connection)
+        rules = list_rules(connection)
+
+    assert rules == []
+    assert "does not use the domestic CN valuation calendar" in message.replies[0]
 
 
 def test_fund_setting_commands_persist_shared_values(tmp_path) -> None:
