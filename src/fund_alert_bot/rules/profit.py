@@ -102,6 +102,12 @@ def build_profit_alert_key(*, symbol: str, cost: float, threshold: float) -> str
     )
 
 
+def format_profit_threshold_key(threshold: float) -> str:
+    """Return the canonical persistence identity for a gain threshold."""
+
+    return _format_number(threshold)
+
+
 def build_position_profit_alert(
     rule: Any,
     nav: Any,
@@ -127,10 +133,10 @@ def build_position_profit_alert(
         raise ValueError("Fund NAV does not match the Price-Gain rule.")
     profit_rate = calculate_profit_rate(current_price=nav_value, cost=cost)
     crossed = tuple(
-        (_format_number(threshold), threshold)
+        (format_profit_threshold_key(threshold), threshold)
         for threshold in thresholds
         if _meets_threshold(profit_rate, threshold)
-        and _format_number(threshold) not in recorded_threshold_keys
+        and format_profit_threshold_key(threshold) not in recorded_threshold_keys
     )
     if not crossed:
         return None

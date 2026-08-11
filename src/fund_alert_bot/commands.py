@@ -90,7 +90,10 @@ from fund_alert_bot.rules.drawdown_plan import (
     required_history_start,
     validate_drawdown_plan_notification_size,
 )
-from fund_alert_bot.rules.profit import build_position_profit_alert
+from fund_alert_bot.rules.profit import (
+    build_position_profit_alert,
+    format_profit_threshold_key,
+)
 
 if TYPE_CHECKING:
     from telegram import Update
@@ -360,7 +363,10 @@ def parse_add_profit_args(args: Sequence[str]) -> ProfitCommand:
         if asset_type is not AssetType.CN_OPEN_FUND:
             raise CommandParseError("auto cost is only valid for cn_open_fund")
         symbol = _parse_fund_symbol(symbol)
-        if thresholds != sorted(set(thresholds)):
+        threshold_keys = [format_profit_threshold_key(value) for value in thresholds]
+        if thresholds != sorted(thresholds) or len(threshold_keys) != len(
+            set(threshold_keys)
+        ):
             raise CommandParseError(
                 "auto thresholds must be unique and strictly ascending"
             )

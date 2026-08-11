@@ -61,6 +61,7 @@ def test_auto_profit_parser_is_strict() -> None:
         ["cn_etf", "510500", "A500", "auto", "20,30"],
         ["cn_open_fund", "000001", "A500", "auto", "30,20"],
         ["cn_open_fund", "000001", "A500", "auto", "20,20"],
+        ["cn_open_fund", "000001", "A500", "auto", "20,20.000000000001"],
         ["cn_open_fund", "000001", "A500", "auto", "nan"],
     ):
         with pytest.raises(CommandParseError):
