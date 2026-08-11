@@ -309,6 +309,10 @@ def test_init_db_does_not_recover_ambiguous_preexisting_history(
             )
             == 1
         )
+        retry_row = connection.execute(
+            "SELECT notification_attempted_at FROM alert_events WHERE id = 1"
+        ).fetchone()
+        assert retry_row["notification_attempted_at"] is not None
         assert [
             int(row["id"]) for row in list_retryable_standard_alert_events(connection)
         ] == [1]
@@ -379,6 +383,15 @@ def test_init_db_preserves_delivery_aware_pending_event(tmp_path: Path) -> None:
                     None,
                 ),
                 (
+                    "re-reserved-standard",
+                    "Drawdown reminder",
+                    "failed once and was reserved again",
+                    None,
+                    "2026-07-01T02:00:00+00:00",
+                    "pending",
+                    "2026-07-01T01:59:00+00:00",
+                ),
+                (
                     "tracked-delivery",
                     "Drawdown reminder",
                     "sent with delivery tracking",
@@ -402,8 +415,8 @@ def test_init_db_preserves_delivery_aware_pending_event(tmp_path: Path) -> None:
         init_db(connection)
 
         retryable = list_retryable_standard_alert_events(connection)
-        assert [int(row["id"]) for row in retryable] == [4, 5]
-        assert str(retryable[1]["title"]) == "Reminder recovery notice"
+        assert [int(row["id"]) for row in retryable] == [3, 5, 6]
+        assert str(retryable[2]["title"]) == "Reminder recovery notice"
         position_status = connection.execute(
             "SELECT notification_status FROM alert_events WHERE id = 2"
         ).fetchone()

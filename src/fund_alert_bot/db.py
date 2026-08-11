@@ -2253,7 +2253,6 @@ def reserve_alert_event(
                 payload_json = ?,
                 triggered_at = ?,
                 notification_status = ?,
-                notification_attempted_at = NULL,
                 notification_sent_at = NULL,
                 notification_result_json = NULL
             WHERE id = ?

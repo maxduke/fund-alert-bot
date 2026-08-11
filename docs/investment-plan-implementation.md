@@ -661,6 +661,8 @@ Keep confirmed business state separate from delivery state:
   rather than replaying stale reminders;
 - when no attempted event exists, treat all unattempted pre-migration standard
   rows as ambiguous and use that same notice instead of guessing;
+- re-reserving a failed event preserves its prior attempt timestamp so a second
+  crash remains distinguishable from ambiguous migration history;
 - a recovered DCA action requires the event's persisted fund symbol to match
   the current occurrence, preventing deleted SQLite rule IDs from being reused;
 - expired pre-alerts are not retried;
