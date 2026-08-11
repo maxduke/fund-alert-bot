@@ -1373,6 +1373,90 @@ def position_profit_action_rows(
     )
 
 
+def _evaluate_cached_position_profit_nav(
+    connection: Any,
+    row: Any,
+    nav: Any,
+    *,
+    nav_date: str,
+) -> AlertNotification | None:
+    rule_id = int(row["id"])
+    symbol = str(row["symbol"])
+    position = get_position_snapshot(connection, symbol)
+    cycle = get_active_position_cycle(connection, symbol)
+    settings = get_fund_settings(connection, symbol)
+    if (
+        position is None
+        or float(position["units"]) <= 0
+        or cycle is None
+        or position["position_sync_required_since"] is not None
+        or (
+            settings is not None
+            and settings["position_sync_required_since"] is not None
+        )
+    ):
+        return None
+    cycle_id = int(cycle["id"])
+    recorded_threshold_keys = list_position_profit_threshold_keys(
+        connection,
+        rule_id=rule_id,
+        position_cycle_id=cycle_id,
+    )
+    configured_thresholds = _load_params(str(row["params_json"]))["thresholds"]
+    if len(recorded_threshold_keys) >= len(configured_thresholds) or (
+        has_position_profit_evaluation(
+            connection,
+            rule_id=rule_id,
+            position_cycle_id=cycle_id,
+            nav_date=nav_date,
+        )
+    ):
+        return None
+    built = build_position_profit_alert(
+        row,
+        nav,
+        position,
+        position_cycle_id=cycle_id,
+        recorded_threshold_keys=recorded_threshold_keys,
+    )
+    if built is None:
+        record_position_profit_evaluation(
+            connection,
+            rule_id=rule_id,
+            position_cycle_id=cycle_id,
+            nav_date=nav_date,
+            position=position,
+        )
+        return None
+    alert, thresholds = built
+    event_id = persist_position_profit_alert(
+        connection,
+        rule_id=rule_id,
+        position_cycle_id=cycle_id,
+        alert=alert,
+        thresholds=thresholds,
+        nav_date=nav_date,
+    )
+    LOGGER.info(
+        "Position-linked Price-Gain reserved rule_id=%s symbol=%s "
+        "evaluation_date=%s unit_nav=%s average_unit_cost=%s "
+        "new_thresholds=%s alert_event_id=%s",
+        rule_id,
+        symbol,
+        alert["payload"]["nav_date"],
+        alert["payload"]["unit_nav"],
+        alert["payload"]["average_unit_cost"],
+        [key for key, _value in thresholds],
+        event_id,
+    )
+    return AlertNotification(
+        event_id=event_id,
+        title=str(alert["title"]),
+        text=str(alert["message"]),
+        telegram_actions=position_profit_action_rows(event_id),
+    )
+
+
 def evaluate_position_profit_rules(
     connection: Any,
     market_data_provider: MarketDataProvider,
@@ -1414,6 +1498,10 @@ def evaluate_position_profit_rules(
             ],
             errors=errors,
         )
+    errors = [
+        RuleCheckError(error.rule_id, error.symbol, error.message, expected_date)
+        for error in errors
+    ]
     for row in rules:
         rule_id = int(row["id"])
         symbol = str(row["symbol"])
@@ -1476,51 +1564,20 @@ def evaluate_position_profit_rules(
                 raise MarketDataProviderError(
                     f"Exact Eastmoney fund NAV for {expected_date} is unavailable."
                 )
-            built = build_position_profit_alert(
-                row,
-                navs[nav_key],
-                position,
-                position_cycle_id=cycle_id,
-                recorded_threshold_keys=recorded_threshold_keys,
-            )
-            if built is None:
-                record_position_profit_evaluation(
-                    connection,
-                    rule_id=rule_id,
-                    position_cycle_id=cycle_id,
-                    nav_date=nav_date,
-                    position=position,
-                )
-                continue
-            alert, thresholds = built
-            event_id = persist_position_profit_alert(
-                connection,
-                rule_id=rule_id,
-                position_cycle_id=cycle_id,
-                alert=alert,
-                thresholds=thresholds,
-                nav_date=nav_date,
-            )
-            LOGGER.info(
-                "Position-linked Price-Gain reserved rule_id=%s symbol=%s "
-                "evaluation_date=%s unit_nav=%s average_unit_cost=%s "
-                "new_thresholds=%s alert_event_id=%s",
-                rule_id,
-                symbol,
-                alert["payload"]["nav_date"],
-                alert["payload"]["unit_nav"],
-                alert["payload"]["average_unit_cost"],
-                [key for key, _value in thresholds],
-                event_id,
-            )
-            notifications.append(
-                AlertNotification(
-                    event_id=event_id,
-                    title=str(alert["title"]),
-                    text=str(alert["message"]),
-                    telegram_actions=position_profit_action_rows(event_id),
-                )
-            )
+            for attempt in range(2):
+                try:
+                    notification = _evaluate_cached_position_profit_nav(
+                        connection,
+                        row,
+                        navs[nav_key],
+                        nav_date=nav_date,
+                    )
+                    if notification is not None:
+                        notifications.append(notification)
+                    break
+                except sqlite3.IntegrityError:
+                    if attempt:
+                        raise
         except (MarketDataProviderError, MarketCalendarUnavailableError) as exc:
             no_data_skips.append(
                 RuleNoDataSkip(rule_id, symbol, str(exc), expected_date)

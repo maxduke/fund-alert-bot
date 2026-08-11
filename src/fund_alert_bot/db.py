@@ -841,10 +841,13 @@ def list_position_profit_statuses(
                 p.average_unit_cost,
                 p.is_estimated,
                 p.last_synced_at,
+                p.position_sync_required_since AS snapshot_sync_required_since,
+                fs.position_sync_required_since AS settings_sync_required_since,
                 c.id AS position_cycle_id,
                 COUNT(t.id) AS reached_thresholds
             FROM rules AS r
             LEFT JOIN position_snapshots AS p ON p.fund_symbol = r.symbol
+            LEFT JOIN fund_settings AS fs ON fs.fund_symbol = r.symbol
             LEFT JOIN position_cycles AS c
                 ON c.fund_symbol = r.symbol AND c.ended_at IS NULL
             LEFT JOIN position_profit_thresholds AS t
@@ -1067,17 +1070,19 @@ def list_position_snapshots(connection: sqlite3.Connection) -> list[sqlite3.Row]
         connection.execute(
             """
             SELECT
-                fund_symbol,
-                units,
-                average_unit_cost,
-                is_estimated,
-                last_synced_at,
-                estimates_since_sync,
-                position_sync_required_since,
-                created_at,
-                updated_at
-            FROM position_snapshots
-            ORDER BY fund_symbol
+                p.fund_symbol,
+                p.units,
+                p.average_unit_cost,
+                p.is_estimated,
+                p.last_synced_at,
+                p.estimates_since_sync,
+                p.position_sync_required_since,
+                fs.position_sync_required_since AS settings_sync_required_since,
+                p.created_at,
+                p.updated_at
+            FROM position_snapshots AS p
+            LEFT JOIN fund_settings AS fs ON fs.fund_symbol = p.fund_symbol
+            ORDER BY p.fund_symbol
             """
         ).fetchall()
     )

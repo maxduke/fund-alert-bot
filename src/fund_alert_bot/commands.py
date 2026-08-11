@@ -1183,7 +1183,14 @@ def format_plan_overview(
                 + ", ".join(format_plan_percent(value) for value in thresholds),
             )
         )
-        if row["units"] is None:
+        if (
+            row["snapshot_sync_required_since"] is not None
+            or row["settings_sync_required_since"] is not None
+        ):
+            lines.append(
+                "Position Sync required — reminders paused; run /sync_position"
+            )
+        elif row["units"] is None:
             lines.append("Position: unavailable — remember /sync_position")
         elif float(row["units"]) == 0:
             lines.append("Position: closed (exact zero units)")
@@ -1260,6 +1267,13 @@ def format_plan_overview(
                 f"later estimates {position['estimates_since_sync']}",
             )
         )
+        if (
+            position["position_sync_required_since"] is not None
+            or position["settings_sync_required_since"] is not None
+        ):
+            lines.append(
+                "Position Sync required — reminders paused; run /sync_position"
+            )
         if units == 0:
             lines.append("Position value: ¥0.00 (closed)")
         elif nav is None:
@@ -2753,7 +2767,11 @@ def build_command_handlers(
             unmatched_positions = []
             for row in unmatched_rows:
                 nav = None
-                if float(row["units"]) > 0:
+                sync_required = (
+                    row["position_sync_required_since"] is not None
+                    or row["settings_sync_required_since"] is not None
+                )
+                if float(row["units"]) > 0 and not sync_required:
                     try:
                         nav = market_data_provider.get_fund_nav(
                             Instrument(

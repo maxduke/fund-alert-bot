@@ -1663,11 +1663,22 @@ def test_auto_profit_preview_defers_pending_position_sync(tmp_path) -> None:
             ),
         )
     )
+    asyncio.run(
+        _handler_by_command(handlers, "plans").callback(
+            SimpleNamespace(
+                effective_user=SimpleNamespace(id=123),
+                effective_chat=SimpleNamespace(id=456),
+                effective_message=message,
+            ),
+            SimpleNamespace(bot=FakeBot(), args=[]),
+        )
+    )
 
     assert (
         "Read-only preview unavailable: Position Sync is required."
         in message.replies[0]
     )
+    assert "Position Sync required — reminders paused" in message.replies[1]
     assert provider.nav_calls == []
 
 

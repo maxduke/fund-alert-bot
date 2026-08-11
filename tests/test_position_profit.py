@@ -158,6 +158,7 @@ def test_malformed_legacy_rule_does_not_abort_other_profit_rules(tmp_path) -> No
     assert position_result.checked_rules == 1
     assert len(position_result.errors) == 1
     assert position_result.errors[0].rule_id == malformed_id
+    assert position_result.errors[0].data_date == date(2024, 1, 2)
 
 
 def test_thresholds_are_once_per_continuous_positive_position_cycle(tmp_path) -> None:
@@ -423,17 +424,18 @@ def test_concurrent_position_sync_discards_stale_gain_evaluation(
             processing_date=date(2024, 1, 3),
         )
 
-        assert not result.notifications
-        assert not list_position_profit_threshold_keys(
+        recorded = list_position_profit_threshold_keys(
             connection,
             rule_id=rule_id,
             position_cycle_id=cycle_id,
         )
+        assert len(result.notifications) == (1 if synced_cost == 1.0 else 0)
+        assert recorded == ({"0.2"} if synced_cost == 1.0 else set())
         assert (
             connection.execute(
                 "SELECT COUNT(*) FROM position_profit_evaluations"
             ).fetchone()[0]
-            == 0
+            == 1
         )
 
 
