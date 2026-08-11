@@ -1394,7 +1394,10 @@ def evaluate_position_profit_rules(
     rules = []
     errors: list[RuleCheckError] = []
     for row in list_enabled_rules(connection):
-        if row["type"] != PROFIT_RULE_TYPE:
+        if (
+            row["type"] != PROFIT_RULE_TYPE
+            or row["asset_type"] != AssetType.CN_OPEN_FUND.value
+        ):
             continue
         try:
             if _load_params(str(row["params_json"])).get("cost") == "auto":

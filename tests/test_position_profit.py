@@ -81,6 +81,11 @@ def test_auto_profit_parser_is_strict() -> None:
     ):
         with pytest.raises(CommandParseError):
             parse_add_profit_args(args)
+    many_thresholds = ",".join(f"{index / 10:.1f}" for index in range(1, 501))
+    with pytest.raises(CommandParseError, match="4096-character"):
+        parse_add_profit_args(
+            ["cn_open_fund", "000001", "A500", "auto", many_thresholds]
+        )
 
 
 def test_malformed_legacy_rule_does_not_abort_other_profit_rules(tmp_path) -> None:
@@ -107,11 +112,26 @@ def test_malformed_legacy_rule_does_not_abort_other_profit_rules(tmp_path) -> No
             asset_type="cn_etf",
             params={"cost": 1, "thresholds": [0.5]},
         )
+        malformed_etf_id = add_rule(
+            connection,
+            type="profit_reminder",
+            symbol="510300",
+            name="bad ETF",
+            asset_type="cn_etf",
+            params={"cost": 1, "thresholds": [0.2]},
+        )
+        connection.execute(
+            "UPDATE rules SET params_json = '{' WHERE id = ?",
+            (malformed_etf_id,),
+        )
+        connection.commit()
 
         result = evaluate_profit_rules(connection, LatestProvider())
-        assert result.checked_rules == 2
-        assert len(result.errors) == 1
-        assert result.errors[0].rule_id == malformed_id
+        assert result.checked_rules == 3
+        assert {error.rule_id for error in result.errors} == {
+            malformed_id,
+            malformed_etf_id,
+        }
 
         add_position_profit_rule(
             connection,

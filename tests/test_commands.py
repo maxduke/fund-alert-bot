@@ -1678,6 +1678,7 @@ def test_auto_profit_preview_and_position_actions(tmp_path) -> None:
             processing_date=date(2024, 1, 3),
         )
         event_id = result.notifications[0].event_id
+    assert "2024-01-02 (akshare_eastmoney)" in message.replies[0]
     assert "Preview only; no threshold was consumed" in message.replies[0]
 
     active_plans_message = FakeMessage()

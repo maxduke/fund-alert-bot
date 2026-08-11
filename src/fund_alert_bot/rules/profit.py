@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Callable, Mapping, Sequence
+from datetime import date
+from types import SimpleNamespace
 from typing import Any
 
 import pandas as pd
@@ -14,6 +16,7 @@ from fund_alert_bot.market_data import AssetType
 AlertChecker = Callable[[str], bool]
 
 _THRESHOLD_TOLERANCE = 1e-12
+_TELEGRAM_TEXT_LIMIT = 4096
 
 
 class LatestDataUnavailableError(ValueError):
@@ -106,6 +109,35 @@ def format_profit_threshold_key(threshold: float) -> str:
     """Return the canonical persistence identity for a gain threshold."""
 
     return _format_number(threshold)
+
+
+def validate_position_profit_notification_size(
+    *, symbol: str, name: str, thresholds: Sequence[float]
+) -> None:
+    """Reject auto-cost rules whose aggregate alert cannot fit Telegram."""
+
+    preview = build_position_profit_alert(
+        {
+            "id": 2**63 - 1,
+            "symbol": symbol,
+            "name": name,
+            "params": {"cost": "auto", "thresholds": list(thresholds)},
+        },
+        SimpleNamespace(
+            symbol=symbol,
+            date=date(2099, 12, 31),
+            value=2,
+            source="akshare_eastmoney",
+        ),
+        {"units": 1, "average_unit_cost": 1, "is_estimated": False},
+        position_cycle_id=2**63 - 1,
+        recorded_threshold_keys=set(),
+    )
+    if preview is not None and len(str(preview[0]["message"])) > _TELEGRAM_TEXT_LIMIT:
+        raise ValueError(
+            "auto thresholds and name produce a Price-Gain reminder over "
+            "Telegram's 4096-character limit"
+        )
 
 
 def build_position_profit_alert(

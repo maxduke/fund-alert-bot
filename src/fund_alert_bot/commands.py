@@ -95,6 +95,7 @@ from fund_alert_bot.rules.drawdown_plan import (
 from fund_alert_bot.rules.profit import (
     build_position_profit_alert,
     format_profit_threshold_key,
+    validate_position_profit_notification_size,
 )
 
 if TYPE_CHECKING:
@@ -372,6 +373,14 @@ def parse_add_profit_args(args: Sequence[str]) -> ProfitCommand:
             raise CommandParseError(
                 "auto thresholds must be unique and strictly ascending"
             )
+        try:
+            validate_position_profit_notification_size(
+                symbol=symbol,
+                name=name,
+                thresholds=thresholds,
+            )
+        except ValueError as exc:
+            raise CommandParseError(str(exc)) from exc
         cost: float | str = "auto"
     else:
         cost = parse_profit_cost(raw_cost)
@@ -1718,7 +1727,7 @@ def build_command_handlers(
                     (
                         f"Read-only preview ({payload['accuracy']}): gain "
                         f"{float(payload['profit_rate']):+.1%} on "
-                        f"{payload['nav_date']}",
+                        f"{payload['nav_date']} ({payload['nav_source']})",
                         "Currently reached: "
                         + ", ".join(
                             format_plan_percent(float(item["threshold"]))
