@@ -355,28 +355,43 @@ def test_init_db_preserves_delivery_aware_pending_event(tmp_path: Path) -> None:
         connection.executemany(
             """
             INSERT INTO alert_events (
-                rule_id, alert_key, title, message, triggered_at,
+                rule_id, alert_key, title, message, payload_json, triggered_at,
                 notification_status, notification_attempted_at
-            ) VALUES (99, ?, 'Drawdown reminder', ?, ?, ?, ?)
+            ) VALUES (99, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 (
                     "migrated-history",
+                    "Drawdown reminder",
                     "already sent",
+                    None,
                     "2026-07-01T00:00:00+00:00",
                     "pending",
                     None,
                 ),
                 (
+                    "position-profit-pending",
+                    "Price-Gain reminder",
+                    "position alert reserved before crash",
+                    '{"phase":"position_profit"}',
+                    "2026-07-01T01:00:00+00:00",
+                    "pending",
+                    None,
+                ),
+                (
                     "tracked-delivery",
+                    "Drawdown reminder",
                     "sent with delivery tracking",
+                    None,
                     "2026-07-02T00:00:00+00:00",
                     "sent",
                     "2026-07-02T00:01:00+00:00",
                 ),
                 (
                     "delivery-aware-pending",
+                    "Drawdown reminder",
                     "reserved before crash",
+                    None,
                     "2026-07-03T00:00:00+00:00",
                     "pending",
                     None,
@@ -387,8 +402,12 @@ def test_init_db_preserves_delivery_aware_pending_event(tmp_path: Path) -> None:
         init_db(connection)
 
         retryable = list_retryable_standard_alert_events(connection)
-        assert [int(row["id"]) for row in retryable] == [3, 4]
+        assert [int(row["id"]) for row in retryable] == [4, 5]
         assert str(retryable[1]["title"]) == "Reminder recovery notice"
+        position_status = connection.execute(
+            "SELECT notification_status FROM alert_events WHERE id = 2"
+        ).fetchone()
+        assert position_status["notification_status"] == ALERT_NOTIFICATION_PENDING
 
 
 def test_rule_helpers_add_list_filter_and_delete_rules(tmp_path: Path) -> None:

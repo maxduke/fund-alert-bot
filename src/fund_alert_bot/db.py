@@ -2768,6 +2768,7 @@ def _ensure_standard_notification_recovery_migration(
         FROM alert_events
         WHERE notification_status = ?
             AND notification_attempted_at IS NULL
+            AND COALESCE(json_extract(payload_json, '$.phase'), '') = ''
             AND title IN (
                 'DCA reminder',
                 'Drawdown reminder',
@@ -2785,6 +2786,7 @@ def _ensure_standard_notification_recovery_migration(
             SET notification_status = ?
             WHERE notification_status = ?
                 AND notification_attempted_at IS NULL
+                AND COALESCE(json_extract(payload_json, '$.phase'), '') = ''
                 AND title IN (
                     'DCA reminder',
                     'Drawdown reminder',
