@@ -78,6 +78,7 @@ from fund_alert_bot.rules.drawdown_plan import (
     format_plan_percent,
     parse_drawdown_plan_config,
     required_history_start,
+    validate_drawdown_plan_notification_size,
 )
 
 if TYPE_CHECKING:
@@ -649,6 +650,11 @@ def parse_add_drawdown_plan_args(args: Sequence[str]) -> DrawdownPlanCommand:
             reference_symbol=reference_symbol,
             asset_type=AssetType.CN_ETF,
             params=params,
+        )
+        validate_drawdown_plan_notification_size(
+            name=name,
+            reference_symbol=reference_symbol,
+            config=config,
         )
     except ValueError as exc:
         raise CommandParseError(str(exc)) from exc

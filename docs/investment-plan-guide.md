@@ -84,7 +84,9 @@ so the user does not enter asset-type tokens. A name containing spaces must be
 quoted. `lookback` is optional and defaults to `365`; SMA stays internal at 250
 observations with a 20-observation slope window. A plan accepts at most 50 tiers
 so Telegram can always render the tier action buttons; normal plans typically
-need only a small handful.
+need only a small handful. Before saving, the bot also renders the largest
+possible pre-alert and confirmed reminder and rejects a name/tier combination
+that would exceed Telegram's 4,096-character message limit.
 
 Conceptual example:
 

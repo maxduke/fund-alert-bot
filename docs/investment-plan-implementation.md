@@ -89,6 +89,8 @@ Telegram boundary and evaluator boundary:
 - positive `lookback_days`;
 - between 1 and 50 tiers in strictly ascending drawdown order, keeping Telegram
   actions and messages within channel limits;
+- both fully rendered all-tier pre-alert and confirmed-close messages within
+  Telegram's 4,096-character limit;
 - unique finite drawdowns strictly between zero and one;
 - positive finite amounts;
 - `sma_window >= 2`;

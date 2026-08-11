@@ -226,6 +226,15 @@ def test_parse_drawdown_plan_with_quoted_name_and_optional_lookback() -> None:
     assert command.params["sma_slope_window"] == 20
 
 
+def test_parse_drawdown_plan_rejects_oversized_rendered_notifications() -> None:
+    tiers = ",".join(
+        f"{10 + index * 1e-12:.12f}:1234567890123.45" for index in range(50)
+    )
+
+    with pytest.raises(CommandParseError, match="4096-character"):
+        parse_add_drawdown_plan_args(["510300", "000001", "N" * 600, tiers])
+
+
 @pytest.mark.parametrize(
     "args,message",
     [

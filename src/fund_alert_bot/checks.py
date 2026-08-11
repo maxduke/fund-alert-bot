@@ -55,6 +55,7 @@ from fund_alert_bot.rules.drawdown_plan import (
     format_plan_percent,
     parse_drawdown_plan_config,
     required_history_start,
+    validate_drawdown_plan_notification_size,
 )
 from fund_alert_bot.rules.profit import (
     LatestDataUnavailableError,
@@ -859,6 +860,11 @@ def _load_drawdown_plan_state(
         reference_symbol=str(rule["symbol"]),
         asset_type=str(rule["asset_type"]),
         params=_load_params(str(rule["params_json"])),
+    )
+    validate_drawdown_plan_notification_size(
+        name=str(rule["name"]),
+        reference_symbol=str(rule["symbol"]),
+        config=config,
     )
     active_row = get_active_drawdown_cycle(connection, int(rule["id"]))
     if active_row is None:

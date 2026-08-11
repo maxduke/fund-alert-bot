@@ -6,7 +6,7 @@ import math
 import re
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -20,6 +20,7 @@ _PRICE_RELATIVE_TOLERANCE = 1e-4
 _PRICE_ABSOLUTE_TOLERANCE = 1e-6
 _MAX_FIXED_DECIMAL_CHARS = 24
 _MAX_TIERS = 50
+_TELEGRAM_TEXT_LIMIT = 4096
 _SYMBOL_PATTERN = re.compile(r"[0-9]{6}")
 _REALTIME_SOURCES = frozenset({"eastmoney", "sina_fallback"})
 _CONFIRMED_HISTORY_SOURCES = frozenset({"akshare_eastmoney"})
@@ -493,6 +494,77 @@ def build_drawdown_plan_alert(
             "sma_slope": evaluation.sma_slope,
         },
     }
+
+
+def validate_drawdown_plan_notification_size(
+    *,
+    name: str,
+    reference_symbol: str,
+    config: DrawdownPlanConfig,
+) -> None:
+    """Reject plans whose fully rendered worst-case reminders exceed Telegram."""
+
+    latest_date = date(2099, 12, 31)
+    evaluation = DrawdownPlanEvaluation(
+        latest_date=latest_date,
+        latest_price=1,
+        peak_date=date(2099, 1, 1),
+        peak_price=1e308,
+        drawdown=0.999,
+        sma=1e308,
+        above_sma=False,
+        distance_to_sma=-0.999,
+        sma_slope=-0.999,
+        source="akshare_eastmoney",
+        coverage_start=latest_date,
+        cycle_initialized=False,
+        cycle_changed=False,
+        newly_crossed_tiers=config.tiers,
+        total_amount=sum((tier.amount for tier in config.tiers), start=0),
+    )
+    quote = RealtimeQuote(
+        symbol=reference_symbol,
+        price=1,
+        previous_close=1,
+        volume=1,
+        amount=1,
+        source="sina_fallback",
+        fetched_at=datetime(
+            2099,
+            12,
+            31,
+            14,
+            50,
+            tzinfo=ZoneInfo("Asia/Shanghai"),
+        ),
+    )
+    alerts = (
+        build_drawdown_plan_alert(
+            rule_id=2**63 - 1,
+            reference_symbol=reference_symbol,
+            name=name,
+            config=config,
+            evaluation=evaluation,
+        ),
+        build_drawdown_plan_pre_alert(
+            rule_id=2**63 - 1,
+            cycle_id=2**63 - 1,
+            reference_symbol=reference_symbol,
+            name=name,
+            confirmed_date=date(2099, 12, 30),
+            config=config,
+            evaluation=replace(evaluation, source="sina_fallback"),
+            quote=quote,
+        ),
+    )
+    if any(
+        alert is not None and len(str(alert["message"])) > _TELEGRAM_TEXT_LIMIT
+        for alert in alerts
+    ):
+        raise ValueError(
+            "drawdown plan notification exceeds Telegram's 4096-character limit; "
+            "shorten the name, reduce tiers, or reduce numeric precision."
+        )
 
 
 def calculate_sma(
