@@ -579,7 +579,7 @@ def delete_rule(connection: sqlite3.Connection, rule_id: int) -> bool:
     """Delete a legacy rule or disable a stateful drawdown plan."""
 
     row = connection.execute(
-        "SELECT type, asset_type FROM rules WHERE id = ?",
+        "SELECT type, asset_type, params_json FROM rules WHERE id = ?",
         (rule_id,),
     ).fetchone()
     if row is None:
@@ -588,7 +588,11 @@ def delete_rule(connection: sqlite3.Connection, rule_id: int) -> bool:
     if (
         row["type"] == "drawdown_plan"
         or (row["type"] == "dca_reminder" and row["asset_type"] == "cn_open_fund")
-        or (row["type"] == "profit_reminder" and row["asset_type"] == "cn_open_fund")
+        or (
+            row["type"] == "profit_reminder"
+            and row["asset_type"] == "cn_open_fund"
+            and json.loads(str(row["params_json"])).get("cost") == "auto"
+        )
     ):
         connection.execute(
             "UPDATE rules SET enabled = 0, updated_at = ? WHERE id = ?",

@@ -92,7 +92,6 @@ EXPECTED_PROFIT_MESSAGE = "\n".join(
         "• Triggered threshold: 25.0%",
         "",
         "This is a price-gain reminder only.",
-        "For strategic profit-taking, allocation-based rebalancing is preferred.",
         "No trade has been placed.",
     )
 )

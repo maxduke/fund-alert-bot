@@ -325,7 +325,6 @@ def _build_message(
             f"• Triggered threshold: {threshold:.1%}",
             "",
             "This is a price-gain reminder only.",
-            "For strategic profit-taking, allocation-based rebalancing is preferred.",
             "No trade has been placed.",
         )
     )

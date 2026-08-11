@@ -2718,7 +2718,11 @@ def build_command_handlers(
             initialize_database(connection)
             rule_identity = next(
                 (
-                    (str(row["type"]), str(row["asset_type"]))
+                    (
+                        str(row["type"]),
+                        str(row["asset_type"]),
+                        _load_params(str(row["params_json"])).get("cost"),
+                    )
                     for row in db_list_rules(connection)
                     if int(row["id"]) == rule_id
                 ),
@@ -2726,11 +2730,15 @@ def build_command_handlers(
             )
             removed = delete_rule(connection, rule_id)
 
-        if removed and rule_identity == ("drawdown_plan", "cn_etf"):
+        if removed and rule_identity == ("drawdown_plan", "cn_etf", None):
             await _reply_text(update, f"Disabled drawdown plan id={rule_id}")
-        elif removed and rule_identity == (DCA_RULE_TYPE, "cn_open_fund"):
+        elif removed and rule_identity == (DCA_RULE_TYPE, "cn_open_fund", None):
             await _reply_text(update, f"Disabled fixed DCA rule id={rule_id}")
-        elif removed and rule_identity == (PROFIT_RULE_TYPE, "cn_open_fund"):
+        elif removed and rule_identity == (
+            PROFIT_RULE_TYPE,
+            "cn_open_fund",
+            "auto",
+        ):
             await _reply_text(
                 update, f"Disabled auto-cost Price-Gain rule id={rule_id}"
             )

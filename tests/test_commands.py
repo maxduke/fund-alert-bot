@@ -110,7 +110,6 @@ EXPECTED_PROFIT_MESSAGE = "\n".join(
         "• Triggered threshold: 25.0%",
         "",
         "This is a price-gain reminder only.",
-        "For strategic profit-taking, allocation-based rebalancing is preferred.",
         "No trade has been placed.",
     )
 )
@@ -1720,6 +1719,38 @@ def test_delete_command_reports_disabled_drawdown_plan(tmp_path) -> None:
     assert rule["enabled"] == 0
     assert "status=disabled" in format_rules_list([rule])
     assert message.replies == [f"Disabled drawdown plan id={rule_id}"]
+
+
+def test_delete_command_keeps_legacy_numeric_open_fund_behavior(tmp_path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    with open_connection(sqlite_path) as connection:
+        init_db(connection)
+        rule_id = add_rule(
+            connection,
+            type=PROFIT_RULE_TYPE,
+            symbol="000001",
+            name="A500",
+            asset_type=AssetType.CN_OPEN_FUND.value,
+            params={"cost": 1.2, "thresholds": [0.2]},
+        )
+
+    handlers = build_command_handlers({123}, sqlite_path=sqlite_path)
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        effective_message=message,
+    )
+    asyncio.run(
+        _handler_by_command(handlers, "del").callback(
+            update,
+            SimpleNamespace(bot=FakeBot(), args=[str(rule_id)]),
+        )
+    )
+
+    with open_connection(sqlite_path) as connection:
+        assert list_rules(connection) == []
+    assert message.replies == [f"Deleted rule id={rule_id}"]
 
 
 def test_check_sends_due_dca_without_market_data_fetch(tmp_path) -> None:
