@@ -1675,6 +1675,12 @@ def build_command_handlers(
                         or float(position["units"]) <= 0
                     ):
                         raise ValueError("positive Position Snapshot is missing")
+                    settings = get_fund_settings(connection, command.symbol)
+                    if (
+                        settings is not None
+                        and settings["position_sync_required_since"] is not None
+                    ) or position["position_sync_required_since"] is not None:
+                        raise ValueError("Position Sync is required")
                     expected_date = latest_completed_open_date(
                         market_calendar,
                         _clock_now(clock).astimezone(timezone_info).date(),

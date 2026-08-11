@@ -840,6 +840,22 @@ def persist_position_profit_alert(
             "SELECT fund_symbol, ended_at FROM position_cycles WHERE id = ?",
             (position_cycle_id,),
         ).fetchone()
+        position = connection.execute(
+            """
+            SELECT units, average_unit_cost, is_estimated,
+                   position_sync_required_since
+            FROM position_snapshots WHERE fund_symbol = ?
+            """,
+            (None if rule is None else rule["symbol"],),
+        ).fetchone()
+        settings = connection.execute(
+            """
+            SELECT position_sync_required_since
+            FROM fund_settings WHERE fund_symbol = ?
+            """,
+            (None if rule is None else rule["symbol"],),
+        ).fetchone()
+        payload = alert["payload"]
         if (
             rule is None
             or not bool(rule["enabled"])
@@ -847,6 +863,16 @@ def persist_position_profit_alert(
             or cycle is None
             or cycle["ended_at"] is not None
             or str(cycle["fund_symbol"]) != str(rule["symbol"])
+            or position is None
+            or float(position["units"]) != float(payload["position_units"])
+            or float(position["average_unit_cost"])
+            != float(payload["average_unit_cost"])
+            or bool(position["is_estimated"]) != (payload["accuracy"] == "estimated")
+            or position["position_sync_required_since"] is not None
+            or (
+                settings is not None
+                and settings["position_sync_required_since"] is not None
+            )
         ):
             raise sqlite3.IntegrityError("Position-linked gain state changed.")
         existing = list_position_profit_threshold_keys(

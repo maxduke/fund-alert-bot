@@ -1625,6 +1625,52 @@ def test_add_profit_command_persists_rule(tmp_path) -> None:
     ]
 
 
+def test_auto_profit_preview_defers_pending_position_sync(tmp_path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    with open_connection(sqlite_path) as connection:
+        init_db(connection)
+        upsert_position_snapshot(
+            connection,
+            fund_symbol="000001",
+            units=100,
+            average_unit_cost=1,
+        )
+        connection.execute(
+            "UPDATE position_snapshots SET position_sync_required_since = ? "
+            "WHERE fund_symbol = ?",
+            ("2024-01-02T06:00:00+00:00", "000001"),
+        )
+        connection.commit()
+    provider = FakeProvider(
+        _history(["2024-01-02"], [1.3]),
+        nav=FundNav("000001", date(2024, 1, 2), 1.3, "akshare_eastmoney"),
+    )
+    provider.get_fund_type = lambda _symbol: "指数型-股票"
+    handlers = build_command_handlers(
+        {123}, sqlite_path=sqlite_path, market_data_provider=provider
+    )
+    message = FakeMessage()
+    asyncio.run(
+        _handler_by_command(handlers, "add_profit").callback(
+            SimpleNamespace(
+                effective_user=SimpleNamespace(id=123),
+                effective_chat=SimpleNamespace(id=456),
+                effective_message=message,
+            ),
+            SimpleNamespace(
+                bot=FakeBot(),
+                args=["cn_open_fund", "000001", "A500", "auto", "20,30"],
+            ),
+        )
+    )
+
+    assert (
+        "Read-only preview unavailable: Position Sync is required."
+        in message.replies[0]
+    )
+    assert provider.nav_calls == []
+
+
 def test_auto_profit_preview_and_position_actions(tmp_path) -> None:
     sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
     with open_connection(sqlite_path) as connection:

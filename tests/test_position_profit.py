@@ -347,7 +347,6 @@ def test_same_nav_date_is_not_replayed_after_cost_sync(tmp_path) -> None:
             )
             == 1
         )
-
         upsert_position_snapshot(
             connection,
             fund_symbol="000001",
@@ -373,6 +372,60 @@ def test_same_nav_date_is_not_replayed_after_cost_sync(tmp_path) -> None:
                 ).notifications
             )
             == 1
+        )
+
+
+def test_concurrent_position_sync_prevents_stale_gain_alert(tmp_path) -> None:
+    sqlite_path = tmp_path / "fund-alert.sqlite3"
+    with open_connection(sqlite_path) as connection:
+        init_db(connection)
+        rule_id = add_position_profit_rule(
+            connection,
+            fund_symbol="000001",
+            name="A500 feeder",
+            thresholds=(0.2,),
+        )
+        upsert_position_snapshot(
+            connection,
+            fund_symbol="000001",
+            units=100,
+            average_unit_cost=1,
+        )
+        cycle_id = int(get_active_position_cycle(connection, "000001")["id"])
+
+        class ConcurrentSyncProvider(NavProvider):
+            def get_fund_nav(
+                self, instrument: object, nav_date: date | None = None
+            ) -> FundNav:
+                with open_connection(sqlite_path) as other:
+                    upsert_position_snapshot(
+                        other,
+                        fund_symbol="000001",
+                        units=120,
+                        average_unit_cost=1.2,
+                    )
+                return super().get_fund_nav(instrument, nav_date)
+
+        result = evaluate_position_profit_rules(
+            connection,
+            ConcurrentSyncProvider(
+                FundNav("000001", date(2024, 1, 2), 1.3, "akshare_eastmoney")
+            ),
+            OpenCalendar(),
+            processing_date=date(2024, 1, 3),
+        )
+
+        assert not result.notifications
+        assert not list_position_profit_threshold_keys(
+            connection,
+            rule_id=rule_id,
+            position_cycle_id=cycle_id,
+        )
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM position_profit_evaluations"
+            ).fetchone()[0]
+            == 0
         )
 
 
