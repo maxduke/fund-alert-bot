@@ -49,6 +49,7 @@ from fund_alert_bot.db import (
     get_position_profit_event,
     get_position_snapshot,
     initialize_database,
+    is_auto_cost_profit_rule,
     list_enabled_drawdown_plan_fund_symbols,
     list_enhanced_dca_statuses,
     list_manual_add_actions,
@@ -2754,7 +2755,7 @@ def build_command_handlers(
                     (
                         str(row["type"]),
                         str(row["asset_type"]),
-                        _load_params(str(row["params_json"])).get("cost"),
+                        "auto" if is_auto_cost_profit_rule(row) else None,
                     )
                     for row in db_list_rules(connection)
                     if int(row["id"]) == rule_id

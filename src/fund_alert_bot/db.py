@@ -583,6 +583,18 @@ def list_enabled_rules(connection: sqlite3.Connection) -> list[sqlite3.Row]:
     )
 
 
+def is_auto_cost_profit_rule(rule: Any) -> bool:
+    """Return whether a rule is a valid position-linked Price-Gain rule."""
+
+    if rule["type"] != "profit_reminder" or rule["asset_type"] != "cn_open_fund":
+        return False
+    try:
+        params = json.loads(str(rule["params_json"]))
+    except (json.JSONDecodeError, TypeError):
+        return False
+    return isinstance(params, dict) and params.get("cost") == "auto"
+
+
 def delete_rule(connection: sqlite3.Connection, rule_id: int) -> bool:
     """Delete a legacy rule or disable a stateful drawdown plan."""
 
@@ -596,11 +608,7 @@ def delete_rule(connection: sqlite3.Connection, rule_id: int) -> bool:
     if (
         row["type"] == "drawdown_plan"
         or (row["type"] == "dca_reminder" and row["asset_type"] == "cn_open_fund")
-        or (
-            row["type"] == "profit_reminder"
-            and row["asset_type"] == "cn_open_fund"
-            and json.loads(str(row["params_json"])).get("cost") == "auto"
-        )
+        or is_auto_cost_profit_rule(row)
     ):
         connection.execute(
             "UPDATE rules SET enabled = 0, updated_at = ? WHERE id = ?",

@@ -123,6 +123,7 @@ class RuleNoDataSkip:
     rule_id: int
     symbol: str
     message: str
+    data_date: date | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +133,7 @@ class RuleCheckError:
     rule_id: int
     symbol: str
     message: str
+    data_date: date | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,7 +233,9 @@ def reserve_drawdown_plan_data_unavailable_notice(
         "after_close": "After-close confirmation",
         "fund_nav": "Feeder-fund NAV settlement",
     }[phase]
-    alert_key = f"data_unavailable:{phase}:{evaluation_date.isoformat()}"
+    affected_dates = sorted({item.data_date or evaluation_date for item in affected})
+    date_key = "+".join(item.isoformat() for item in affected_dates)
+    alert_key = f"data_unavailable:{phase}:{date_key}"
     notice_name = (
         "Feeder-fund data unavailable"
         if phase == "fund_nav"
@@ -240,9 +244,14 @@ def reserve_drawdown_plan_data_unavailable_notice(
     lines = [
         f"⚠️ {notice_name}",
         "",
-        f"Data date: {evaluation_date.isoformat()}",
+        f"Data date{'s' if len(affected_dates) > 1 else ''}: "
+        + ", ".join(item.isoformat() for item in affected_dates),
         f"{phase_label} could not evaluate:",
-        *(f"• {item.symbol}: {item.message}" for item in affected),
+        *(
+            f"• {(item.data_date or evaluation_date).isoformat()} / "
+            f"{item.symbol}: {item.message}"
+            for item in affected
+        ),
         "",
         (
             "Pending position work was not applied and no Price-Gain decision was made."
@@ -263,12 +272,16 @@ def reserve_drawdown_plan_data_unavailable_notice(
             message=message,
             payload={
                 "phase": phase,
-                "data_date": evaluation_date.isoformat(),
+                "data_date": (
+                    affected_dates[0].isoformat() if len(affected_dates) == 1 else None
+                ),
+                "data_dates": [item.isoformat() for item in affected_dates],
                 "affected_plans": [
                     {
                         "rule_id": item.rule_id,
                         "symbol": item.symbol,
                         "reason": item.message,
+                        "data_date": (item.data_date or evaluation_date).isoformat(),
                     }
                     for item in affected
                 ],
@@ -713,9 +726,13 @@ def process_manual_add_estimates(
                     )
                 )
         except (MarketDataProviderError, MarketCalendarUnavailableError) as exc:
-            no_data_skips.append(RuleNoDataSkip(rule_id, fund_symbol, str(exc)))
+            no_data_skips.append(
+                RuleNoDataSkip(rule_id, fund_symbol, str(exc), effective_date)
+            )
         except Exception as exc:  # noqa: BLE001
-            errors.append(RuleCheckError(rule_id, fund_symbol, str(exc)))
+            errors.append(
+                RuleCheckError(rule_id, fund_symbol, str(exc), effective_date)
+            )
     return ManualAddSettlementResult(
         checked_estimates=len(occurrences),
         notifications=notifications,
@@ -744,10 +761,12 @@ def process_scheduled_dca_occurrences(
     for occurrence in occurrences:
         rule_id = int(occurrence["rule_id"])
         fund_symbol = str(occurrence["fund_symbol"])
+        failure_date = processing_date
         try:
             effective_text = occurrence["effective_date"]
             if effective_text is None:
                 due_date = date.fromisoformat(str(occurrence["due_date"]))
+                failure_date = due_date
                 if str(occurrence["holiday_policy"]) == "skip":
                     if not market_calendar.confirmed_status(due_date):
                         skip_scheduled_dca_occurrence(
@@ -782,6 +801,7 @@ def process_scheduled_dca_occurrences(
             if effective_text is None:
                 continue
             effective_date = date.fromisoformat(str(effective_text))
+            failure_date = effective_date
             if processing_date <= effective_date:
                 continue
             if effective_date not in calendar_status:
@@ -843,9 +863,11 @@ def process_scheduled_dca_occurrences(
                     occurrence["gross_amount"],
                 )
         except (MarketDataProviderError, MarketCalendarUnavailableError) as exc:
-            no_data_skips.append(RuleNoDataSkip(rule_id, fund_symbol, str(exc)))
+            no_data_skips.append(
+                RuleNoDataSkip(rule_id, fund_symbol, str(exc), failure_date)
+            )
         except Exception as exc:  # noqa: BLE001
-            errors.append(RuleCheckError(rule_id, fund_symbol, str(exc)))
+            errors.append(RuleCheckError(rule_id, fund_symbol, str(exc), failure_date))
     return ManualAddSettlementResult(
         checked_estimates=len(occurrences),
         notifications=[],
@@ -1491,11 +1513,13 @@ def evaluate_position_profit_rules(
                 )
             )
         except (MarketDataProviderError, MarketCalendarUnavailableError) as exc:
-            no_data_skips.append(RuleNoDataSkip(rule_id, symbol, str(exc)))
+            no_data_skips.append(
+                RuleNoDataSkip(rule_id, symbol, str(exc), expected_date)
+            )
         except sqlite3.IntegrityError:
             continue
         except Exception as exc:  # noqa: BLE001
-            errors.append(RuleCheckError(rule_id, symbol, str(exc)))
+            errors.append(RuleCheckError(rule_id, symbol, str(exc), expected_date))
     return ProfitCheckResult(
         checked_rules=len(rules),
         notifications=notifications,

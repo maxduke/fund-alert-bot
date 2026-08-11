@@ -803,14 +803,28 @@ def test_scheduled_fund_nav_process_combines_data_failure_notice(
     settlement_result = ManualAddSettlementResult(
         checked_estimates=1,
         notifications=[],
-        no_data_skips=[RuleNoDataSkip(settlement_rule_id, "000001", "NAV unavailable")],
+        no_data_skips=[
+            RuleNoDataSkip(
+                settlement_rule_id,
+                "000001",
+                "NAV unavailable",
+                date(2024, 1, 1),
+            )
+        ],
         errors=[],
     )
     profit_result = ProfitCheckResult(
         checked_rules=1,
         notifications=[],
         skipped_duplicates=0,
-        no_data_skips=[RuleNoDataSkip(profit_rule_id, "000002", "NAV unavailable")],
+        no_data_skips=[
+            RuleNoDataSkip(
+                profit_rule_id,
+                "000002",
+                "NAV unavailable",
+                date(2024, 1, 2),
+            )
+        ],
         errors=[],
         data_date=date(2024, 1, 2),
     )
@@ -861,14 +875,14 @@ def test_scheduled_fund_nav_process_combines_data_failure_notice(
     )
 
     assert len(sent) == 1
-    assert "000001: NAV unavailable" in sent[0].text
-    assert "000002: NAV unavailable" in sent[0].text
+    assert "2024-01-01 / 000001: NAV unavailable" in sent[0].text
+    assert "2024-01-02 / 000002: NAV unavailable" in sent[0].text
     with open_connection(sqlite_path) as connection:
         event_keys = [
             row["alert_key"]
             for row in connection.execute("SELECT alert_key FROM alert_events")
         ]
-    assert event_keys == ["data_unavailable:fund_nav:2024-01-02"]
+    assert event_keys == ["data_unavailable:fund_nav:2024-01-01+2024-01-02"]
 
 
 def test_scheduled_market_check_notifies_once_when_plan_close_is_missing(

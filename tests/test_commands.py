@@ -1774,7 +1774,11 @@ def test_delete_command_reports_disabled_drawdown_plan(tmp_path) -> None:
     assert message.replies == [f"Disabled drawdown plan id={rule_id}"]
 
 
-def test_delete_command_keeps_legacy_numeric_open_fund_behavior(tmp_path) -> None:
+@pytest.mark.parametrize("malformed", [False, True])
+def test_delete_command_keeps_legacy_open_fund_behavior(
+    tmp_path,
+    malformed: bool,
+) -> None:
     sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
     with open_connection(sqlite_path) as connection:
         init_db(connection)
@@ -1786,6 +1790,11 @@ def test_delete_command_keeps_legacy_numeric_open_fund_behavior(tmp_path) -> Non
             asset_type=AssetType.CN_OPEN_FUND.value,
             params={"cost": 1.2, "thresholds": [0.2]},
         )
+        if malformed:
+            connection.execute(
+                "UPDATE rules SET params_json = '[]' WHERE id = ?", (rule_id,)
+            )
+            connection.commit()
 
     handlers = build_command_handlers({123}, sqlite_path=sqlite_path)
     message = FakeMessage()

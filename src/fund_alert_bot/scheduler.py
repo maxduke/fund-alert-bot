@@ -671,7 +671,7 @@ async def run_scheduled_fund_nav_process(
             )
             fund_nav_notice = reserve_drawdown_plan_data_unavailable_notice(
                 connection,
-                evaluation_date=(position_profit_result.data_date or processing_date),
+                evaluation_date=processing_date,
                 result=result,
                 phase="fund_nav",
             )
