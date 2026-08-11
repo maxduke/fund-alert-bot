@@ -649,7 +649,7 @@ async def run_scheduled_fund_nav_process(
                 nav_cache=nav_cache,
                 nav_errors=nav_errors,
             )
-            result = ManualAddSettlementResult(
+            settlement_result = ManualAddSettlementResult(
                 checked_estimates=(
                     dca_result.checked_estimates + manual_result.checked_estimates
                 ),
@@ -657,18 +657,28 @@ async def run_scheduled_fund_nav_process(
                 no_data_skips=[
                     *dca_result.no_data_skips,
                     *manual_result.no_data_skips,
+                ],
+                errors=[*dca_result.errors, *manual_result.errors],
+            )
+            result = ManualAddSettlementResult(
+                checked_estimates=settlement_result.checked_estimates,
+                notifications=settlement_result.notifications,
+                no_data_skips=[
+                    *settlement_result.no_data_skips,
                     *position_profit_result.no_data_skips,
                 ],
-                errors=[
-                    *dca_result.errors,
-                    *manual_result.errors,
-                    *position_profit_result.errors,
-                ],
+                errors=[*settlement_result.errors, *position_profit_result.errors],
             )
-            data_notice = reserve_drawdown_plan_data_unavailable_notice(
+            settlement_notice = reserve_drawdown_plan_data_unavailable_notice(
                 connection,
                 evaluation_date=processing_date,
-                result=result,
+                result=settlement_result,
+                phase="fund_nav",
+            )
+            profit_notice = reserve_drawdown_plan_data_unavailable_notice(
+                connection,
+                evaluation_date=(position_profit_result.data_date or processing_date),
+                result=position_profit_result,
                 phase="fund_nav",
             )
         for skip in result.no_data_skips:
@@ -692,7 +702,8 @@ async def run_scheduled_fund_nav_process(
             notifications=[
                 *result.notifications,
                 *position_profit_result.notifications,
-                *([] if data_notice is None else [data_notice]),
+                *([] if settlement_notice is None else [settlement_notice]),
+                *([] if profit_notice is None else [profit_notice]),
             ],
             notification_settings=notification_settings,
         )

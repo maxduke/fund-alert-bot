@@ -7,7 +7,10 @@ from types import SimpleNamespace
 import pytest
 
 from fund_alert_bot import scheduler
-from fund_alert_bot.checks import evaluate_position_profit_rules
+from fund_alert_bot.checks import (
+    evaluate_position_profit_rules,
+    reserve_drawdown_plan_data_unavailable_notice,
+)
 from fund_alert_bot.commands import CommandParseError, parse_add_profit_args
 from fund_alert_bot.db import (
     add_alert_event,
@@ -186,6 +189,25 @@ def test_stale_nav_and_missing_position_never_emit(tmp_path) -> None:
         )
         assert not stale.notifications
         assert stale.no_data_skips
+        assert stale.data_date == date(2024, 1, 2)
+        assert (
+            reserve_drawdown_plan_data_unavailable_notice(
+                connection,
+                evaluation_date=stale.data_date,
+                result=stale,
+                phase="fund_nav",
+            )
+            is not None
+        )
+        assert (
+            reserve_drawdown_plan_data_unavailable_notice(
+                connection,
+                evaluation_date=stale.data_date,
+                result=stale,
+                phase="fund_nav",
+            )
+            is None
+        )
 
 
 def test_same_nav_date_is_not_replayed_after_cost_sync(tmp_path) -> None:

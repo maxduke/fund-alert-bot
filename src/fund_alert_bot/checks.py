@@ -179,6 +179,7 @@ class ProfitCheckResult:
     skipped_duplicates: int
     no_data_skips: list[RuleNoDataSkip]
     errors: list[RuleCheckError]
+    data_date: date | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1496,6 +1497,7 @@ def evaluate_position_profit_rules(
         skipped_duplicates=0,
         no_data_skips=no_data_skips,
         errors=errors,
+        data_date=expected_date,
     )
 
 
