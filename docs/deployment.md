@@ -59,6 +59,24 @@ Copy `.env.example` from this repository to:
 /opt/fund-alert-bot/.env
 ```
 
+Record the owner IDs of the deployment directory:
+
+```bash
+(
+set -eu
+BOT_OWNER_UID="$(id -u)"
+BOT_OWNER_GID="$(id -g)"
+if [ "$BOT_OWNER_UID" -eq 0 ] || [ "$BOT_OWNER_GID" -eq 0 ]; then
+  echo "Use a non-root deployment account." >&2
+  exit 1
+fi
+printf 'BOT_UID=%s\nBOT_GID=%s\n' "$BOT_OWNER_UID" "$BOT_OWNER_GID"
+)
+```
+
+Run these steps from a dedicated non-root deployment account. If either test
+fails, stop and switch to that account; never configure the bot as `0:0`.
+
 ## 3. Create `.env`
 
 Edit `/opt/fund-alert-bot/.env` and replace placeholders with this bot's
@@ -76,6 +94,8 @@ Minimum configuration:
 ```dotenv
 TELEGRAM_BOT_TOKEN=replace-with-fund-alert-bot-token
 TELEGRAM_ALLOWED_USER_IDS=
+BOT_UID=1000
+BOT_GID=1000
 SQLITE_PATH=/app/data/fund_alert_bot.sqlite3
 TZ=Asia/Shanghai
 AFTER_CLOSE_CHECK_TIME=17:10
@@ -83,6 +103,11 @@ BEFORE_CLOSE_CHECK_TIME=14:50
 DCA_REMINDER_TIME=09:30
 FUND_NAV_PROCESS_TIME=08:30
 ```
+
+Replace `BOT_UID` and `BOT_GID` with the two values printed by `id -u` and
+`id -g`. Compose uses them for the non-root bot process so it can write the
+host-owned `data` directory. A mismatch prevents SQLite from opening; do not
+work around it with world-writable permissions.
 
 Keep `.env` on the VPS only. Do not commit real secrets.
 
@@ -106,6 +131,13 @@ docker compose pull
 docker compose up -d
 ```
 
+Verify that the configured process can write its data directory before relying
+on scheduled reminders:
+
+```bash
+docker compose run --rm --entrypoint sh fund-alert-bot -c 'test -w /app/data'
+```
+
 Follow logs:
 
 ```bash
@@ -116,12 +148,46 @@ Stop following logs with `Ctrl+C`; the container keeps running.
 
 ## Updating
 
-Pull the latest image and recreate the container:
+Before the first update that uses `BOT_UID` and `BOT_GID`, run `id -u` and
+`id -g`, add those values to `.env`, and give that same account ownership of
+the existing database directory:
 
 ```bash
+(
+set -eu
 cd /opt/fund-alert-bot
+BOT_OWNER_UID="$(id -u)"
+BOT_OWNER_GID="$(id -g)"
+if [ "$BOT_OWNER_UID" -eq 0 ] || [ "$BOT_OWNER_GID" -eq 0 ]; then
+  echo "Use a non-root deployment account." >&2
+  exit 1
+fi
+printf 'BOT_UID=%s\nBOT_GID=%s\n' "$BOT_OWNER_UID" "$BOT_OWNER_GID"
+nano .env
+curl -fsSL \
+  https://raw.githubusercontent.com/maxduke/fund-alert-bot/main/deploy/docker-compose.prod.yml \
+  -o docker-compose.yml.new
+docker compose -f docker-compose.yml.new config >/dev/null
+mv docker-compose.yml.new docker-compose.yml
+docker compose stop
+sudo chown -R "$BOT_OWNER_UID:$BOT_OWNER_GID" data
+)
+```
+
+The download and validation above install the current production Compose file
+before ownership changes. Do not run the ownership step with an older Compose
+file that lacks the configured `user` value.
+
+The production Compose file refuses to start when either setting is missing;
+this prevents an upgrade from silently making an existing SQLite database
+unwritable.
+
+Then pull the latest image, recreate the container, and verify data access:
+
+```bash
 docker compose pull
 docker compose up -d
+docker compose run --rm --entrypoint sh fund-alert-bot -c 'test -w /app/data'
 ```
 
 Check logs after updating:
