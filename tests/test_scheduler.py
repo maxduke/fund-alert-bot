@@ -81,7 +81,7 @@ EXPECTED_DCA_MESSAGE = "\n".join(
 
 EXPECTED_PROFIT_MESSAGE = "\n".join(
     (
-        "💵 Profit-taking reminder",
+        "💰 Price-Gain reminder",
         "",
         "• Symbol: 159915",
         "• Name: ChiNext ETF",
@@ -91,7 +91,9 @@ EXPECTED_PROFIT_MESSAGE = "\n".join(
         "• Profit rate: 29.7%",
         "• Triggered threshold: 25.0%",
         "",
-        "Reminder: this is not automatic trading and no orders will be placed.",
+        "This is a price-gain reminder only.",
+        "For strategic profit-taking, allocation-based rebalancing is preferred.",
+        "No trade has been placed.",
     )
 )
 

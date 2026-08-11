@@ -47,16 +47,20 @@ scheduled market jobs skip official CN market holidays when AKShare's Sina
 trade-date calendar is available. If that calendar cannot be loaded, the
 scheduled check falls back to weekday behavior.
 
-Profit-taking reminders are added with `/add_profit`, for example
+Price-Gain reminders are added with `/add_profit`, for example
 `/add_profit cn_etf 159915 ChiNext-ETF 1.85 25,40` or
-`/add_profit cn_open_fund 110026 Example-Fund 1.234 25,40`. The cost is the
-personal cost basis, and thresholds are entered as percentages. `/check` uses
+`/add_profit cn_open_fund 110026 Example-Fund auto 20,30`. Numeric cost is a
+fixed personal cost basis; `auto` reads the feeder fund's tracked average cost
+from `/sync_position`. Thresholds are user-chosen percentages and must be unique
+and ascending in `auto` mode. `/check` uses
 the latest normalized `close` value from the market data provider as the current
-price; for `cn_open_fund`, that `close` value is the latest unit NAV. Each
-configured threshold sends at most one reminder per cost basis. Profit reminders
-are notifications only and do not calculate position size, redeem funds, place
-orders, or connect to a broker. APScheduler evaluates profit reminders in the
-same after-close scheduled market reminder check as drawdown rules.
+price for legacy numeric-cost rules. The daily `08:30` fund-NAV job evaluates
+`auto` rules only from the exact previous confirmed trading day's feeder-fund
+unit NAV. Reached tiers are aggregated and alert once per continuous positive
+position cycle; changing average cost does not reopen them. A full `0 0` sync
+closes the cycle and a later positive position starts a new one. Reminder buttons
+can show sync instructions or, after a second confirmation, record a zero
+position. They never redeem funds or place orders.
 
 DCA reminder-only rules are added with `/add_dca`, for example `/add_dca 创业板 周四
 1000` or `/add_dca 创业板 Thursday 1000`. Supported weekdays are 周一 through
@@ -117,6 +121,17 @@ value. It never substitutes the Reference ETF's realtime price.
 Remember to run `/sync_position` again after any redemption, distribution or
 reinvestment, unrecorded purchase, fee mismatch, or visible difference from the
 sales platform. The Bot cannot discover those account changes itself.
+
+After the initial sync, add position-linked thresholds only if wanted:
+
+```text
+/add_profit cn_open_fund 110026 "A500 feeder" auto 20,30
+```
+
+The creation preview is read-only and consumes no threshold. If a Price-Gain
+reminder arrives after a partial redemption, wait for the platform's exact units
+and cost, then run `/sync_position` again. Do not forget this step: the Bot has
+no brokerage connection and cannot detect the changed holding itself.
 
 ### Drawdown Add Plans
 

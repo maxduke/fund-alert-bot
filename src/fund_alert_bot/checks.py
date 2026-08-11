@@ -19,6 +19,7 @@ from fund_alert_bot.db import (
     apply_scheduled_dca_occurrence,
     create_scheduled_dca_occurrence,
     get_active_drawdown_cycle,
+    get_active_position_cycle,
     get_fund_settings,
     get_position_snapshot,
     list_drawdown_tier_records,
@@ -26,7 +27,9 @@ from fund_alert_bot.db import (
     list_manual_add_actions,
     list_pending_manual_add_estimates,
     list_pending_scheduled_dca_occurrences,
+    list_position_profit_threshold_keys,
     persist_drawdown_plan_evaluation,
+    persist_position_profit_alert,
     reserve_alert_event,
     set_scheduled_dca_effective_date,
     skip_scheduled_dca_occurrence,
@@ -68,6 +71,7 @@ from fund_alert_bot.rules.drawdown_plan import (
 )
 from fund_alert_bot.rules.profit import (
     LatestDataUnavailableError,
+    build_position_profit_alert,
     build_profit_alerts,
     latest_unavailable_message,
 )
@@ -225,16 +229,20 @@ def reserve_drawdown_plan_data_unavailable_notice(
         "fund_nav": "Feeder-fund NAV settlement",
     }[phase]
     alert_key = f"data_unavailable:{phase}:{evaluation_date.isoformat()}"
+    notice_name = (
+        "Feeder-fund data unavailable"
+        if phase == "fund_nav"
+        else "Drawdown plan data unavailable"
+    )
     lines = [
-        "⚠️ Drawdown plan data unavailable",
+        f"⚠️ {notice_name}",
         "",
         f"Data date: {evaluation_date.isoformat()}",
         f"{phase_label} could not evaluate:",
         *(f"• {item.symbol}: {item.message}" for item in affected),
         "",
         (
-            "The recorded contribution remains pending; no position estimate "
-            "was applied."
+            "Pending position work was not applied and no Price-Gain decision was made."
             if phase == "fund_nav"
             else "No tier decision was made for these plans."
         ),
@@ -248,7 +256,7 @@ def reserve_drawdown_plan_data_unavailable_notice(
             connection,
             rule_id=affected[0].rule_id,
             alert_key=alert_key,
-            title="Drawdown plan data unavailable",
+            title=notice_name,
             message=message,
             payload={
                 "phase": phase,
@@ -265,7 +273,7 @@ def reserve_drawdown_plan_data_unavailable_notice(
         )
     except sqlite3.IntegrityError:
         return None
-    return AlertNotification(event_id=event_id, title="Data unavailable", text=message)
+    return AlertNotification(event_id=event_id, title=notice_name, text=message)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1238,6 +1246,8 @@ def evaluate_profit_rules(
 
     for row in rules:
         try:
+            if _load_params(str(row["params_json"])).get("cost") == "auto":
+                continue
             asset_type = AssetType(row["asset_type"])
             instrument = Instrument(
                 symbol=row["symbol"],
@@ -1314,6 +1324,159 @@ def evaluate_profit_rules(
         checked_rules=len(rules),
         notifications=notifications,
         skipped_duplicates=skipped_duplicates,
+        no_data_skips=no_data_skips,
+        errors=errors,
+    )
+
+
+def latest_completed_open_date(
+    market_calendar: MarketCalendar,
+    processing_date: date,
+) -> date:
+    """Return the latest confirmed CN open day strictly before processing."""
+
+    candidate = processing_date - timedelta(days=1)
+    for _ in range(366):
+        if market_calendar.confirmed_status(candidate):
+            return candidate
+        candidate -= timedelta(days=1)
+    raise MarketCalendarUnavailableError("No completed CN open day was found.")
+
+
+def position_profit_action_rows(
+    event_id: int,
+) -> tuple[tuple[tuple[str, str], ...], ...]:
+    return (
+        (("✅ Partially redeemed", f"profit_action:{event_id}:partial"),),
+        (("✅ Fully closed", f"profit_action:{event_id}:close"),),
+        (("⏭ No action", f"profit_action:{event_id}:none"),),
+    )
+
+
+def evaluate_position_profit_rules(
+    connection: Any,
+    market_data_provider: MarketDataProvider,
+    market_calendar: MarketCalendar,
+    *,
+    processing_date: date,
+    nav_cache: dict[tuple[str, date], Any] | None = None,
+    nav_errors: dict[tuple[str, date], Exception] | None = None,
+) -> ProfitCheckResult:
+    """Evaluate auto-cost Price-Gain rules from one exact completed fund NAV."""
+
+    rules = [
+        row
+        for row in list_enabled_rules(connection)
+        if row["type"] == PROFIT_RULE_TYPE
+        and _load_params(str(row["params_json"])).get("cost") == "auto"
+    ]
+    notifications: list[AlertNotification] = []
+    no_data_skips: list[RuleNoDataSkip] = []
+    errors: list[RuleCheckError] = []
+    navs = {} if nav_cache is None else nav_cache
+    cached_errors = {} if nav_errors is None else nav_errors
+    try:
+        expected_date = latest_completed_open_date(market_calendar, processing_date)
+    except MarketCalendarUnavailableError as exc:
+        return ProfitCheckResult(
+            checked_rules=len(rules),
+            notifications=[],
+            skipped_duplicates=0,
+            no_data_skips=[
+                RuleNoDataSkip(int(row["id"]), str(row["symbol"]), str(exc))
+                for row in rules
+            ],
+            errors=[],
+        )
+    for row in rules:
+        rule_id = int(row["id"])
+        symbol = str(row["symbol"])
+        try:
+            position = get_position_snapshot(connection, symbol)
+            cycle = get_active_position_cycle(connection, symbol)
+            if position is None or float(position["units"]) <= 0 or cycle is None:
+                LOGGER.info(
+                    "Position-linked Price-Gain skipped rule_id=%s symbol=%s "
+                    "reason=positive_position_required",
+                    rule_id,
+                    symbol,
+                )
+                continue
+            cycle_id = int(cycle["id"])
+            recorded_threshold_keys = list_position_profit_threshold_keys(
+                connection,
+                rule_id=rule_id,
+                position_cycle_id=cycle_id,
+            )
+            configured_thresholds = _load_params(str(row["params_json"]))["thresholds"]
+            if len(recorded_threshold_keys) >= len(configured_thresholds):
+                continue
+            nav_key = (symbol, expected_date)
+            if nav_key in cached_errors:
+                raise cached_errors[nav_key]
+            if nav_key not in navs:
+                try:
+                    navs[nav_key] = market_data_provider.get_fund_nav(
+                        Instrument(symbol, str(row["name"]), AssetType.CN_OPEN_FUND),
+                        nav_date=expected_date,
+                    )
+                except MarketDataProviderError as exc:
+                    cached_errors[nav_key] = exc
+                    raise
+            if (
+                navs[nav_key].date != expected_date
+                or str(navs[nav_key].source) != "akshare_eastmoney"
+            ):
+                raise MarketDataProviderError(
+                    f"Exact Eastmoney fund NAV for {expected_date} is unavailable."
+                )
+            built = build_position_profit_alert(
+                row,
+                navs[nav_key],
+                position,
+                position_cycle_id=cycle_id,
+                recorded_threshold_keys=recorded_threshold_keys,
+            )
+            if built is None:
+                continue
+            alert, thresholds = built
+            event_id = persist_position_profit_alert(
+                connection,
+                rule_id=rule_id,
+                position_cycle_id=cycle_id,
+                alert=alert,
+                thresholds=thresholds,
+            )
+            LOGGER.info(
+                "Position-linked Price-Gain reserved rule_id=%s symbol=%s "
+                "evaluation_date=%s unit_nav=%s average_unit_cost=%s "
+                "new_thresholds=%s alert_event_id=%s",
+                rule_id,
+                symbol,
+                alert["payload"]["nav_date"],
+                alert["payload"]["unit_nav"],
+                alert["payload"]["average_unit_cost"],
+                [key for key, _value in thresholds],
+                event_id,
+            )
+            notifications.append(
+                AlertNotification(
+                    event_id=event_id,
+                    title=str(alert["title"]),
+                    text=str(alert["message"]),
+                    telegram_actions=position_profit_action_rows(event_id),
+                )
+            )
+        except (MarketDataProviderError, MarketCalendarUnavailableError) as exc:
+            no_data_skips.append(RuleNoDataSkip(rule_id, symbol, str(exc)))
+        except sqlite3.IntegrityError:
+            continue
+        except Exception as exc:  # noqa: BLE001
+            errors.append(RuleCheckError(rule_id, symbol, str(exc)))
+    return ProfitCheckResult(
+        checked_rules=len(rules),
+        notifications=notifications,
+        skipped_duplicates=0,
         no_data_skips=no_data_skips,
         errors=errors,
     )

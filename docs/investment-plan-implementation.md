@@ -652,6 +652,8 @@ Keep confirmed business state separate from delivery state:
   scheduled run or startup until at least one enabled channel succeeds;
 - pending and failed Manual Add Settlement Notices retry without reapplying the
   position estimate;
+- pending and failed Position-Linked Price-Gain Reminders retry without
+  reopening recorded thresholds;
 - expired pre-alerts are not retried;
 - Data Availability Notices are deduplicated by phase and trading date;
 - current delivery semantics remain unchanged: success on any enabled channel
@@ -662,10 +664,11 @@ dispatch is sufficient.
 
 ## Rule lifecycle and logging
 
-For `drawdown_plan` and enhanced DCA rules, route `/del` to a soft disable rather
-than deleting dependent state. Disabling stops future evaluations or occurrences
-but leaves already-created pending contributions eligible for settlement or
-Position Sync reconciliation. Keep legacy deletion behavior unchanged.
+For `drawdown_plan`, enhanced DCA, and position-linked Price-Gain rules, route
+`/del` to a soft disable rather than deleting dependent state. Disabling stops
+future evaluations or occurrences but leaves already-created pending
+contributions eligible for settlement or Position Sync reconciliation. Keep
+legacy deletion behavior unchanged.
 
 Use the existing logging stack with structured key-value fields; add no logging
 dependency. Each plan evaluation logs `rule_id`, `symbol`, `evaluation_date`,

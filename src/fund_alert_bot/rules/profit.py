@@ -1,4 +1,4 @@
-"""Profit-taking reminder rule helpers."""
+"""Price-Gain reminder rule helpers."""
 
 from __future__ import annotations
 
@@ -66,7 +66,7 @@ def build_profit_alerts(
         alerts.append(
             {
                 "alert_key": alert_key,
-                "title": "Profit-taking reminder",
+                "title": "Price-Gain reminder",
                 "message": _build_message(
                     symbol=symbol,
                     name=name,
@@ -99,6 +99,97 @@ def build_profit_alert_key(*, symbol: str, cost: float, threshold: float) -> str
     return (
         f"{symbol}:profit:cost:{_format_number(cost)}:"
         f"threshold:{_format_number(threshold)}"
+    )
+
+
+def build_position_profit_alert(
+    rule: Any,
+    nav: Any,
+    position: Any,
+    *,
+    position_cycle_id: int,
+    recorded_threshold_keys: set[str],
+) -> tuple[dict[str, object], tuple[tuple[str, float], ...]] | None:
+    """Build one aggregate auto-cost Price-Gain reminder for a position cycle."""
+
+    params = _read_params(rule)
+    if params.get("cost") != "auto":
+        raise ValueError("Position-linked Price-Gain rule must use auto cost.")
+    thresholds = _read_thresholds(params)
+    units = _to_positive_float(_read_rule_value(position, "units", None), "units")
+    cost = _to_positive_float(
+        _read_rule_value(position, "average_unit_cost", None),
+        "average_unit_cost",
+    )
+    nav_value = _to_positive_float(getattr(nav, "value", None), "unit_nav")
+    symbol = str(_read_required_rule_value(rule, "symbol"))
+    if str(getattr(nav, "symbol", "")) != symbol:
+        raise ValueError("Fund NAV does not match the Price-Gain rule.")
+    profit_rate = calculate_profit_rate(current_price=nav_value, cost=cost)
+    crossed = tuple(
+        (_format_number(threshold), threshold)
+        for threshold in thresholds
+        if _meets_threshold(profit_rate, threshold)
+        and _format_number(threshold) not in recorded_threshold_keys
+    )
+    if not crossed:
+        return None
+    name = str(_read_rule_value(rule, "name", ""))
+    accuracy = (
+        "estimated"
+        if bool(_read_rule_value(position, "is_estimated", False))
+        else "exact"
+    )
+    threshold_lines = tuple(f"• {value:.1%}" for _key, value in crossed)
+    nav_date = nav.date.isoformat()
+    message = "\n".join(
+        (
+            "💰 Price-Gain reminder",
+            "",
+            f"Fund: {symbol} / {name}",
+            f"Data date: {nav_date}",
+            f"Unit NAV: {_format_number(nav_value)}",
+            f"Average unit cost ({accuracy}): {_format_number(cost)}",
+            f"Gain since configured position cost: {profit_rate:+.1%}",
+            f"Position value: {units * nav_value:,.2f} RMB",
+            "",
+            "Newly reached thresholds:",
+            *threshold_lines,
+            "",
+            "This is a price-gain reminder only, not an instruction to sell.",
+            "If you redeem, remember to run /sync_position with platform values.",
+            "No trade has been placed.",
+        )
+    )
+    threshold_keys = ",".join(key for key, _value in crossed)
+    return (
+        {
+            "alert_key": (
+                f"position_profit:{int(_read_required_rule_value(rule, 'id'))}:"
+                f"cycle:{position_cycle_id}:thresholds:{threshold_keys}"
+            ),
+            "title": "Price-Gain reminder",
+            "message": message,
+            "payload": {
+                "phase": "position_profit",
+                "rule_id": int(_read_required_rule_value(rule, "id")),
+                "position_cycle_id": position_cycle_id,
+                "fund_symbol": symbol,
+                "name": name,
+                "nav_date": nav_date,
+                "unit_nav": nav_value,
+                "average_unit_cost": cost,
+                "position_units": units,
+                "position_value": units * nav_value,
+                "accuracy": accuracy,
+                "profit_rate": profit_rate,
+                "crossed_thresholds": [
+                    {"key": key, "threshold": value} for key, value in crossed
+                ],
+                "nav_source": str(getattr(nav, "source", "")),
+            },
+        },
+        crossed,
     )
 
 
@@ -137,7 +228,10 @@ def _read_thresholds(params: Mapping[str, Any]) -> list[float]:
     thresholds = [float(threshold) for threshold in raw_thresholds]
     if not thresholds:
         raise ValueError("profit thresholds must not be empty.")
-    if any(threshold <= 0 or threshold >= 1 for threshold in thresholds):
+    if any(
+        not math.isfinite(threshold) or threshold <= 0 or threshold >= 1
+        for threshold in thresholds
+    ):
         raise ValueError("profit thresholds must be between 0 and 1.")
     return thresholds
 
@@ -220,7 +314,7 @@ def _build_message(
 ) -> str:
     return "\n".join(
         (
-            "💵 Profit-taking reminder",
+            "💰 Price-Gain reminder",
             "",
             f"• Symbol: {symbol}",
             f"• Name: {name}",
@@ -230,7 +324,9 @@ def _build_message(
             f"• Profit rate: {profit_rate:.1%}",
             f"• Triggered threshold: {threshold:.1%}",
             "",
-            "Reminder: this is not automatic trading and no orders will be placed.",
+            "This is a price-gain reminder only.",
+            "For strategic profit-taking, allocation-based rebalancing is preferred.",
+            "No trade has been placed.",
         )
     )
 
