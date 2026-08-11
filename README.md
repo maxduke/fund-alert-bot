@@ -265,6 +265,20 @@ the output of `id -u` and `id -g`; this lets the non-root container write the
 host-owned `data` directory. Docker Desktop users can use `1000` for both. The
 Compose file stops with a clear error when either value is empty.
 
+When upgrading an existing Linux Compose checkout, set those values first,
+then migrate existing SQLite ownership while the bot is stopped:
+
+```bash
+test "$(id -u)" -ne 0
+test "$(id -g)" -ne 0
+docker compose stop
+sudo chown -R "$(id -u):$(id -g)" data
+docker compose up -d
+```
+
+Do not use `0` for either setting. New checkouts with no `data` directory do
+not need the ownership-migration commands.
+
 Do not commit `.env` or real secrets.
 
 Once tooling exists, use:

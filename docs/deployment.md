@@ -62,9 +62,14 @@ Copy `.env.example` from this repository to:
 Record the owner IDs of the deployment directory:
 
 ```bash
+test "$(id -u)" -ne 0
+test "$(id -g)" -ne 0
 id -u
 id -g
 ```
+
+Run these steps from a dedicated non-root deployment account. If either test
+fails, stop and switch to that account; never configure the bot as `0:0`.
 
 ## 3. Create `.env`
 
@@ -143,6 +148,8 @@ the existing database directory:
 
 ```bash
 cd /opt/fund-alert-bot
+test "$(id -u)" -ne 0
+test "$(id -g)" -ne 0
 id -u
 id -g
 nano .env
