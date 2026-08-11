@@ -139,17 +139,17 @@ price-basis metadata for logging and validation. Before evaluation:
   within an explicit price tolerance;
 - fail the evaluation on missing, stale, suspended, or ambiguous data.
 
-The Reference ETF realtime price comes from `fund_etf_spot_em` and is never
-inserted into confirmed history. Forward adjustment keeps the current price
-unchanged, so it shares the current-price basis of the `qfq` series. The
-Investment Feeder Fund uses `fund_open_fund_info_em` with
+The Reference ETF realtime price comes from a bounded per-symbol Eastmoney quote
+request and is never inserted into confirmed history. Forward adjustment keeps
+the current price unchanged, so it shares the current-price basis of the `qfq`
+series. The Investment Feeder Fund uses `fund_open_fund_info_em` with
 `indicator="单位净值走势"`; only unit NAV is used for position and Price-Gain
 calculations, and its published date must travel with the value.
 
-Neither accepted realtime endpoint supplies a trustworthy exchange timestamp.
-Persist the timezone-aware Bot fetch completion time as `fetched_at`, label it as
-such in messages, and never call it a quote/update time. Validate the AKShare
-Sina trading-calendar payload before either phase: the requested date must lie
+Both accepted realtime responses must supply a parseable source quote timestamp.
+Persist it as timezone-aware `quote_time`; never replace a missing source date
+with the Bot's current date. Validate the AKShare Sina trading-calendar payload
+before either phase: the requested date must lie
 within the returned calendar's minimum and maximum coverage. A date beyond its
 maximum is calendar unavailability, not a closed market; new plan state remains
 unchanged and the phase-level notice is eligible. Existing legacy weekday
@@ -162,13 +162,12 @@ after its configured retries fail, leave every affected calculation pending and
 include it in the aggregated next-morning Data Availability Notice. Do not add a
 per-fund-company scraper, manual NAV command, or generic provider framework.
 
-If Eastmoney realtime is unavailable, request
-`fund_etf_category_sina(symbol="ETF基金")` for a Fallback Pre-Alert only. Validate
-the exchange-prefixed symbol, positive finite latest price, non-zero trading
-activity, and previous close against the last confirmed `qfq` snapshot for the
-expected prior trading date. The Sina interface has no reliable update timestamp,
-so record that limitation in the result and message. Do not use
-`fund_etf_hist_sina` for peak, SMA, or close confirmation.
+If the bounded per-symbol Eastmoney realtime request is unavailable, make one
+bounded per-symbol Sina request for a Fallback Pre-Alert only. Validate the
+exchange-prefixed symbol, source quote time, positive finite latest price,
+non-zero trading activity, and previous close against the last confirmed `qfq`
+snapshot for the expected prior trading date. Do not use `fund_etf_hist_sina`
+for peak, SMA, or close confirmation.
 
 Collect provider outcomes across every plan before dispatch. If no acceptable
 source remains for a plan, add it to the phase's affected list. Reserve at most
@@ -277,7 +276,7 @@ context, source, and data date.
 
 Run once at the existing `BEFORE_CLOSE_CHECK_TIME=14:50`; do not add an interval
 poller. The result is a current-session estimate near the close, not a confirmed
-closing value. Persist `fetched_at` in the payload and state that a crossing
+closing value. Persist `quote_time` in the payload and state that a crossing
 after this check is handled only by the after-close evaluation.
 
 For every plan's `cn_etf` Reference ETF:
@@ -672,7 +671,7 @@ legacy deletion behavior unchanged.
 
 Use the existing logging stack with structured key-value fields; add no logging
 dependency. Each plan evaluation logs `rule_id`, `symbol`, `evaluation_date`,
-source, basis, `fetched_at`, latest and peak prices, drawdown, newly crossed
+source, basis, `quote_time`, latest and peak prices, drawdown, newly crossed
 tiers, SMA context, cycle/tier reservation result, and notification result.
 Position work logs fund symbol, occurrence identity and state transition,
 effective NAV date, NAV source, whether position application committed, and

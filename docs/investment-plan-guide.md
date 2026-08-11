@@ -334,7 +334,9 @@ The Recent Peak, SMA, and SMA slope use confirmed `qfq` closes. Since forward
 adjustment leaves the current price unchanged, the realtime traded price is
 comparable with that history. After close, the day's closing data may create
 durable Tier Records and one aggregated reminder.
-Existing simple drawdown rules retain their current realtime behavior.
+Existing simple ETF drawdown rules use the same timestamped quote path. For
+legacy index or stock snapshots whose AKShare result has no source date, the bot
+uses dated history instead of labeling the snapshot as today's data.
 
 The Investment Feeder Fund does not need a realtime NAV. Before-close estimates
 come from the Reference ETF and are explicitly labeled as estimates; position
@@ -419,14 +421,14 @@ equivalent adjusted source is unavailable, that evaluation fails cleanly and is
 logged instead of sending a reminder. Existing simple rules keep their existing
 provider behavior.
 
-Before close, Eastmoney realtime is primary. Its exact symbol, positive trading
-activity, and previous close must be consistent with the latest validated `qfq`
-close. If it is unavailable or inconsistent, the bot may use
-`fund_etf_category_sina(symbol="ETF基金")` only for a Fallback Pre-Alert with the
-same continuity checks. Neither interface supplies a reliable exchange update
-timestamp, so the message identifies its source, displays only the Bot fetch
-time, asks the user to verify their own platform, and never confirms a tier
-automatically.
+Before close, Eastmoney realtime is primary. The provider requests only the
+exact ETF symbol, applies an eight-second network timeout, and opens a brief
+global Eastmoney cooldown after failure. Its exact symbol, source quote time,
+positive trading activity, and previous close must be consistent with the latest
+validated `qfq` close. If it is unavailable or inconsistent, the bot makes one
+bounded per-symbol Sina request for a Fallback Pre-Alert with the same checks.
+The message identifies the source and source quote time, asks the user to verify
+their own platform, and never confirms a tier automatically.
 
 Sina daily history has no adjustment option, so it cannot provide the cycle
 peak, MA250, or after-close confirmation. A prolonged Eastmoney outage delays

@@ -248,7 +248,7 @@ def validate_realtime_quote(
     if quote.source not in _REALTIME_SOURCES:
         raise ValueError("Realtime quote source is unsupported.")
     if quote.fetched_at.tzinfo is None or quote.fetched_at.utcoffset() is None:
-        raise ValueError("Realtime quote fetched_at must be timezone-aware.")
+        raise ValueError("Realtime quote timestamp must be timezone-aware.")
     _require_positive_finite(quote.price, "realtime price")
     _require_positive_finite(quote.previous_close, "realtime previous close")
     _require_positive_finite(confirmed_previous_close, "confirmed previous close")
@@ -283,7 +283,7 @@ def evaluate_drawdown_plan_realtime(
     if confirmed.latest_date >= market_date:
         raise ValueError("Realtime estimate requires an earlier confirmed close.")
     if quote.fetched_at.astimezone(ZoneInfo("Asia/Shanghai")).date() != market_date:
-        raise ValueError("Realtime quote was not fetched on the market date.")
+        raise ValueError("Realtime quote timestamp is not on the market date.")
 
     price = float(quote.price)
     drawdown = max(0.0, 1 - price / confirmed.peak_price)
@@ -327,7 +327,7 @@ def build_drawdown_plan_pre_alert(
         f"-{format_plan_percent(tier.drawdown)} → {format_plan_amount(tier.amount)}"
         for tier in tiers
     ]
-    fetched_at = quote.fetched_at.astimezone(ZoneInfo("Asia/Shanghai"))
+    quote_time = quote.fetched_at.astimezone(ZoneInfo("Asia/Shanghai"))
     message = "\n".join(
         (
             f"⚠️ Buy-plan pre-alert — {name}",
@@ -341,7 +341,7 @@ def build_drawdown_plan_pre_alert(
             f"Realtime price: {evaluation.latest_price:.6g}",
             f"Peak date: {evaluation.peak_date.isoformat()}",
             f"Quote source: {evaluation.source}",
-            f"Fetched at: {fetched_at.isoformat(timespec='seconds')}",
+            f"Quote time: {quote_time.isoformat(timespec='seconds')}",
             "",
             "🎯 Tiers currently reached:",
             *tier_lines,
@@ -374,7 +374,7 @@ def build_drawdown_plan_pre_alert(
             "data_date": evaluation.latest_date.isoformat(),
             "confirmed_close_date": confirmed_date.isoformat(),
             "source": evaluation.source,
-            "fetched_at": fetched_at.isoformat(),
+            "quote_time": quote_time.isoformat(),
             "peak_date": evaluation.peak_date.isoformat(),
             "peak_price": evaluation.peak_price,
             "latest_price": evaluation.latest_price,
