@@ -20,6 +20,7 @@ from fund_alert_bot.checks import (
 from fund_alert_bot.config import NotificationSettings
 from fund_alert_bot.db import (
     add_rule,
+    delete_rule,
     get_position_snapshot,
     initialize_database,
     list_rules,
@@ -635,6 +636,7 @@ def test_standard_notification_retry_survives_restart_and_keeps_current_dca_acti
             """,
             (dca_rule_id,),
         )
+        assert delete_rule(connection, profit_rule_id)
         connection.commit()
 
     application = FakeApplication()
