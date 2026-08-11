@@ -20,6 +20,7 @@ from fund_alert_bot.commands import (
     TEST_NOTIFICATION_MESSAGE,
     CommandParseError,
     ManualAddSelection,
+    _reply_text,
     build_command_handlers,
     build_drawdown_plan_preview,
     dca_params,
@@ -129,6 +130,32 @@ def test_parse_valid_drawdown_command() -> None:
         "thresholds": [0.10, 0.15, 0.20],
         "price_field": "close",
     }
+
+
+def test_reply_text_splits_long_messages_and_keeps_buttons_on_last_page() -> None:
+    message = FakeMessage()
+    markup = object()
+    text = "x" * 9000
+    update = SimpleNamespace(effective_message=message)
+
+    asyncio.run(_reply_text(update, text, reply_markup=markup))
+
+    assert "".join(message.replies) == text
+    assert all(len(chunk) <= 4096 for chunk in message.replies)
+    assert [page_markup for _chunk, page_markup in message.reply_calls] == [
+        None,
+        None,
+        markup,
+    ]
+
+    boundary_message = FakeMessage()
+    asyncio.run(
+        _reply_text(
+            SimpleNamespace(effective_message=boundary_message),
+            "x" * 4096 + "\n",
+        )
+    )
+    assert boundary_message.reply_calls == [("x" * 4096, None)]
 
 
 def test_parse_valid_profit_command() -> None:
@@ -2111,11 +2138,13 @@ class FakeMessage:
     def __init__(self) -> None:
         self.replies: list[str] = []
         self.reply_markups: list[object] = []
+        self.reply_calls: list[tuple[str, object | None]] = []
 
     async def reply_text(
         self, text: str, *, reply_markup: object | None = None
     ) -> None:
         self.replies.append(text)
+        self.reply_calls.append((text, reply_markup))
         if reply_markup is not None:
             self.reply_markups.append(reply_markup)
 
