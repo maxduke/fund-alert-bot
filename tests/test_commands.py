@@ -8,12 +8,17 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
+from fund_alert_bot.checks import (
+    _drawdown_plan_action_rows,
+    evaluate_drawdown_plan_rule,
+)
 from fund_alert_bot.commands import (
     DCA_RULE_TYPE,
     DRAW_DOWN_RULE_TYPE,
     PROFIT_RULE_TYPE,
     TEST_NOTIFICATION_MESSAGE,
     CommandParseError,
+    ManualAddSelection,
     build_command_handlers,
     build_drawdown_plan_preview,
     dca_params,
@@ -21,11 +26,14 @@ from fund_alert_bot.commands import (
     evaluate_drawdown_rules,
     evaluate_profit_rules,
     format_check_summary,
+    format_manual_add_confirmation,
     format_rules_list,
+    load_manual_add_selection,
     parse_add_dca_args,
     parse_add_drawdown_args,
     parse_add_drawdown_plan_args,
     parse_add_profit_args,
+    parse_mark_added_args,
     parse_set_fund_cutoff_args,
     parse_set_fund_fee_args,
     parse_sync_position_args,
@@ -36,13 +44,26 @@ from fund_alert_bot.config import NotificationSettings
 from fund_alert_bot.db import (
     add_rule,
     connect,
+    get_active_drawdown_cycle,
+    get_position_snapshot,
     init_db,
+    list_pending_position_items,
     list_rules,
     open_connection,
+    record_manual_addition,
+    upsert_fund_cutoff,
+    upsert_fund_fee,
     upsert_position_snapshot,
 )
-from fund_alert_bot.market_data import AssetType, FundNav, Instrument, PriceBasis
+from fund_alert_bot.market_data import (
+    AssetType,
+    FundNav,
+    Instrument,
+    MarketCalendarUnavailableError,
+    PriceBasis,
+)
 from fund_alert_bot.rules.dca import weekday_for_date
+from fund_alert_bot.rules.drawdown_plan import DrawdownTier
 
 EXPECTED_DRAWDOWN_10_MESSAGE = "\n".join(
     (
@@ -139,6 +160,52 @@ def test_parse_valid_dca_command_with_english_weekday() -> None:
     assert command.amount == 1000
 
 
+def test_fractional_drawdown_tiers_keep_precision_in_actions_and_confirmation() -> None:
+    tiers = (
+        DrawdownTier(0.151, 100.005, "0.151"),
+        DrawdownTier(0.154, 100.006, "0.154"),
+    )
+
+    rows = _drawdown_plan_action_rows(1, 2, tiers)
+    confirmation = format_manual_add_confirmation(
+        ManualAddSelection(
+            plan_id=1,
+            event_id=2,
+            cycle_id=3,
+            fund_symbol="000001",
+            name="A500",
+            tiers=tiers,
+            readiness="READY",
+            missing_setup=(),
+            cutoff="15:00",
+            market_date=date(2024, 1, 2),
+        )
+    )
+
+    assert [rows[1][0][0], rows[2][0][0]] == [
+        "仅记录 -15.1% ¥100.005",
+        "仅记录 -15.4% ¥100.006",
+    ]
+    assert "• -15.1% → ¥100.005" in confirmation
+    assert "• -15.4% → ¥100.006" in confirmation
+    assert "Configured gross total: ¥200.011" in confirmation
+
+
+def test_drawdown_tier_callbacks_use_bounded_indexes() -> None:
+    tiny_key = "0." + "0" * 39 + "1"
+    tiers = (
+        DrawdownTier(1e-40, 100, tiny_key),
+        DrawdownTier(0.15, 200, "0.15"),
+    )
+
+    rows = _drawdown_plan_action_rows(2**63 - 1, 2**63 - 1, tiers)
+    callback_data = [rows[1][0][1], rows[2][0][1]]
+
+    assert callback_data[0].endswith(":tier:0")
+    assert callback_data[1].endswith(":tier:1")
+    assert all(len(value.encode()) <= 64 for value in callback_data)
+
+
 def test_parse_drawdown_plan_with_quoted_name_and_optional_lookback() -> None:
     command = parse_add_drawdown_plan_args(
         [
@@ -157,6 +224,15 @@ def test_parse_drawdown_plan_with_quoted_name_and_optional_lookback() -> None:
     assert [tier.amount for tier in command.config.tiers] == [5000, 10000, 15000]
     assert command.params["sma_window"] == 250
     assert command.params["sma_slope_window"] == 20
+
+
+def test_parse_drawdown_plan_rejects_oversized_rendered_notifications() -> None:
+    tiers = ",".join(
+        f"{10 + index * 1e-12:.12f}:1234567890123.45" for index in range(50)
+    )
+
+    with pytest.raises(CommandParseError, match="4096-character"):
+        parse_add_drawdown_plan_args(["510300", "000001", "N" * 600, tiers])
 
 
 @pytest.mark.parametrize(
@@ -192,6 +268,9 @@ def test_parse_fund_settings_and_position_commands() -> None:
     assert cutoff.subscription_cutoff == "15:00"
     assert (position.units, position.average_unit_cost) == (1234.5, 1.234)
     assert (closed.units, closed.average_unit_cost) == (0, 0)
+
+    marked = parse_mark_added_args(["12", "15,20"])
+    assert (marked.plan_id, marked.tier_keys) == (12, ("0.15", "0.2"))
 
 
 @pytest.mark.parametrize(
@@ -584,6 +663,273 @@ def test_fund_setting_commands_persist_shared_values(tmp_path) -> None:
     assert "future manual confirmations" in update.effective_message.replies[1]
 
 
+def test_mark_added_records_one_pending_estimate_after_confirmation(tmp_path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    rule_id = _prepare_ready_plan_alert(
+        sqlite_path,
+        closes=[100, 80],
+        expected_date=date(2024, 1, 2),
+    )
+
+    handlers = build_command_handlers(
+        {123},
+        sqlite_path=sqlite_path,
+        market_calendar=FakeMarketCalendar(),
+        now_factory=lambda: datetime(2024, 1, 2, 6, 0, tzinfo=UTC),
+    )
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        effective_message=message,
+    )
+
+    asyncio.run(
+        _handler_by_command(handlers, "mark_added").callback(
+            update,
+            SimpleNamespace(args=[str(rule_id), "15"]),
+        )
+    )
+    with open_connection(sqlite_path) as connection:
+        upsert_fund_cutoff(
+            connection,
+            fund_symbol="000001",
+            subscription_cutoff="13:00",
+        )
+    callback_data = message.reply_markups[0].inline_keyboard[0][0].callback_data
+    query = FakeCallbackQuery(callback_data)
+    callback_update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        effective_message=message,
+        callback_query=query,
+    )
+    callback = _callback_by_name(handlers, "manual_add_confirm_callback")
+    asyncio.run(callback.callback(callback_update, SimpleNamespace()))
+    asyncio.run(callback.callback(callback_update, SimpleNamespace()))
+
+    with open_connection(sqlite_path) as connection:
+        estimates = connection.execute("SELECT * FROM manual_add_estimates").fetchall()
+        actions = connection.execute("SELECT * FROM manual_add_actions").fetchall()
+
+    assert "Continue only if you already submitted" in message.replies[0]
+    assert len(estimates) == 1
+    assert estimates[0]["gross_amount"] == 5000
+    assert estimates[0]["cutoff_time"] == "15:00"
+    assert estimates[0]["effective_date"] == "2024-01-02"
+    assert estimates[0]["status"] == "pending"
+    assert len(actions) == 1
+    assert actions[0]["tier_key"] == "0.15"
+    assert all("waiting for exact dated NAV" in edit for edit in query.edits)
+
+
+def test_mark_added_calendar_outage_returns_actionable_error(tmp_path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    rule_id = _prepare_ready_plan_alert(
+        sqlite_path,
+        closes=[100, 80],
+        expected_date=date(2024, 1, 2),
+    )
+    handlers = build_command_handlers(
+        {123},
+        sqlite_path=sqlite_path,
+        market_calendar=FakeMarketCalendar(
+            confirmed_error=MarketCalendarUnavailableError("calendar unavailable")
+        ),
+        now_factory=lambda: datetime(2024, 1, 2, 6, 0, tzinfo=UTC),
+    )
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        effective_message=message,
+    )
+    asyncio.run(
+        _handler_by_command(handlers, "mark_added").callback(
+            update,
+            SimpleNamespace(args=[str(rule_id), "15"]),
+        )
+    )
+    query = FakeCallbackQuery(
+        message.reply_markups[0].inline_keyboard[0][0].callback_data
+    )
+    callback_update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        callback_query=query,
+    )
+    asyncio.run(
+        _callback_by_name(handlers, "manual_add_confirm_callback").callback(
+            callback_update,
+            SimpleNamespace(),
+        )
+    )
+
+    with open_connection(sqlite_path) as connection:
+        estimate_count = connection.execute(
+            "SELECT COUNT(*) FROM manual_add_estimates"
+        ).fetchone()[0]
+
+    assert query.edits[-1] == "Addition was not recorded: calendar unavailable"
+    assert estimate_count == 0
+
+
+def test_mark_added_fallback_matches_earlier_same_day_multi_tier_alert(
+    tmp_path,
+) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    rule_id = _prepare_ready_plan_alert(
+        sqlite_path,
+        closes=[100, 80],
+        expected_date=date(2024, 1, 2),
+    )
+
+    with open_connection(sqlite_path) as connection:
+        original = connection.execute("SELECT * FROM alert_events").fetchone()
+        payload = json.loads(str(original["payload_json"]))
+        payload["crossed_tiers"] = payload["crossed_tiers"][:1]
+        payload["total_amount"] = 5000
+        connection.execute(
+            """
+            INSERT INTO alert_events (
+                rule_id, alert_key, title, message, payload_json, triggered_at
+            )
+            VALUES (?, ?, 'close', 'close', ?, '2024-01-02T08:00:00Z')
+            """,
+            (rule_id, "later-subset", json.dumps(payload)),
+        )
+        connection.commit()
+
+        selection = load_manual_add_selection(
+            connection,
+            plan_id=rule_id,
+            action_date=date(2024, 1, 2),
+            tier_keys=("0.15", "0.2"),
+        )
+        indexed = load_manual_add_selection(
+            connection,
+            plan_id=rule_id,
+            event_id=int(original["id"]),
+            action_date=date(2024, 1, 2),
+            tier_index=1,
+        )
+
+    assert selection.event_id == original["id"]
+    assert [tier.key for tier in selection.tiers] == ["0.15", "0.2"]
+    assert [tier.key for tier in indexed.tiers] == ["0.2"]
+
+
+def test_mark_added_fallback_exactly_matches_close_tier_keys(tmp_path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    rule_id = _prepare_ready_plan_alert(
+        sqlite_path,
+        closes=[100, 80],
+        expected_date=date(2024, 1, 2),
+        tiers=[
+            {"drawdown": 0.1500000000001, "amount": 100},
+            {"drawdown": 0.1500000000002, "amount": 200},
+        ],
+    )
+    command = parse_mark_added_args([str(rule_id), "15.00000000001"])
+
+    with open_connection(sqlite_path) as connection:
+        selection = load_manual_add_selection(
+            connection,
+            plan_id=rule_id,
+            action_date=date(2024, 1, 2),
+            tier_keys=command.tier_keys,
+        )
+
+    assert [tier.key for tier in selection.tiers] == ["0.1500000000001"]
+
+
+def test_mark_added_keeps_printed_high_precision_percentage_exact(tmp_path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    rule_id = _prepare_ready_plan_alert(
+        sqlite_path,
+        closes=[100, 10],
+        expected_date=date(2024, 1, 2),
+        tiers=[{"drawdown": 0.7949398787921911, "amount": 100}],
+    )
+    command = parse_mark_added_args([str(rule_id), "79.49398787921911"])
+
+    with open_connection(sqlite_path) as connection:
+        selection = load_manual_add_selection(
+            connection,
+            plan_id=rule_id,
+            action_date=date(2024, 1, 2),
+            tier_keys=command.tier_keys,
+        )
+
+    assert command.tier_keys == ("0.7949398787921911",)
+    assert [tier.key for tier in selection.tiers] == ["0.7949398787921911"]
+
+
+def test_mark_added_scientific_percentage_preserves_exact_tier_key() -> None:
+    command = parse_mark_added_args(["7", "1E-98"])
+
+    assert command.tier_keys == ("0." + "0" * 99 + "1",)
+
+
+def test_mark_added_after_cutoff_uses_next_confirmed_open_day(tmp_path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    rule_id = _prepare_ready_plan_alert(
+        sqlite_path,
+        closes=[100, 100, 100, 100, 80],
+        expected_date=date(2024, 1, 5),
+    )
+    handlers = build_command_handlers(
+        {123},
+        sqlite_path=sqlite_path,
+        market_calendar=FakeMarketCalendar(
+            open_dates={date(2024, 1, 5), date(2024, 1, 8)}
+        ),
+        timezone="America/New_York",
+        now_factory=lambda: datetime(2024, 1, 5, 9, 10, tzinfo=UTC),
+    )
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        effective_message=message,
+    )
+    asyncio.run(
+        _handler_by_command(handlers, "mark_added").callback(
+            update,
+            SimpleNamespace(args=[str(rule_id), "15"]),
+        )
+    )
+    query = FakeCallbackQuery(
+        message.reply_markups[0].inline_keyboard[0][0].callback_data
+    )
+    callback_update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        effective_message=message,
+        callback_query=query,
+    )
+    asyncio.run(
+        _callback_by_name(handlers, "manual_add_confirm_callback").callback(
+            callback_update,
+            SimpleNamespace(),
+        )
+    )
+    query.data = query.reply_markups[0].inline_keyboard[1][0].callback_data
+    asyncio.run(
+        _callback_by_name(handlers, "manual_add_cutoff_callback").callback(
+            callback_update,
+            SimpleNamespace(),
+        )
+    )
+
+    with open_connection(sqlite_path) as connection:
+        estimate = connection.execute("SELECT * FROM manual_add_estimates").fetchone()
+
+    assert estimate["cutoff_choice"] == "after"
+    assert estimate["effective_date"] == "2024-01-08"
+    assert "2024-01-08" in query.edits[-1]
+
+
 def test_sync_position_persists_exact_snapshot_and_shows_dated_value(tmp_path) -> None:
     sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
     provider = FakeProvider(
@@ -623,6 +969,175 @@ def test_sync_position_persists_exact_snapshot_and_shows_dated_value(tmp_path) -
     assert "Accuracy: exact" in message.replies[0]
     assert "Latest unit NAV: 1.5 on 2026-08-08" in message.replies[0]
     assert "Position value: ¥1,500.00" in message.replies[0]
+
+
+def test_sync_none_included_keeps_unestimated_manual_add_sync_warning(tmp_path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    rule_id = _prepare_ready_plan_alert(
+        sqlite_path,
+        closes=[100, 84],
+        expected_date=date(2024, 1, 2),
+        tiers=[
+            {"drawdown": 0.15, "amount": 5000.005},
+            {"drawdown": 0.20, "amount": 10000},
+        ],
+    )
+    with open_connection(sqlite_path) as connection:
+        cycle = get_active_drawdown_cycle(connection, rule_id)
+        event = connection.execute("SELECT id FROM alert_events").fetchone()
+        record_manual_addition(
+            connection,
+            rule_id=rule_id,
+            cycle_id=int(cycle["id"]),
+            source_alert_event_id=int(event["id"]),
+            fund_symbol="000001",
+            tiers=(DrawdownTier(0.15, 5000.005, "0.15"),),
+            action_at=datetime(2024, 1, 2, 8, tzinfo=UTC),
+            create_estimate=False,
+        )
+    handlers = build_command_handlers(
+        {123},
+        sqlite_path=sqlite_path,
+        now_factory=lambda: datetime(2024, 1, 3, 8, tzinfo=UTC),
+    )
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        effective_message=message,
+    )
+    asyncio.run(
+        _handler_by_command(handlers, "sync_position").callback(
+            update,
+            SimpleNamespace(args=["000001", "1100", "1.1"]),
+        )
+    )
+    query = FakeCallbackQuery(
+        message.reply_markups[0].inline_keyboard[1][0].callback_data
+    )
+    callback_update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        callback_query=query,
+    )
+    asyncio.run(
+        _callback_by_name(handlers, "position_sync_callback").callback(
+            callback_update,
+            SimpleNamespace(),
+        )
+    )
+
+    assert "¥5,000.005" in message.replies[0]
+    assert "Choose None only if no item below is included" in message.replies[0]
+    assert "still require another /sync_position" in query.edits[-1]
+    assert "eligible for dated-NAV processing" not in query.edits[-1]
+
+
+def test_sync_position_paginates_large_pending_preview(tmp_path, monkeypatch) -> None:
+    pending_items = [
+        {
+            "key": f"action:{index}:0.15",
+            "kind": "manual add requiring sync",
+            "date": "2024-01-02",
+            "amount": 5000,
+        }
+        for index in range(100)
+    ]
+    monkeypatch.setattr(
+        "fund_alert_bot.commands.list_pending_position_items",
+        lambda connection, fund_symbol: pending_items,
+    )
+    handlers = build_command_handlers(
+        {123},
+        sqlite_path=tmp_path / "fund_alert_bot.sqlite3",
+    )
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        effective_message=message,
+    )
+
+    asyncio.run(
+        _handler_by_command(handlers, "sync_position").callback(
+            update,
+            SimpleNamespace(args=["000001", "1100", "1.1"]),
+        )
+    )
+
+    assert len(message.replies) >= 3
+    assert all(len(reply) <= 4096 for reply in message.replies)
+    assert (
+        sum(reply.count("manual add requiring sync") for reply in message.replies)
+        == 100
+    )
+    assert "Review all 100 pending additions" in message.replies[-1]
+    assert len(message.reply_markups) == 1
+
+
+def test_partial_position_sync_changes_nothing(tmp_path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    rule_id = _prepare_ready_plan_alert(
+        sqlite_path,
+        closes=[100, 84],
+        expected_date=date(2024, 1, 2),
+        tiers=[{"drawdown": 0.15, "amount": 5000}],
+    )
+    with open_connection(sqlite_path) as connection:
+        cycle = get_active_drawdown_cycle(connection, rule_id)
+        event = connection.execute("SELECT id FROM alert_events").fetchone()
+        record_manual_addition(
+            connection,
+            rule_id=rule_id,
+            cycle_id=int(cycle["id"]),
+            source_alert_event_id=int(event["id"]),
+            fund_symbol="000001",
+            tiers=(DrawdownTier(0.15, 5000, "0.15"),),
+            action_at=datetime(2024, 1, 2, 8, tzinfo=UTC),
+            create_estimate=False,
+        )
+        before_position = dict(get_position_snapshot(connection, "000001"))
+
+    handlers = build_command_handlers(
+        {123},
+        sqlite_path=sqlite_path,
+        now_factory=lambda: datetime(2024, 1, 3, 8, tzinfo=UTC),
+    )
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        effective_message=message,
+    )
+    asyncio.run(
+        _handler_by_command(handlers, "sync_position").callback(
+            update,
+            SimpleNamespace(args=["000001", "1100", "1.1"]),
+        )
+    )
+    query = FakeCallbackQuery(
+        message.reply_markups[0].inline_keyboard[2][0].callback_data
+    )
+    callback_update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        callback_query=query,
+    )
+    asyncio.run(
+        _callback_by_name(handlers, "position_sync_callback").callback(
+            callback_update,
+            SimpleNamespace(),
+        )
+    )
+
+    with open_connection(sqlite_path) as connection:
+        position = dict(get_position_snapshot(connection, "000001"))
+        pending = list_pending_position_items(connection, "000001")
+
+    assert position == before_position
+    assert len(pending) == 1
+    assert "only some pending additions" in query.edits[-1]
+    assert "Nothing was changed" in query.edits[-1]
 
 
 def test_closed_position_does_not_request_eastmoney_nav(tmp_path) -> None:
@@ -675,7 +1190,7 @@ def test_drawdown_plan_preview_is_read_only_and_shows_total_and_readiness() -> N
     finally:
         connection.close()
 
-    assert "Maximum one-cycle total: ¥15,000.00" in preview
+    assert "Maximum one-cycle total: ¥15,000" in preview
     assert "Plan readiness: SETUP_REQUIRED" in preview
     assert "Current drawdown preview: -20.0%" in preview
     assert "Confirm only if these codes" in preview
@@ -886,11 +1401,11 @@ def test_plans_and_check_show_plan_state_without_mutation(tmp_path) -> None:
         ]
 
     assert "Drawdown: -20.0%" in message.replies[0]
-    assert "Next open tier: -15% / ¥5,000.00" in message.replies[0]
+    assert "Next open tier: -15% / ¥5,000" in message.replies[0]
     assert "Drawdown Add Plan status (read-only)" in message.replies[1]
     assert "Read-only Drawdown Add Plans checked: 1" in message.replies[1]
     assert "No enabled drawdown_from_high" not in message.replies[1]
-    assert "• -15% / ¥5,000.00: open" in message.replies[1]
+    assert "• -15% / ¥5,000: open" in message.replies[1]
     assert counts == [0, 0, 0]
 
 
@@ -1235,12 +1750,20 @@ class FakeCallbackQuery:
         self.data = data
         self.answer_count = 0
         self.edits: list[str] = []
+        self.reply_markups: list[object] = []
 
     async def answer(self) -> None:
         self.answer_count += 1
 
-    async def edit_message_text(self, text: str) -> None:
+    async def edit_message_text(
+        self,
+        text: str,
+        *,
+        reply_markup: object | None = None,
+    ) -> None:
         self.edits.append(text)
+        if reply_markup is not None:
+            self.reply_markups.append(reply_markup)
 
 
 class FakeBot:
@@ -1260,6 +1783,21 @@ class FakeFailingBot:
 class FakeResponse:
     def __init__(self, *, status_code: int) -> None:
         self.status_code = status_code
+
+
+class FakeMarketCalendar:
+    def __init__(
+        self,
+        open_dates: set[date] | None = None,
+        confirmed_error: Exception | None = None,
+    ) -> None:
+        self.open_dates = open_dates
+        self.confirmed_error = confirmed_error
+
+    def confirmed_status(self, check_date: date) -> bool:
+        if self.confirmed_error is not None:
+            raise self.confirmed_error
+        return self.open_dates is None or check_date in self.open_dates
 
 
 def _history(dates: list[str], closes: list[float]) -> pd.DataFrame:
@@ -1308,3 +1846,61 @@ def _drawdown_plan_callback(handlers: list[object]) -> object:
         if handler.__class__.__name__ == "CallbackQueryHandler":
             return handler
     raise AssertionError("drawdown plan callback handler not found")
+
+
+def _callback_by_name(handlers: list[object], name: str) -> object:
+    for handler in handlers:
+        callback = getattr(handler, "callback", None)
+        if getattr(callback, "__name__", "") == name:
+            return handler
+    raise AssertionError(f"callback handler not found: {name}")
+
+
+def _prepare_ready_plan_alert(
+    sqlite_path: object,
+    *,
+    closes: list[float],
+    expected_date: date,
+    tiers: list[dict[str, float | int]] | None = None,
+) -> int:
+    with open_connection(sqlite_path) as connection:
+        init_db(connection)
+        rule_id = add_rule(
+            connection,
+            type="drawdown_plan",
+            symbol="510300",
+            name="A500",
+            asset_type="cn_etf",
+            params={
+                "investment_fund_symbol": "000001",
+                "lookback_days": 365,
+                "tiers": tiers
+                if tiers is not None
+                else [
+                    {"drawdown": 0.15, "amount": 5000},
+                    {"drawdown": 0.20, "amount": 10000},
+                ],
+                "sma_window": 250,
+                "sma_slope_window": 20,
+            },
+        )
+        upsert_fund_fee(
+            connection,
+            fund_symbol="000001",
+            fee_mode="rate",
+            fee_value=0.0015,
+        )
+        upsert_position_snapshot(
+            connection,
+            fund_symbol="000001",
+            units=1000,
+            average_unit_cost=1.2,
+        )
+        result = evaluate_drawdown_plan_rule(
+            connection,
+            list_rules(connection)[0],
+            _plan_history(closes),
+            expected_date=expected_date,
+        )
+    assert result.notification is not None
+    return rule_id

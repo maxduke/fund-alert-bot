@@ -151,6 +151,13 @@ def test_drawdown_plan_history_does_not_fallback_to_unadjusted_sina() -> None:
             "2024-01-03",
             price_basis=PriceBasis.QFQ,
         )
+    with pytest.raises(MarketDataFetchError, match="retry suppressed"):
+        provider.get_history(
+            Instrument("159915", "ChiNext ETF", AssetType.CN_ETF),
+            "2024-01-01",
+            "2024-01-03",
+            price_basis=PriceBasis.QFQ,
+        )
 
     assert [name for name, _kwargs in fake_ak.calls] == ["fund_etf_hist_em"]
 
@@ -487,6 +494,35 @@ def test_etf_quotes_cache_failed_eastmoney_and_sina_snapshot_time() -> None:
     ]
 
 
+def test_etf_quotes_cache_failures_from_both_realtime_sources() -> None:
+    class FailingRealtimeAkshare(FakeAkshare):
+        def fund_etf_spot_em(self, **kwargs: Any) -> pd.DataFrame:
+            self.calls.append(("fund_etf_spot_em", kwargs))
+            raise RuntimeError("Eastmoney rate limited")
+
+        def fund_etf_category_sina(self, **kwargs: Any) -> pd.DataFrame:
+            self.calls.append(("fund_etf_category_sina", kwargs))
+            raise RuntimeError("Sina unavailable")
+
+    fake_ak = FailingRealtimeAkshare()
+    provider = AkshareMarketDataProvider(
+        ak_module=fake_ak,
+        retries=1,
+        retry_delay_seconds=0,
+    )
+
+    for symbol in ("510300", "159915"):
+        with pytest.raises(MarketDataFetchError):
+            provider.get_etf_realtime_quote(
+                Instrument(symbol, symbol, AssetType.CN_ETF)
+            )
+
+    assert fake_ak.calls == [
+        ("fund_etf_spot_em", {}),
+        ("fund_etf_category_sina", {"symbol": "ETF\u57fa\u91d1"}),
+    ]
+
+
 def test_get_latest_returns_last_normalized_row() -> None:
     fake_ak = FakeAkshare()
     provider = AkshareMarketDataProvider(
@@ -580,6 +616,27 @@ def test_fund_nav_failure_is_cached_to_avoid_repeated_eastmoney_requests() -> No
         provider.get_fund_nav(instrument)
     with pytest.raises(MarketDataFetchError, match="retry suppressed"):
         provider.get_fund_nav(instrument)
+
+    assert [name for name, _kwargs in fake_ak.calls] == ["fund_open_fund_info_em"]
+
+
+def test_eastmoney_failure_suppresses_other_fund_requests_in_same_run() -> None:
+    class FailingNavAkshare(FakeAkshare):
+        def fund_open_fund_info_em(self, **kwargs: Any) -> pd.DataFrame:
+            self.calls.append(("fund_open_fund_info_em", kwargs))
+            raise RuntimeError("rate limited")
+
+    fake_ak = FailingNavAkshare()
+    provider = AkshareMarketDataProvider(
+        ak_module=fake_ak,
+        retries=1,
+        retry_delay_seconds=0,
+    )
+
+    with pytest.raises(MarketDataFetchError):
+        provider.get_fund_nav(Instrument("000001", "Fund A", AssetType.CN_OPEN_FUND))
+    with pytest.raises(MarketDataFetchError, match="retry suppressed"):
+        provider.get_fund_nav(Instrument("000002", "Fund B", AssetType.CN_OPEN_FUND))
 
     assert [name for name, _kwargs in fake_ak.calls] == ["fund_open_fund_info_em"]
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -12,6 +13,8 @@ from fund_alert_bot.db import (
     record_alert_notification_result,
 )
 from fund_alert_bot.notifications.service import NotificationService
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +40,7 @@ async def send_alert_notifications(
         results = await notification_service.send_alert(
             title=notification.title,
             body=notification.text,
+            telegram_actions=notification.telegram_actions,
         )
         if any(result.success for result in results):
             delivered += 1
@@ -50,6 +54,11 @@ async def send_alert_notifications(
                 event_id=notification.event_id,
                 results=results,
             )
+        LOGGER.info(
+            "Notification result event_id=%s channels=%s",
+            notification.event_id,
+            [(result.channel, result.success) for result in results],
+        )
 
     return NotificationDispatchSummary(
         attempted=len(notifications),

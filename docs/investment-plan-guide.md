@@ -1,9 +1,9 @@
 # Investment Plan Enhancement Guide
 
-> Status: accepted design; the behavior in this guide is not yet implemented.
-> V1 is limited to Drawdown Add Plans, low-maintenance DCA
-> position estimates, Position Syncs, and cost-based Price-Gain Reminders.
-> Generic allocation rebalancing is deferred.
+> Status: Drawdown Add Plans, before-close actions, Manual Add Estimates, and
+> Position Sync reconciliation are implemented. Enhanced automatic DCA position
+> estimates and position-linked Price-Gain Reminders remain planned sections in
+> this guide. Generic allocation rebalancing is deferred.
 
 This enhancement adds Drawdown Add Plans, informational long-term trend context,
 low-maintenance DCA position estimates, Position Syncs, and cost-based
@@ -82,7 +82,11 @@ V1 does not separately configure the official index. Telegram uses:
 The command fixes the first symbol as `cn_etf` and the second as `cn_open_fund`,
 so the user does not enter asset-type tokens. A name containing spaces must be
 quoted. `lookback` is optional and defaults to `365`; SMA stays internal at 250
-observations with a 20-observation slope window.
+observations with a 20-observation slope window. A plan accepts at most 50 tiers
+so Telegram can always render the tier action buttons; normal plans typically
+need only a small handful. Before saving, the bot also renders the largest
+possible pre-alert and confirmed reminder and rejects a name/tier combination
+that would exceed Telegram's 4,096-character message limit.
 
 Conceptual example:
 
@@ -710,21 +714,25 @@ Telegram requires one of these confirmations:
 
 ```text
 [同步数据已包含以上交易]
-[同步数据尚未包含以上交易]
+[同步数据一笔都未包含以上交易]
+[同步数据只包含部分（取消）]
 [取消]
 ```
 
 **Already included** writes the user-supplied position and marks those pending
 occurrences `reconciled_by_sync`, so their later NAV cannot add units again.
-**Not yet included** writes the same position but leaves the occurrences pending
-to apply after exact-date NAV arrives. The position replacement and occurrence
-decisions happen atomically and repeated callbacks return the stored outcome.
+**None included** means no displayed item is represented by the snapshot. It
+writes the position but leaves every occurrence pending to apply after its exact
+dated NAV arrives. **Partially included** cancels without changing anything; run
+`/sync_position` again after every displayed item settles. The position
+replacement and occurrence decisions happen atomically and repeated callbacks
+return the stored outcome.
 
 A `SETUP_REQUIRED` manual addition marked **Position Sync required** is cleared
 only when the user confirms that the new platform snapshot includes it. Choosing
-not included leaves that warning visible. If the user cannot truthfully classify
-all displayed pending items together, they cancel and synchronize after the
-platform has settled them rather than guessing.
+none included leaves that warning visible. If the snapshot contains only some
+displayed items, choose the partial option; the bot changes nothing, and the user
+synchronizes again after the platform has settled them rather than guessing.
 
 ## Delivery and persistence
 

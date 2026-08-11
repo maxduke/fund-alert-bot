@@ -10,9 +10,13 @@ from fund_alert_bot.market_data import AssetType, RealtimeQuote
 from fund_alert_bot.rules.drawdown_plan import (
     ActiveDrawdownCycle,
     DrawdownPlanConfig,
+    DrawdownPlanEvaluation,
     DrawdownTier,
+    _tier_command_text,
     build_drawdown_plan_alert,
+    build_drawdown_plan_pre_alert,
     evaluate_drawdown_plan,
+    evaluate_drawdown_plan_realtime,
     parse_drawdown_plan_config,
     required_history_start,
     validate_realtime_quote,
@@ -39,6 +43,51 @@ def test_plan_config_applies_defaults_and_preserves_incremental_amounts() -> Non
         DrawdownTier(0.15, 5000, "0.15"),
         DrawdownTier(0.20, 10000.5, "0.2"),
     )
+
+
+def test_plan_config_limits_tiers_to_bounded_telegram_actions() -> None:
+    with pytest.raises(ValueError, match="at most 50"):
+        _config([(index / 1000, 1) for index in range(1, 52)])
+
+
+def test_mark_added_fallback_keeps_canonical_tier_precision() -> None:
+    tier = DrawdownTier(0.123456789, 100.25, "0.123456789")
+
+    assert _tier_command_text((tier,)) == "12.3456789"
+
+
+def test_scientific_tiers_keep_confirmed_alert_within_telegram_limit() -> None:
+    config = _config([(index * 1e-100, 1) for index in range(1, 51)])
+    evaluation = DrawdownPlanEvaluation(
+        latest_date=date(2024, 1, 2),
+        latest_price=80,
+        peak_date=date(2024, 1, 1),
+        peak_price=100,
+        drawdown=0.2,
+        sma=None,
+        above_sma=None,
+        distance_to_sma=None,
+        sma_slope=None,
+        source="akshare_eastmoney",
+        coverage_start=date(2024, 1, 1),
+        cycle_initialized=False,
+        cycle_changed=False,
+        newly_crossed_tiers=config.tiers,
+        total_amount=50,
+    )
+
+    alert = build_drawdown_plan_alert(
+        rule_id=7,
+        reference_symbol="510300",
+        name="A500",
+        config=config,
+        evaluation=evaluation,
+    )
+
+    assert alert is not None
+    assert "1E-98%" in alert["message"]
+    assert "/mark_added 7 1E-98," in alert["message"]
+    assert len(str(alert["message"])) <= 4096
 
 
 @pytest.mark.parametrize(
@@ -492,6 +541,81 @@ def test_realtime_quote_requires_activity_and_continuity() -> None:
             ),
             reference_symbol="510300",
             confirmed_previous_close=90,
+        )
+
+
+def test_realtime_plan_crossing_uses_quote_without_consuming_recorded_tiers() -> None:
+    config = _config([(0.15, 5000), (0.20, 10000)], sma_window=2)
+    confirmed = evaluate_drawdown_plan(
+        _history([100]),
+        config,
+        reference_symbol="510300",
+        expected_date=date(2024, 1, 1),
+    )
+    quote = RealtimeQuote(
+        symbol="510300",
+        price=79,
+        previous_close=100,
+        volume=100,
+        amount=1000,
+        source="eastmoney",
+        fetched_at=datetime(2024, 1, 2, 6, 50, tzinfo=UTC),
+    )
+
+    realtime = evaluate_drawdown_plan_realtime(
+        confirmed,
+        config,
+        quote,
+        reference_symbol="510300",
+        market_date=date(2024, 1, 2),
+        recorded_tier_keys={"0.15"},
+    )
+    alert = build_drawdown_plan_pre_alert(
+        rule_id=7,
+        cycle_id=9,
+        reference_symbol="510300",
+        name="A500",
+        confirmed_date=date(2024, 1, 1),
+        config=config,
+        evaluation=realtime,
+        quote=quote,
+    )
+
+    assert realtime.drawdown == pytest.approx(0.21)
+    assert [tier.key for tier in realtime.newly_crossed_tiers] == ["0.2"]
+    assert realtime.total_amount == 10000
+    assert alert is not None
+    assert alert["alert_key"] == "7:drawdown_plan:pre_alert:2024-01-02"
+    assert alert["payload"]["phase"] == "before_close"
+    assert alert["payload"]["cycle_id"] == 9
+    assert alert["payload"]["confirmed_close_date"] == "2024-01-01"
+    assert "Realtime estimate before close" in alert["message"]
+
+
+def test_realtime_plan_rejects_quote_fetched_on_another_market_date() -> None:
+    config = _config([(0.15, 5000)])
+    confirmed = evaluate_drawdown_plan(
+        _history([100]),
+        config,
+        reference_symbol="510300",
+        expected_date=date(2024, 1, 1),
+    )
+
+    with pytest.raises(ValueError, match="not fetched on the market date"):
+        evaluate_drawdown_plan_realtime(
+            confirmed,
+            config,
+            RealtimeQuote(
+                symbol="510300",
+                price=84,
+                previous_close=100,
+                volume=100,
+                amount=1000,
+                source="eastmoney",
+                fetched_at=datetime(2024, 1, 1, 6, 50, tzinfo=UTC),
+            ),
+            reference_symbol="510300",
+            market_date=date(2024, 1, 2),
         )
 
 

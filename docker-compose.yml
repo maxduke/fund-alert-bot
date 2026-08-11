@@ -9,7 +9,9 @@ services:
     environment:
       SQLITE_PATH: /app/data/fund_alert_bot.sqlite3
       TZ: Asia/Shanghai
-      AFTER_CLOSE_CHECK_TIME: "17:10"
-      DCA_REMINDER_TIME: "09:30"
+      AFTER_CLOSE_CHECK_TIME: "${AFTER_CLOSE_CHECK_TIME:-17:10}"
+      BEFORE_CLOSE_CHECK_TIME: "${BEFORE_CLOSE_CHECK_TIME:-14:50}"
+      DCA_REMINDER_TIME: "${DCA_REMINDER_TIME:-09:30}"
+      FUND_NAV_PROCESS_TIME: "${FUND_NAV_PROCESS_TIME:-08:30}"
     volumes:
       - ./data:/app/data

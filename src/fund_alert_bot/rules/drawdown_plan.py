@@ -5,10 +5,11 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Collection, Mapping, Sequence
-from dataclasses import dataclass
-from datetime import date, timedelta
+from dataclasses import dataclass, replace
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -17,6 +18,9 @@ from fund_alert_bot.market_data.models import AssetType, RealtimeQuote
 _THRESHOLD_TOLERANCE = 1e-12
 _PRICE_RELATIVE_TOLERANCE = 1e-4
 _PRICE_ABSOLUTE_TOLERANCE = 1e-6
+_MAX_FIXED_DECIMAL_CHARS = 24
+_MAX_TIERS = 50
+_TELEGRAM_TEXT_LIMIT = 4096
 _SYMBOL_PATTERN = re.compile(r"[0-9]{6}")
 _REALTIME_SOURCES = frozenset({"eastmoney", "sina_fallback"})
 _CONFIRMED_HISTORY_SOURCES = frozenset({"akshare_eastmoney"})
@@ -260,6 +264,140 @@ def validate_realtime_quote(
     return quote
 
 
+def evaluate_drawdown_plan_realtime(
+    confirmed: DrawdownPlanEvaluation,
+    config: DrawdownPlanConfig,
+    quote: RealtimeQuote,
+    *,
+    reference_symbol: str,
+    market_date: date,
+    recorded_tier_keys: Collection[str] = (),
+) -> DrawdownPlanEvaluation:
+    """Apply one validated current-session quote to confirmed plan context."""
+
+    validate_realtime_quote(
+        quote,
+        reference_symbol=reference_symbol,
+        confirmed_previous_close=confirmed.latest_price,
+    )
+    if confirmed.latest_date >= market_date:
+        raise ValueError("Realtime estimate requires an earlier confirmed close.")
+    if quote.fetched_at.astimezone(ZoneInfo("Asia/Shanghai")).date() != market_date:
+        raise ValueError("Realtime quote was not fetched on the market date.")
+
+    price = float(quote.price)
+    drawdown = max(0.0, 1 - price / confirmed.peak_price)
+    already_recorded = set() if confirmed.cycle_changed else set(recorded_tier_keys)
+    crossed = tuple(
+        tier
+        for tier in config.tiers
+        if drawdown + _THRESHOLD_TOLERANCE >= tier.drawdown
+        and tier.key not in already_recorded
+    )
+    return replace(
+        confirmed,
+        latest_date=market_date,
+        latest_price=price,
+        drawdown=drawdown,
+        above_sma=None if confirmed.sma is None else price > confirmed.sma,
+        distance_to_sma=calculate_sma_distance(price, confirmed.sma),
+        source=quote.source,
+        newly_crossed_tiers=crossed,
+        total_amount=sum((tier.amount for tier in crossed), start=0),
+    )
+
+
+def build_drawdown_plan_pre_alert(
+    *,
+    rule_id: int,
+    cycle_id: int,
+    reference_symbol: str,
+    name: str,
+    confirmed_date: date,
+    config: DrawdownPlanConfig,
+    evaluation: DrawdownPlanEvaluation,
+    quote: RealtimeQuote,
+) -> dict[str, object] | None:
+    """Build one provisional before-close reminder without consuming tiers."""
+
+    tiers = evaluation.newly_crossed_tiers
+    if not tiers:
+        return None
+    tier_lines = [
+        f"-{format_plan_percent(tier.drawdown)} → {format_plan_amount(tier.amount)}"
+        for tier in tiers
+    ]
+    fetched_at = quote.fetched_at.astimezone(ZoneInfo("Asia/Shanghai"))
+    message = "\n".join(
+        (
+            f"⚠️ Buy-plan pre-alert — {name}",
+            "",
+            "Realtime estimate before close",
+            f"Market date: {evaluation.latest_date.isoformat()}",
+            f"Reference ETF: {reference_symbol}",
+            f"Investment fund: {config.investment_fund_symbol}",
+            f"Realtime drawdown: -{evaluation.drawdown:.1%}",
+            f"Recent confirmed peak: {evaluation.peak_price:.6g}",
+            f"Realtime price: {evaluation.latest_price:.6g}",
+            f"Peak date: {evaluation.peak_date.isoformat()}",
+            f"Quote source: {evaluation.source}",
+            f"Fetched at: {fetched_at.isoformat(timespec='seconds')}",
+            "",
+            "🎯 Tiers currently reached:",
+            *tier_lines,
+            "",
+            "Configured additional amount: "
+            f"{format_plan_amount(evaluation.total_amount)}",
+            "",
+            "📈 Long-term trend from confirmed closes",
+            *_format_trend(config, evaluation),
+            "",
+            "Final confirmation will use closing data.",
+            "Only after you actually subscribe, record it with:",
+            f"/mark_added {rule_id} {_tier_command_text(tiers)}",
+            "If you add today, remember to sync the fund position after units settle.",
+            "This is a reminder only. No trade has been placed.",
+        )
+    )
+    return {
+        "alert_key": (
+            f"{rule_id}:drawdown_plan:pre_alert:{evaluation.latest_date.isoformat()}"
+        ),
+        "title": f"Buy-plan pre-alert — {name}",
+        "message": message,
+        "payload": {
+            "phase": "before_close",
+            "rule_id": rule_id,
+            "cycle_id": cycle_id,
+            "reference_symbol": reference_symbol,
+            "investment_fund_symbol": config.investment_fund_symbol,
+            "data_date": evaluation.latest_date.isoformat(),
+            "confirmed_close_date": confirmed_date.isoformat(),
+            "source": evaluation.source,
+            "fetched_at": fetched_at.isoformat(),
+            "peak_date": evaluation.peak_date.isoformat(),
+            "peak_price": evaluation.peak_price,
+            "latest_price": evaluation.latest_price,
+            "drawdown": evaluation.drawdown,
+            "crossed_tiers": [
+                {
+                    "key": tier.key,
+                    "drawdown": tier.drawdown,
+                    "amount": tier.amount,
+                }
+                for tier in tiers
+            ],
+            "total_amount": evaluation.total_amount,
+            "sma_window": config.sma_window,
+            "sma": evaluation.sma,
+            "above_sma": evaluation.above_sma,
+            "distance_to_sma": evaluation.distance_to_sma,
+            "sma_slope_window": config.sma_slope_window,
+            "sma_slope": evaluation.sma_slope,
+        },
+    }
+
+
 def build_drawdown_plan_alert(
     *,
     rule_id: int,
@@ -275,7 +413,7 @@ def build_drawdown_plan_alert(
         return None
 
     tier_lines = [
-        f"-{_format_percent(tier.drawdown)} → {_format_amount(tier.amount)}"
+        f"-{format_plan_percent(tier.drawdown)} → {format_plan_amount(tier.amount)}"
         for tier in tiers
     ]
     trend_lines = _format_trend(config, evaluation)
@@ -307,12 +445,14 @@ def build_drawdown_plan_alert(
             *tier_lines,
             "",
             "Total additional amount now due: "
-            f"{_format_amount(evaluation.total_amount)}",
+            f"{format_plan_amount(evaluation.total_amount)}",
             "",
             "📈 Long-term trend",
             *trend_lines,
             "",
             "Regular DCA continues separately.",
+            "Only after you actually subscribe, record it with:",
+            f"/mark_added {rule_id} {_tier_command_text(tiers)}",
             "This is a reminder only. No trade has been placed.",
         )
     )
@@ -325,6 +465,7 @@ def build_drawdown_plan_alert(
         "title": f"Buy-plan reminder — {name}",
         "message": message,
         "payload": {
+            "phase": "after_close",
             "rule_id": rule_id,
             "reference_symbol": reference_symbol,
             "investment_fund_symbol": config.investment_fund_symbol,
@@ -353,6 +494,77 @@ def build_drawdown_plan_alert(
             "sma_slope": evaluation.sma_slope,
         },
     }
+
+
+def validate_drawdown_plan_notification_size(
+    *,
+    name: str,
+    reference_symbol: str,
+    config: DrawdownPlanConfig,
+) -> None:
+    """Reject plans whose fully rendered worst-case reminders exceed Telegram."""
+
+    latest_date = date(2099, 12, 31)
+    evaluation = DrawdownPlanEvaluation(
+        latest_date=latest_date,
+        latest_price=1,
+        peak_date=date(2099, 1, 1),
+        peak_price=1e308,
+        drawdown=0.999,
+        sma=1e308,
+        above_sma=False,
+        distance_to_sma=-0.999,
+        sma_slope=-0.999,
+        source="akshare_eastmoney",
+        coverage_start=latest_date,
+        cycle_initialized=False,
+        cycle_changed=False,
+        newly_crossed_tiers=config.tiers,
+        total_amount=sum((tier.amount for tier in config.tiers), start=0),
+    )
+    quote = RealtimeQuote(
+        symbol=reference_symbol,
+        price=1,
+        previous_close=1,
+        volume=1,
+        amount=1,
+        source="sina_fallback",
+        fetched_at=datetime(
+            2099,
+            12,
+            31,
+            14,
+            50,
+            tzinfo=ZoneInfo("Asia/Shanghai"),
+        ),
+    )
+    alerts = (
+        build_drawdown_plan_alert(
+            rule_id=2**63 - 1,
+            reference_symbol=reference_symbol,
+            name=name,
+            config=config,
+            evaluation=evaluation,
+        ),
+        build_drawdown_plan_pre_alert(
+            rule_id=2**63 - 1,
+            cycle_id=2**63 - 1,
+            reference_symbol=reference_symbol,
+            name=name,
+            confirmed_date=date(2099, 12, 30),
+            config=config,
+            evaluation=replace(evaluation, source="sina_fallback"),
+            quote=quote,
+        ),
+    )
+    if any(
+        alert is not None and len(str(alert["message"])) > _TELEGRAM_TEXT_LIMIT
+        for alert in alerts
+    ):
+        raise ValueError(
+            "drawdown plan notification exceeds Telegram's 4096-character limit; "
+            "shorten the name, reduce tiers, or reduce numeric precision."
+        )
 
 
 def calculate_sma(
@@ -463,6 +675,8 @@ def _read_tiers(raw_tiers: object) -> tuple[DrawdownTier, ...]:
         or not raw_tiers
     ):
         raise ValueError("tiers must be a non-empty sequence.")
+    if len(raw_tiers) > _MAX_TIERS:
+        raise ValueError(f"tiers must contain at most {_MAX_TIERS} entries.")
 
     tiers: list[DrawdownTier] = []
     previous_drawdown = 0.0
@@ -481,7 +695,9 @@ def _read_tiers(raw_tiers: object) -> tuple[DrawdownTier, ...]:
         tiers.append(
             DrawdownTier(
                 drawdown=drawdown,
-                amount=int(amount) if amount.is_integer() else amount,
+                amount=(
+                    int(amount) if amount.is_integer() and amount <= 2**53 else amount
+                ),
                 key=_canonical_number(drawdown),
             )
         )
@@ -575,14 +791,29 @@ def _has_positive_activity(volume: object, amount: object) -> bool:
     return False
 
 
-def _format_amount(amount: int | float) -> str:
-    if float(amount).is_integer():
-        return f"¥{amount:,.0f}"
-    return f"¥{amount:,.2f}"
+def format_plan_amount(amount: int | float) -> str:
+    """Format a configured RMB amount without hiding its precision."""
+
+    return f"¥{_format_exact_decimal(amount, grouped=True)}"
 
 
-def _format_percent(value: float) -> str:
-    return f"{value * 100:g}%"
+def format_plan_percent(value: float | str) -> str:
+    """Format a configured drawdown fraction without rounding its tier."""
+
+    percentage = Decimal(str(value)) * 100
+    return f"{_format_exact_decimal(percentage)}%"
+
+
+def _format_exact_decimal(value: object, *, grouped: bool = False) -> str:
+    decimal = Decimal(str(value)).normalize()
+    fixed = format(decimal, ",f" if grouped else "f")
+    if len(fixed) <= _MAX_FIXED_DECIMAL_CHARS:
+        return fixed
+    return format(decimal, "E")
+
+
+def _tier_command_text(tiers: Sequence[DrawdownTier]) -> str:
+    return ",".join(format_plan_percent(tier.key).removesuffix("%") for tier in tiers)
 
 
 def _format_trend(

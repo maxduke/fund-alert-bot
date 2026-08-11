@@ -87,7 +87,10 @@ Telegram boundary and evaluator boundary:
   symbol;
 - a non-empty display name;
 - positive `lookback_days`;
-- non-empty tiers in strictly ascending drawdown order;
+- between 1 and 50 tiers in strictly ascending drawdown order, keeping Telegram
+  actions and messages within channel limits;
+- both fully rendered all-tier pre-alert and confirmed-close messages within
+  Telegram's 4,096-character limit;
 - unique finite drawdowns strictly between zero and one;
 - positive finite amounts;
 - `sma_window >= 2`;
@@ -520,25 +523,28 @@ command is `/sync_position <fund_symbol> <units> <average_unit_cost>`.
 Before the first Position Snapshot, create scheduled occurrences and reminders
 but leave every estimate pending without changing units or cost. Require an
 explicit Position Sync, including `0, 0` for a genuinely empty position, then
-reconcile the displayed pending occurrences through the same included/not-
-included flow. Never infer that a missing snapshot means zero holdings.
+reconcile the displayed pending occurrences through the same all-included or
+none-included flow. Never infer that a missing snapshot means zero holdings.
 
 Before mutation, query all pending scheduled DCA and Manual Add Estimates for
 that feeder fund and return a sync preview listing source, due/action date, and
 gross amount. With no pending items, apply the validated snapshot directly. With
-pending items, require `included`, `not_included`, or cancel:
+pending items, require `all included`, `none included`, `partial`, or cancel:
 
-- `included` atomically replaces the position and marks the displayed pending
+- `all included` atomically replaces the position and marks the displayed pending
   occurrences `reconciled_by_sync` so they can never apply later;
-- `not_included` atomically replaces the position but leaves them pending;
+- `none included` atomically replaces the position but leaves every item pending;
+- `partial` cancels without mutation and tells the user to sync again after every
+  displayed item settles;
 - cancel mutates nothing.
 
 Store a stable sync-preview identity and reject a callback whose pending set no
 longer matches, rather than applying a stale decision. Repeated callbacks return
 the committed result. Clear `position_sync_required_since` only when the
-corresponding unestimated manual additions are included. If the user cannot
-classify the entire displayed set together, require cancellation and a later
-sync; do not add partial-reconciliation UI in v1.
+corresponding unestimated manual additions are all included. The none-included
+choice explicitly means that no displayed item is represented by the snapshot.
+If the snapshot contains only some displayed items, require cancellation and a
+later sync; do not add partial-reconciliation mutation in v1.
 
 Reuse each durable DCA reminder occurrence as the identity for at most one
 Scheduled DCA Estimate. Creating the occurrence records only an assumption from
