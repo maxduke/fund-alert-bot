@@ -103,6 +103,7 @@ if TYPE_CHECKING:
     from telegram.ext import Application, ContextTypes
 
 LOGGER = logging.getLogger(__name__)
+_TELEGRAM_TEXT_LIMIT = 4096
 
 ADD_DRAWDOWN_USAGE = (
     "Usage: /add_drawdown <asset_type> <symbol> <name> <lookback_days> <thresholds>"
@@ -1523,10 +1524,28 @@ async def _reply_text(
         LOGGER.warning("Telegram command update has no effective message")
         return
 
-    if reply_markup is None:
-        await update.effective_message.reply_text(text)
-    else:
-        await update.effective_message.reply_text(text, reply_markup=reply_markup)
+    chunks = _split_telegram_text(text)
+    for index, chunk in enumerate(chunks):
+        if reply_markup is not None and index == len(chunks) - 1:
+            await update.effective_message.reply_text(chunk, reply_markup=reply_markup)
+        else:
+            await update.effective_message.reply_text(chunk)
+
+
+def _split_telegram_text(text: str) -> tuple[str, ...]:
+    chunks: list[str] = []
+    while len(text) > _TELEGRAM_TEXT_LIMIT:
+        split_at = text.rfind("\n", 0, _TELEGRAM_TEXT_LIMIT + 1)
+        if split_at <= 0:
+            split_at = _TELEGRAM_TEXT_LIMIT
+            chunks.append(text[:split_at])
+            text = text[split_at:]
+        else:
+            chunks.append(text[:split_at])
+            text = text[split_at + 1 :]
+    if text or not chunks:
+        chunks.append(text)
+    return tuple(chunks)
 
 
 async def reject_if_unauthorized(
