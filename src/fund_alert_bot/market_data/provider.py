@@ -45,3 +45,6 @@ class MarketDataProvider(Protocol):
         nav_date: DateLike | None = None,
     ) -> FundNav:
         """Return a validated exact-date or latest feeder-fund unit NAV."""
+
+    def get_fund_type(self, symbol: str) -> str:
+        """Return the provider-declared type for one feeder fund."""

@@ -24,6 +24,8 @@ Implemented Telegram commands:
 - `/add_drawdown <asset_type> <symbol> <name> <lookback_days> <thresholds>`
 - `/add_profit <asset_type> <symbol> <name> <cost> <thresholds>`
 - `/add_dca <name> <weekday> <amount>`
+- `/add_dca <fund_symbol> <name> <weekday> <gross_amount> <fee> [holiday:next|holiday:skip]`
+- `/dca_skip <rule_id> <due_date>`
 - `/set_fund_fee <fund_symbol> <rate:<percent>%|fixed:<RMB>>`
 - `/set_fund_cutoff <fund_symbol> <HH:MM>`
 - `/sync_position <fund_symbol> <units> <average_unit_cost>`
@@ -56,12 +58,30 @@ are notifications only and do not calculate position size, redeem funds, place
 orders, or connect to a broker. APScheduler evaluates profit reminders in the
 same after-close scheduled market reminder check as drawdown rules.
 
-DCA reminders are added with `/add_dca`, for example `/add_dca 创业板 周四
+DCA reminder-only rules are added with `/add_dca`, for example `/add_dca 创业板 周四
 1000` or `/add_dca 创业板 Thursday 1000`. Supported weekdays are 周一 through
 周日 and Monday through Sunday; rules store normalized weekday codes such as
 `THU`. `/check` also checks whether DCA reminders are due today. Scheduled DCA
-checks run daily and send at most one reminder per rule per date. DCA reminders
-do not fetch market data and do not trade.
+checks run daily and send at most one reminder per rule per date.
+
+For a fixed weekly feeder-fund plan that also estimates units after the exact
+dated NAV is published, use:
+
+```text
+/add_dca 110026 "A500 feeder" 周四 2000 rate:0.12% holiday:next
+```
+
+Run `/sync_position 110026 <units> <average_cost>` once before relying on the
+estimate. `holiday:next` defers a holiday occurrence to the next confirmed open
+day; `holiday:skip` records it as skipped. If the platform does not execute a
+scheduled deduction, tap the Telegram failure button or run
+`/dca_skip <rule_id> <YYYY-MM-DD>` before NAV processing. The bot assumes a
+configured deduction occurred, but cannot verify the platform. Check `/plans`
+and periodically run `/sync_position` after any mismatch. No order is placed.
+At rule creation the default AKShare provider makes one per-symbol Xueqiu
+metadata request to verify the declared fund type; QDII/overseas funds are
+rejected, and an unavailable metadata response creates no rule. This avoids a
+bulk Eastmoney fund-list request and never adds traffic to recurring checks.
 
 ### Feeder-fund setup and position sync
 

@@ -292,7 +292,7 @@ def test_scheduled_drawdown_check_skips_when_cn_market_is_closed(
     assert "CN market is not trading" in caplog.text
 
 
-def test_register_jobs_passes_calendar_to_market_jobs_only() -> None:
+def test_register_jobs_passes_calendar_to_calendar_aware_jobs() -> None:
     fake_scheduler = FakeScheduler()
     application = FakeApplication()
     provider = FakeProvider(_history(["2024-01-02"], [100.0]))
@@ -322,7 +322,7 @@ def test_register_jobs_passes_calendar_to_market_jobs_only() -> None:
     assert fund_nav_job["func"] is scheduler.run_scheduled_fund_nav_process
     assert fund_nav_job["kwargs"]["market_calendar"] is market_calendar
     assert fund_nav_job["kwargs"]["market_data_provider"] is provider
-    assert "market_calendar" not in dca_job["kwargs"]
+    assert dca_job["kwargs"]["market_calendar"] is market_calendar
 
 
 def test_scheduled_before_close_check_uses_latest_drawdown_price(

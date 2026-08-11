@@ -222,6 +222,23 @@ class AkshareMarketDataProvider(MarketDataProvider):
             source="akshare_eastmoney",
         )
 
+    def get_fund_type(self, symbol: str) -> str:
+        """Return one fund's declared type from the per-symbol Xueqiu endpoint."""
+
+        frame = self._call_with_retry(
+            self._akshare.fund_individual_basic_info_xq,
+            symbol=_strip_exchange_prefix(symbol),
+            timeout=10,
+        )
+        if frame.empty or not {"item", "value"}.issubset(frame.columns):
+            raise EmptyMarketDataError("Fund metadata is empty or malformed.")
+        matches = frame.loc[
+            frame["item"].astype(str).str.strip() == "基金类型", "value"
+        ]
+        if matches.empty or not str(matches.iloc[0]).strip():
+            raise EmptyMarketDataError("Fund metadata has no declared fund type.")
+        return str(matches.iloc[0]).strip()
+
     def _get_realtime_latest(
         self,
         instrument: Instrument,

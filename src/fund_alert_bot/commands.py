@@ -35,20 +35,24 @@ from fund_alert_bot.checks import (
 from fund_alert_bot.config import NotificationSettings
 from fund_alert_bot.db import (
     add_drawdown_plan_rule,
+    add_enhanced_dca_rule,
     add_rule,
     delete_rule,
     find_enabled_drawdown_plan_conflict,
     get_active_drawdown_cycle,
     get_drawdown_plan_action_event,
     get_fund_settings,
+    get_position_snapshot,
     initialize_database,
     list_enabled_drawdown_plan_fund_symbols,
+    list_enhanced_dca_statuses,
     list_manual_add_actions,
     list_pending_position_items,
     list_position_snapshots,
     open_connection,
     reconcile_position_snapshot,
     record_manual_addition,
+    skip_scheduled_dca_occurrence,
     upsert_fund_cutoff,
     upsert_fund_fee,
     upsert_position_snapshot,
@@ -90,7 +94,13 @@ LOGGER = logging.getLogger(__name__)
 ADD_DRAWDOWN_USAGE = (
     "Usage: /add_drawdown <asset_type> <symbol> <name> <lookback_days> <thresholds>"
 )
-ADD_DCA_USAGE = "Usage: /add_dca <name> <weekday> <amount>"
+ADD_DCA_USAGE = "\n".join(
+    (
+        "Usage: /add_dca <name> <weekday> <amount>",
+        "   or: /add_dca <fund_symbol> <name> <weekday> <gross_amount> "
+        "<rate:<percent>%|fixed:<RMB>> [holiday:next|holiday:skip]",
+    )
+)
 ADD_PROFIT_USAGE = "Usage: /add_profit <asset_type> <symbol> <name> <cost> <thresholds>"
 SET_FUND_FEE_USAGE = "Usage: /set_fund_fee <fund_symbol> <rate:<percent>%|fixed:<RMB>>"
 SET_FUND_CUTOFF_USAGE = "Usage: /set_fund_cutoff <fund_symbol> <HH:MM>"
@@ -108,7 +118,10 @@ HELP_MESSAGE = "\n".join(
         "/help - Show available commands",
         "/add_drawdown <asset_type> <symbol> <name> <lookback_days> <thresholds>",
         "/add_profit <asset_type> <symbol> <name> <cost> <thresholds>",
-        "/add_dca <name> <weekday> <amount>",
+        "/add_dca <name> <weekday> <amount> - Reminder only",
+        "/add_dca <fund_symbol> <name> <weekday> <amount> <fee> "
+        "[holiday:next|holiday:skip] - Fixed fund DCA estimate",
+        "/dca_skip <rule_id> <due_date> - Deduction failed/not executed",
         "/set_fund_fee <fund_symbol> <rate:<percent>%|fixed:<RMB>>",
         "/set_fund_cutoff <fund_symbol> <HH:MM>",
         "/sync_position <fund_symbol> <units> <average_unit_cost>",
@@ -161,6 +174,10 @@ class DcaCommand:
     name: str
     weekday: str
     amount: int | float
+    fund_symbol: str | None = None
+    fee_mode: str | None = None
+    fee_value: float | None = None
+    holiday_policy: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -383,7 +400,12 @@ def parse_set_fund_fee_args(args: Sequence[str]) -> FundFeeCommand:
     if len(args) != 2:
         raise CommandParseError(SET_FUND_FEE_USAGE)
     fund_symbol = _parse_fund_symbol(args[0])
-    raw_fee = args[1].strip().lower()
+    fee_mode, fee_value = _parse_fund_fee(args[1])
+    return FundFeeCommand(fund_symbol, fee_mode, fee_value)
+
+
+def _parse_fund_fee(raw_token: str) -> tuple[str, float]:
+    raw_fee = raw_token.strip().lower()
     if raw_fee.startswith("rate:") and raw_fee.endswith("%"):
         fee_mode = "rate"
         raw_value = raw_fee[5:-1]
@@ -401,7 +423,7 @@ def parse_set_fund_fee_args(args: Sequence[str]) -> FundFeeCommand:
         raise CommandParseError("fee must be a finite non-negative number") from exc
     if not math.isfinite(value) or value < 0:
         raise CommandParseError("fee must be a finite non-negative number")
-    return FundFeeCommand(fund_symbol, fee_mode, value / divisor)
+    return fee_mode, value / divisor
 
 
 def parse_set_fund_cutoff_args(args: Sequence[str]) -> FundCutoffCommand:
@@ -707,10 +729,30 @@ def _parse_fund_symbol(raw_symbol: str) -> str:
 def parse_add_dca_args(args: Sequence[str]) -> DcaCommand:
     """Parse /add_dca arguments into a typed command object."""
 
-    if len(args) != 3:
-        raise CommandParseError(ADD_DCA_USAGE)
-
-    raw_name, raw_weekday, raw_amount = args
+    if len(args) == 3:
+        raw_name, raw_weekday, raw_amount = args
+        fund_symbol = None
+        fee_mode = None
+        fee_value = None
+        holiday_policy = None
+    else:
+        try:
+            words = shlex.split(" ".join(args))
+        except ValueError as exc:
+            raise CommandParseError(f"{ADD_DCA_USAGE}\n{exc}") from exc
+        if len(words) not in {5, 6}:
+            raise CommandParseError(ADD_DCA_USAGE)
+        fund_symbol = _parse_fund_symbol(words[0])
+        raw_name, raw_weekday, raw_amount = words[1:4]
+        fee_mode, fee_value = _parse_fund_fee(words[4])
+        holiday_policy = "next"
+        if len(words) == 6:
+            option = words[5].strip().lower()
+            if option not in {"holiday:next", "holiday:skip"}:
+                raise CommandParseError(
+                    "holiday policy must be holiday:next or holiday:skip"
+                )
+            holiday_policy = option.removeprefix("holiday:")
     name = raw_name.strip()
     if not name:
         raise CommandParseError("name must not be empty")
@@ -720,10 +762,17 @@ def parse_add_dca_args(args: Sequence[str]) -> DcaCommand:
     except ValueError as exc:
         raise CommandParseError(str(exc)) from exc
 
+    amount = parse_dca_amount(raw_amount)
+    if fee_mode == "fixed" and fee_value is not None and fee_value >= amount:
+        raise CommandParseError("fixed fee must be lower than the DCA amount")
     return DcaCommand(
         name=name,
         weekday=weekday,
-        amount=parse_dca_amount(raw_amount),
+        amount=amount,
+        fund_symbol=fund_symbol,
+        fee_mode=fee_mode,
+        fee_value=fee_value,
+        holiday_policy=holiday_policy,
     )
 
 
@@ -756,10 +805,13 @@ def drawdown_params(command: DrawdownCommand) -> dict[str, object]:
 def dca_params(command: DcaCommand) -> dict[str, object]:
     """Build the persisted params_json object for a DCA rule."""
 
-    return {
+    params: dict[str, object] = {
         "weekday": command.weekday,
         "amount": command.amount,
     }
+    if command.holiday_policy is not None:
+        params["holiday_policy"] = command.holiday_policy
+    return params
 
 
 def profit_params(command: ProfitCommand) -> dict[str, object]:
@@ -1041,17 +1093,52 @@ def build_drawdown_plan_preview(
 def format_plan_overview(
     result: DrawdownPlanStatusResult,
     unmatched_positions: Sequence[tuple[Any, FundNav | None, str]] = (),
+    dca_statuses: Sequence[Any] = (),
 ) -> str:
     """Format concise `/plans` output."""
 
     if (
         not result.statuses
         and not unmatched_positions
+        and not dca_statuses
         and not result.no_data_skips
         and not result.errors
     ):
         return "No investment plans or positions configured."
     lines = ["📊 Investment Plans"]
+    for row in dca_statuses:
+        params = _load_params(str(row["params_json"]))
+        lines.extend(
+            (
+                "",
+                f"{row['name']} (fixed DCA {row['rule_id']})",
+                f"Fund {row['fund_symbol']} / every {params['weekday']} / "
+                f"{format_plan_amount(float(params['amount']))}",
+                f"Holiday policy: {params['holiday_policy']}",
+            )
+        )
+        if row["due_date"] is None:
+            lines.append("Latest occurrence: none yet")
+        else:
+            effective = (
+                "unresolved"
+                if row["effective_date"] is None
+                else str(row["effective_date"])
+            )
+            lines.append(
+                f"Latest occurrence: {row['due_date']} / {row['status']} / "
+                f"NAV date {effective}"
+            )
+            if row["added_units"] is not None:
+                lines.append(f"Estimated units added: {float(row['added_units']):.6f}")
+        if row["last_synced_at"] is None:
+            lines.append("Position: not synced — remember /sync_position")
+        else:
+            accuracy = "estimated" if row["is_estimated"] else "exact"
+            lines.append(
+                f"Position: {accuracy}; last sync {row['last_synced_at']}; "
+                f"later estimates {row['estimates_since_sync']}"
+            )
     for status in result.statuses:
         next_tier = _next_open_tier(status)
         lines.extend(
@@ -1297,6 +1384,21 @@ def can_use_command(update: object, allowed_user_ids: Collection[int]) -> bool:
     return is_allowed_telegram_user(get_update_user_id(update), allowed_user_ids)
 
 
+def _dca_skip_response(status: str, rule_id: int, due_date: str) -> str:
+    if status == "skipped":
+        return f"Skipped fixed DCA occurrence {rule_id} / {due_date}."
+    if status == "pending":
+        return "The occurrence is still pending; try again."
+    if status == "applied":
+        return (
+            "This estimate was already applied. Use /sync_position to correct "
+            "the platform position; no units were subtracted."
+        )
+    if status == "reconciled_by_sync":
+        return "This occurrence was already reconciled by Position Sync."
+    return "Fixed DCA occurrence not found."
+
+
 async def _reply_text(
     update: Update,
     text: str,
@@ -1441,25 +1543,93 @@ def build_command_handlers(
             await _reply_text(update, str(exc))
             return
 
+        fund_type = None
+        if command.fund_symbol is not None:
+            metadata_reader = getattr(market_data_provider, "get_fund_type", None)
+            if not callable(metadata_reader):
+                await _reply_text(
+                    update,
+                    "The market-data provider cannot verify the fund's domestic "
+                    "calendar. No fixed DCA rule was created.",
+                )
+                return
+            try:
+                fund_type = str(metadata_reader(command.fund_symbol))
+            except MarketDataProviderError as exc:
+                await _reply_text(
+                    update,
+                    "Unable to verify the fund's domestic calendar from "
+                    f"metadata: {exc}. No rule was created; try again later.",
+                )
+                return
+            if "QDII" in fund_type.upper() or "海外" in fund_type:
+                await _reply_text(
+                    update,
+                    f"Fund type {fund_type} does not use the domestic CN "
+                    "valuation calendar; no fixed DCA rule was created.",
+                )
+                return
+
         with open_connection(sqlite_path) as connection:
             initialize_database(connection)
-            rule_id = add_rule(
-                connection,
-                type=DCA_RULE_TYPE,
-                symbol=command.name,
-                name=command.name,
-                asset_type="dca",
-                params=dca_params(command),
-            )
+            try:
+                if command.fund_symbol is None:
+                    rule_id = add_rule(
+                        connection,
+                        type=DCA_RULE_TYPE,
+                        symbol=command.name,
+                        name=command.name,
+                        asset_type="dca",
+                        params=dca_params(command),
+                    )
+                else:
+                    rule_id = add_enhanced_dca_rule(
+                        connection,
+                        fund_symbol=command.fund_symbol,
+                        name=command.name,
+                        weekday=command.weekday,
+                        amount=command.amount,
+                        fee_mode=str(command.fee_mode),
+                        fee_value=float(command.fee_value),
+                        holiday_policy=str(command.holiday_policy),
+                    )
+            except sqlite3.IntegrityError as exc:
+                await _reply_text(update, str(exc))
+                return
 
-        await _reply_text(
-            update,
-            (
+        if command.fund_symbol is None:
+            response = (
                 f"Added DCA rule id={rule_id} "
                 f"name={command.name} weekday={command.weekday} "
                 f"amount={command.amount}"
-            ),
-        )
+            )
+        else:
+            fee = (
+                f"rate:{format_plan_percent(float(command.fee_value))}"
+                if command.fee_mode == "rate"
+                else f"fixed:{format_plan_amount(float(command.fee_value))}"
+            )
+            with open_connection(sqlite_path) as connection:
+                initialize_database(connection)
+                settings = get_fund_settings(connection, command.fund_symbol)
+                position = get_position_snapshot(connection, command.fund_symbol)
+            response = "\n".join(
+                (
+                    f"Added fixed DCA rule id={rule_id}",
+                    f"Fund: {command.fund_symbol} / {command.name}",
+                    f"Verified fund type: {fund_type}",
+                    f"Weekly due day: {command.weekday}",
+                    f"Gross amount: {format_plan_amount(command.amount)}",
+                    f"Shared subscription fee: {fee}",
+                    f"Holiday policy: {command.holiday_policy}",
+                    f"Subscription cutoff: {settings['subscription_cutoff']}",
+                    "Position readiness: "
+                    + ("READY" if position is not None else "SETUP_REQUIRED"),
+                    "Remember: run /sync_position before automatic estimates "
+                    "can apply.",
+                )
+            )
+        await _reply_text(update, response)
 
     async def add_drawdown_plan(
         update: Update,
@@ -1822,6 +1992,55 @@ def build_command_handlers(
         draft.completed_message = message
         await query.edit_message_text(message)
 
+    async def dca_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if await reject_if_unauthorized(update, allowed_user_ids):
+            return
+        args = getattr(context, "args", ())
+        if len(args) != 2:
+            await _reply_text(update, "Usage: /dca_skip <rule_id> <due_date>")
+            return
+        try:
+            rule_id = int(args[0])
+            due_date = date.fromisoformat(args[1]).isoformat()
+        except ValueError:
+            await _reply_text(update, "rule_id must be an integer and date YYYY-MM-DD")
+            return
+        with open_connection(sqlite_path) as connection:
+            initialize_database(connection)
+            status = skip_scheduled_dca_occurrence(
+                connection,
+                rule_id=rule_id,
+                due_date=due_date,
+            )
+        await _reply_text(update, _dca_skip_response(status, rule_id, due_date))
+
+    async def dca_skip_callback(
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        del context
+        query = getattr(update, "callback_query", None)
+        if query is None:
+            return
+        await query.answer()
+        if await reject_if_unauthorized(update, allowed_user_ids):
+            return
+        try:
+            _prefix, raw_rule_id, raw_due_date = str(query.data).split(":", 2)
+            rule_id = int(raw_rule_id)
+            due_date = date.fromisoformat(raw_due_date).isoformat()
+        except (TypeError, ValueError):
+            await query.edit_message_text("Invalid DCA skip action.")
+            return
+        with open_connection(sqlite_path) as connection:
+            initialize_database(connection)
+            status = skip_scheduled_dca_occurrence(
+                connection,
+                rule_id=rule_id,
+                due_date=due_date,
+            )
+        await query.edit_message_text(_dca_skip_response(status, rule_id, due_date))
+
     async def manual_add_confirm_callback(
         update: Update,
         context: ContextTypes.DEFAULT_TYPE,
@@ -2173,6 +2392,10 @@ def build_command_handlers(
                     "\nUnestimated manual additions still require another "
                     "/sync_position after the platform units settle."
                 )
+            if any(key.startswith("dca:") for key in draft.item_keys):
+                message += (
+                    "\nPending fixed DCA estimates remain eligible for NAV processing."
+                )
         draft.completed_message = message
         await query.edit_message_text(message)
 
@@ -2199,9 +2422,11 @@ def build_command_handlers(
                 end_date=_clock_now(clock).astimezone(timezone_info).date(),
             )
             planned_funds = set(list_enabled_drawdown_plan_fund_symbols(connection))
+            dca_statuses = list_enhanced_dca_statuses(connection)
+            dca_funds = {str(row["fund_symbol"]) for row in dca_statuses}
             evaluated_funds = {
                 status.config.investment_fund_symbol for status in result.statuses
-            }
+            } | dca_funds
             unmatched_rows = [
                 row
                 for row in list_position_snapshots(connection)
@@ -2232,7 +2457,7 @@ def build_command_handlers(
                 unmatched_positions.append((row, nav, ownership))
         await _reply_text(
             update,
-            format_plan_overview(result, unmatched_positions),
+            format_plan_overview(result, unmatched_positions, dca_statuses),
         )
 
     async def delete_rule_command(
@@ -2253,9 +2478,9 @@ def build_command_handlers(
 
         with open_connection(sqlite_path) as connection:
             initialize_database(connection)
-            rule_type = next(
+            rule_identity = next(
                 (
-                    str(row["type"])
+                    (str(row["type"]), str(row["asset_type"]))
                     for row in db_list_rules(connection)
                     if int(row["id"]) == rule_id
                 ),
@@ -2263,8 +2488,10 @@ def build_command_handlers(
             )
             removed = delete_rule(connection, rule_id)
 
-        if removed and rule_type == "drawdown_plan":
+        if removed and rule_identity == ("drawdown_plan", "cn_etf"):
             await _reply_text(update, f"Disabled drawdown plan id={rule_id}")
+        elif removed and rule_identity == (DCA_RULE_TYPE, "cn_open_fund"):
+            await _reply_text(update, f"Disabled fixed DCA rule id={rule_id}")
         elif removed:
             await _reply_text(update, f"Deleted rule id={rule_id}")
         else:
@@ -2282,7 +2509,10 @@ def build_command_handlers(
                 include_latest=True,
             )
             profit_result = evaluate_profit_rules(connection, market_data_provider)
-            dca_result = evaluate_dca_rules(connection)
+            dca_result = evaluate_dca_rules(
+                connection,
+                market_calendar=market_calendar,
+            )
             plan_status_result = read_drawdown_plan_statuses(
                 connection,
                 market_data_provider,
@@ -2374,6 +2604,7 @@ def build_command_handlers(
         CommandHandler("set_fund_fee", set_fund_fee),
         CommandHandler("set_fund_cutoff", set_fund_cutoff),
         CommandHandler("sync_position", sync_position),
+        CommandHandler("dca_skip", dca_skip),
         CommandHandler("list", list_rules),
         CommandHandler("plans", plans),
         CommandHandler("del", delete_rule_command),
@@ -2398,6 +2629,7 @@ def build_command_handlers(
             position_sync_callback,
             pattern=r"^position_sync:",
         ),
+        CallbackQueryHandler(dca_skip_callback, pattern=r"^dca_skip:"),
         CommandHandler("test_notify", test_notify),
     ]
 

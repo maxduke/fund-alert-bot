@@ -44,6 +44,12 @@ class FakeAkshare:
             }
         )
 
+    def fund_individual_basic_info_xq(self, **kwargs: Any) -> pd.DataFrame:
+        self.calls.append(("fund_individual_basic_info_xq", kwargs))
+        return pd.DataFrame(
+            {"item": ["基金代码", "基金类型"], "value": ["110026", "指数型-股票"]}
+        )
+
     def stock_zh_index_daily_em(self, **kwargs: Any) -> pd.DataFrame:
         self.calls.append(("stock_zh_index_daily_em", kwargs))
         return _english_price_history()
@@ -91,6 +97,16 @@ def test_etf_history_normalizes_to_shared_schema() -> None:
                 "adjust": "",
             },
         )
+    ]
+
+
+def test_fund_type_uses_single_symbol_xueqiu_metadata_request() -> None:
+    fake_ak = FakeAkshare()
+    provider = AkshareMarketDataProvider(ak_module=fake_ak, retry_delay_seconds=0)
+
+    assert provider.get_fund_type("110026") == "指数型-股票"
+    assert fake_ak.calls == [
+        ("fund_individual_basic_info_xq", {"symbol": "110026", "timeout": 10})
     ]
 
 

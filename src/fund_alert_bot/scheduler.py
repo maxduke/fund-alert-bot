@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 from fund_alert_bot.checks import (
     AlertNotification,
     DrawdownPlanCheckResult,
+    ManualAddSettlementResult,
     RuleNoDataSkip,
     evaluate_dca_rules,
     evaluate_drawdown_plan_prealerts,
@@ -20,6 +21,7 @@ from fund_alert_bot.checks import (
     evaluate_profit_rules,
     format_delayed_drawdown_plan_message,
     process_manual_add_estimates,
+    process_scheduled_dca_occurrences,
     reserve_drawdown_plan_data_unavailable_notice,
 )
 from fund_alert_bot.config import NotificationSettings
@@ -261,6 +263,7 @@ def register_jobs(
             "sqlite_path": sqlite_path,
             "allowed_user_ids": frozenset(allowed_user_ids),
             "timezone": timezone,
+            "market_calendar": market_calendar,
             "notification_settings": notification_settings,
         },
         replace_existing=True,
@@ -605,11 +608,34 @@ async def run_scheduled_fund_nav_process(
         )
         with open_connection(sqlite_path) as connection:
             initialize_database(connection)
-            result = process_manual_add_estimates(
+            nav_cache: dict[tuple[str, date], Any] = {}
+            nav_errors: dict[tuple[str, date], Exception] = {}
+            dca_result = process_scheduled_dca_occurrences(
                 connection,
                 market_data_provider,
                 market_calendar,
                 processing_date=processing_date,
+                nav_cache=nav_cache,
+                nav_errors=nav_errors,
+            )
+            manual_result = process_manual_add_estimates(
+                connection,
+                market_data_provider,
+                market_calendar,
+                processing_date=processing_date,
+                nav_cache=nav_cache,
+                nav_errors=nav_errors,
+            )
+            result = ManualAddSettlementResult(
+                checked_estimates=(
+                    dca_result.checked_estimates + manual_result.checked_estimates
+                ),
+                notifications=manual_result.notifications,
+                no_data_skips=[
+                    *dca_result.no_data_skips,
+                    *manual_result.no_data_skips,
+                ],
+                errors=[*dca_result.errors, *manual_result.errors],
             )
             data_notice = reserve_drawdown_plan_data_unavailable_notice(
                 connection,
@@ -664,6 +690,7 @@ async def run_scheduled_dca_check(
     sqlite_path: str | Path,
     allowed_user_ids: Collection[int],
     timezone: str | tzinfo,
+    market_calendar: MarketCalendar | None = None,
     run_date: date | None = None,
     notification_settings: NotificationSettings | None = None,
 ) -> None:
@@ -682,7 +709,11 @@ async def run_scheduled_dca_check(
         )
         with open_connection(sqlite_path) as connection:
             initialize_database(connection)
-            result = evaluate_dca_rules(connection, today=check_date)
+            result = evaluate_dca_rules(
+                connection,
+                today=check_date,
+                market_calendar=market_calendar,
+            )
 
         for error in result.errors:
             LOGGER.warning(

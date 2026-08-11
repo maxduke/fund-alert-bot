@@ -1,9 +1,9 @@
 # Investment Plan Enhancement Guide
 
-> Status: Drawdown Add Plans, before-close actions, Manual Add Estimates, and
-> Position Sync reconciliation are implemented. Enhanced automatic DCA position
-> estimates and position-linked Price-Gain Reminders remain planned sections in
-> this guide. Generic allocation rebalancing is deferred.
+> Status: Drawdown Add Plans, before-close actions, Manual Add Estimates,
+> Position Sync reconciliation, and enhanced fixed DCA position estimates are
+> implemented. Position-linked Price-Gain Reminders remain planned. Generic
+> allocation rebalancing is deferred.
 
 This enhancement adds Drawdown Add Plans, informational long-term trend context,
 low-maintenance DCA position estimates, Position Syncs, and cost-based
