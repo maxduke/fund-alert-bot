@@ -2,6 +2,7 @@ services:
   fund-alert-bot:
     image: ghcr.io/maxduke/fund-alert-bot:latest
     restart: unless-stopped
+    user: "${BOT_UID:-1000}:${BOT_GID:-1000}"
     env_file: .env
     volumes:
       - ./data:/app/data

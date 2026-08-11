@@ -59,6 +59,13 @@ Copy `.env.example` from this repository to:
 /opt/fund-alert-bot/.env
 ```
 
+Record the owner IDs of the deployment directory:
+
+```bash
+id -u
+id -g
+```
+
 ## 3. Create `.env`
 
 Edit `/opt/fund-alert-bot/.env` and replace placeholders with this bot's
@@ -76,6 +83,8 @@ Minimum configuration:
 ```dotenv
 TELEGRAM_BOT_TOKEN=replace-with-fund-alert-bot-token
 TELEGRAM_ALLOWED_USER_IDS=
+BOT_UID=1000
+BOT_GID=1000
 SQLITE_PATH=/app/data/fund_alert_bot.sqlite3
 TZ=Asia/Shanghai
 AFTER_CLOSE_CHECK_TIME=17:10
@@ -83,6 +92,11 @@ BEFORE_CLOSE_CHECK_TIME=14:50
 DCA_REMINDER_TIME=09:30
 FUND_NAV_PROCESS_TIME=08:30
 ```
+
+Replace `BOT_UID` and `BOT_GID` with the two values printed by `id -u` and
+`id -g`. Compose uses them for the non-root bot process so it can write the
+host-owned `data` directory. A mismatch prevents SQLite from opening; do not
+work around it with world-writable permissions.
 
 Keep `.env` on the VPS only. Do not commit real secrets.
 
@@ -104,6 +118,13 @@ From `/opt/fund-alert-bot`, pull the image and start the service:
 ```bash
 docker compose pull
 docker compose up -d
+```
+
+Verify that the configured process can write its data directory before relying
+on scheduled reminders:
+
+```bash
+docker compose run --rm --entrypoint sh fund-alert-bot -c 'test -w /app/data'
 ```
 
 Follow logs:
