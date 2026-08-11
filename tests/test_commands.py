@@ -1476,6 +1476,14 @@ def test_plans_and_check_show_plan_state_without_mutation(tmp_path) -> None:
                 "sma_slope_window": 20,
             },
         )
+        add_rule(
+            connection,
+            type=PROFIT_RULE_TYPE,
+            symbol="000009",
+            name="broken",
+            asset_type=AssetType.CN_OPEN_FUND.value,
+            params={"cost": "auto"},
+        )
     provider = FakeProvider(_plan_history([100, 80]))
     handlers = build_command_handlers(
         {123},
@@ -1496,6 +1504,19 @@ def test_plans_and_check_show_plan_state_without_mutation(tmp_path) -> None:
             SimpleNamespace(bot=FakeBot(), args=[]),
         )
     )
+    setup_data = message.reply_markups[0].inline_keyboard[0][0].callback_data
+    setup_query = FakeCallbackQuery(setup_data)
+    asyncio.run(
+        _callback_by_name(handlers, "position_profit_setup_callback").callback(
+            SimpleNamespace(
+                effective_user=SimpleNamespace(id=123),
+                effective_chat=SimpleNamespace(id=456),
+                effective_message=message,
+                callback_query=setup_query,
+            ),
+            SimpleNamespace(),
+        )
+    )
     asyncio.run(
         _handler_by_command(handlers, "check").callback(
             update,
@@ -1510,6 +1531,10 @@ def test_plans_and_check_show_plan_state_without_mutation(tmp_path) -> None:
         ]
 
     assert "Drawdown: -20.0%" in message.replies[0]
+    assert "Template: /add_profit cn_open_fund 000001 A500 auto" in message.replies[0]
+    assert setup_data == "profit_setup:000001"
+    assert "/add_profit cn_open_fund 000001 A500 auto" in setup_query.edits[0]
+    assert "No rule was created by this button." in setup_query.edits[0]
     assert "Next open tier: -15% / ¥5,000" in message.replies[0]
     assert "Drawdown Add Plan status (read-only)" in message.replies[1]
     assert "Read-only Drawdown Add Plans checked: 1" in message.replies[1]

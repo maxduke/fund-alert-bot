@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 
 from fund_alert_bot.checks import (
     DCA_RULE_TYPE,
+    DRAW_DOWN_PLAN_RULE_TYPE,
     DRAW_DOWN_RULE_TYPE,
     PROFIT_RULE_TYPE,
     DcaCheckResult,
@@ -1127,6 +1128,7 @@ def format_plan_overview(
     unmatched_positions: Sequence[tuple[Any, FundNav | None, str]] = (),
     dca_statuses: Sequence[Any] = (),
     profit_statuses: Sequence[Any] = (),
+    profit_setup_funds: Sequence[tuple[str, str]] = (),
 ) -> str:
     """Format concise `/plans` output."""
 
@@ -1135,14 +1137,34 @@ def format_plan_overview(
         and not unmatched_positions
         and not dca_statuses
         and not profit_statuses
+        and not profit_setup_funds
         and not result.no_data_skips
         and not result.errors
     ):
         return "No investment plans or positions configured."
     lines = ["📊 Investment Plans"]
     for row in profit_statuses:
-        params = _load_params(str(row["params_json"]))
-        thresholds = [float(value) for value in params["thresholds"]]
+        try:
+            params = _load_params(str(row["params_json"]))
+            thresholds = [float(value) for value in params["thresholds"]]
+            threshold_keys = [
+                format_profit_threshold_key(value) for value in thresholds
+            ]
+            if (
+                not thresholds
+                or any(
+                    not math.isfinite(value) or value <= 0 or value >= 1
+                    for value in thresholds
+                )
+                or thresholds != sorted(thresholds)
+                or len(threshold_keys) != len(set(threshold_keys))
+            ):
+                raise ValueError("invalid thresholds")
+        except (KeyError, TypeError, ValueError):
+            LOGGER.warning(
+                "Skipping malformed Price-Gain status rule_id=%s", row["rule_id"]
+            )
+            continue
         lines.extend(
             (
                 "",
@@ -1238,6 +1260,16 @@ def format_plan_overview(
                 f"Position value: ¥{units * nav.value:,.2f} using NAV "
                 f"{nav.value:.12g} on {nav.date}"
             )
+    for fund_symbol, name in profit_setup_funds:
+        safe_name = re.sub(r"\s+", "_", name.strip()) or fund_symbol
+        lines.extend(
+            (
+                "",
+                f"Price-Gain setup available for {fund_symbol} / {name}",
+                "Template: /add_profit cn_open_fund "
+                f"{fund_symbol} {safe_name} auto <thresholds，例如20,30>",
+            )
+        )
     _append_plan_failures(lines, result)
     return "\n".join(lines)
 
@@ -1518,6 +1550,7 @@ def build_command_handlers(
     plan_drafts: dict[str, DrawdownPlanDraft] = {}
     manual_add_drafts: dict[str, ManualAddDraft] = {}
     position_sync_drafts: dict[str, PositionSyncDraft] = {}
+    profit_setup_names: dict[tuple[int, str], str] = {}
     clock = now_factory or (lambda: datetime.now(UTC))
     timezone_info = ZoneInfo(timezone)
     cn_market_timezone = ZoneInfo("Asia/Shanghai")
@@ -2680,6 +2713,7 @@ def build_command_handlers(
         del context
         if await reject_if_unauthorized(update, allowed_user_ids):
             return
+        user_id = int(update.effective_user.id)
         with open_connection(sqlite_path) as connection:
             initialize_database(connection)
             result = read_drawdown_plan_statuses(
@@ -2690,13 +2724,15 @@ def build_command_handlers(
             planned_funds = set(list_enabled_drawdown_plan_fund_symbols(connection))
             dca_statuses = list_enhanced_dca_statuses(connection)
             profit_statuses = list_position_profit_statuses(connection)
+            all_rules = db_list_rules(connection)
             dca_funds = {str(row["fund_symbol"]) for row in dca_statuses}
             evaluated_funds = {
                 status.config.investment_fund_symbol for status in result.statuses
             } | dca_funds
+            position_rows = list_position_snapshots(connection)
             unmatched_rows = [
                 row
-                for row in list_position_snapshots(connection)
+                for row in position_rows
                 if row["fund_symbol"] not in evaluated_funds
             ]
             unmatched_positions = []
@@ -2722,6 +2758,56 @@ def build_command_handlers(
                     else "no enabled Drawdown Add Plan"
                 )
                 unmatched_positions.append((row, nav, ownership))
+            known_funds = {
+                status.config.investment_fund_symbol: status.name
+                for status in result.statuses
+            }
+            for row in all_rules:
+                if not bool(row["enabled"]) or row["type"] != DRAW_DOWN_PLAN_RULE_TYPE:
+                    continue
+                try:
+                    params = _load_params(str(row["params_json"]))
+                    fund_symbol = str(params["investment_fund_symbol"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                known_funds.setdefault(fund_symbol, str(row["name"]))
+            known_funds.update(
+                (str(row["fund_symbol"]), str(row["name"])) for row in dca_statuses
+            )
+            for row in position_rows:
+                symbol = str(row["fund_symbol"])
+                known_funds.setdefault(symbol, symbol)
+            profit_funds = {
+                str(row["symbol"])
+                for row in all_rules
+                if bool(row["enabled"]) and is_auto_cost_profit_rule(row)
+            }
+            profit_setup_funds = sorted(
+                (symbol, name)
+                for symbol, name in known_funds.items()
+                if symbol not in profit_funds
+            )
+            for key in tuple(profit_setup_names):
+                if key[0] == user_id:
+                    profit_setup_names.pop(key)
+            profit_setup_names.update(
+                ((user_id, symbol), name) for symbol, name in profit_setup_funds
+            )
+        markup = None
+        if profit_setup_funds:
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+            markup = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            f"Set gain thresholds — {symbol}",
+                            callback_data=f"profit_setup:{symbol}",
+                        )
+                    ]
+                    for symbol, _name in profit_setup_funds
+                ]
+            )
         await _reply_text(
             update,
             format_plan_overview(
@@ -2729,7 +2815,35 @@ def build_command_handlers(
                 unmatched_positions,
                 dca_statuses,
                 profit_statuses,
+                profit_setup_funds,
             ),
+            reply_markup=markup,
+        )
+
+    async def position_profit_setup_callback(
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        del context
+        query = getattr(update, "callback_query", None)
+        if query is None:
+            return
+        await query.answer()
+        if await reject_if_unauthorized(update, allowed_user_ids):
+            return
+        symbol = str(getattr(query, "data", "")).removeprefix("profit_setup:")
+        name = profit_setup_names.get((int(update.effective_user.id), symbol))
+        if name is None:
+            await query.edit_message_text(
+                "Price-Gain setup is no longer available. Run /plans again."
+            )
+            return
+        safe_name = re.sub(r"\s+", "_", name.strip()) or symbol
+        await query.edit_message_text(
+            "Edit the threshold placeholder, then send this separate command:\n"
+            f"/add_profit cn_open_fund {symbol} {safe_name} auto "
+            "<thresholds，例如20,30>\n\n"
+            "No rule was created by this button."
         )
 
     async def delete_rule_command(
@@ -2914,6 +3028,10 @@ def build_command_handlers(
             pattern=r"^position_sync:",
         ),
         CallbackQueryHandler(dca_skip_callback, pattern=r"^dca_skip:"),
+        CallbackQueryHandler(
+            position_profit_setup_callback,
+            pattern=r"^profit_setup:[0-9]{6}$",
+        ),
         CallbackQueryHandler(
             position_profit_action_callback,
             pattern=r"^profit_action:[0-9]+:(?:partial|close|none)$",
