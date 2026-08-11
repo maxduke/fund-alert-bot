@@ -1654,6 +1654,17 @@ def test_auto_profit_preview_and_position_actions(tmp_path) -> None:
         event_id = result.notifications[0].event_id
     assert "Preview only; no threshold was consumed" in message.replies[0]
 
+    active_plans_message = FakeMessage()
+    update.effective_message = active_plans_message
+    asyncio.run(
+        _handler_by_command(handlers, "plans").callback(
+            update,
+            SimpleNamespace(bot=FakeBot(), args=[]),
+        )
+    )
+    assert "Position: exact; last sync" in active_plans_message.replies[0]
+    assert "Position value: ¥130.00" in active_plans_message.replies[0]
+
     partial_query = FakeCallbackQuery(f"profit_action:{event_id}:partial")
     callback_update = SimpleNamespace(
         effective_user=SimpleNamespace(id=123),
@@ -1688,16 +1699,16 @@ def test_auto_profit_preview_and_position_actions(tmp_path) -> None:
         assert get_position_snapshot(connection, "000001")["units"] == 0
         assert get_active_position_cycle(connection, "000001") is None
 
-    plans_message = FakeMessage()
-    update.effective_message = plans_message
+    closed_plans_message = FakeMessage()
+    update.effective_message = closed_plans_message
     asyncio.run(
         _handler_by_command(handlers, "plans").callback(
             update,
             SimpleNamespace(bot=FakeBot(), args=[]),
         )
     )
-    assert "Position: closed (exact zero units)" in plans_message.replies[0]
-    assert "remember /sync_position" not in plans_message.replies[0]
+    assert "Position: closed (exact zero units)" in closed_plans_message.replies[0]
+    assert "remember /sync_position" not in closed_plans_message.replies[0]
 
 
 def test_delete_command_reports_disabled_drawdown_plan(tmp_path) -> None:

@@ -2664,12 +2664,9 @@ def build_command_handlers(
             dca_statuses = list_enhanced_dca_statuses(connection)
             profit_statuses = list_position_profit_statuses(connection)
             dca_funds = {str(row["fund_symbol"]) for row in dca_statuses}
-            profit_funds = {str(row["fund_symbol"]) for row in profit_statuses}
-            evaluated_funds = (
-                {status.config.investment_fund_symbol for status in result.statuses}
-                | dca_funds
-                | profit_funds
-            )
+            evaluated_funds = {
+                status.config.investment_fund_symbol for status in result.statuses
+            } | dca_funds
             unmatched_rows = [
                 row
                 for row in list_position_snapshots(connection)
