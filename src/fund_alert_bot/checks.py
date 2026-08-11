@@ -22,6 +22,7 @@ from fund_alert_bot.db import (
     get_active_position_cycle,
     get_fund_settings,
     get_position_snapshot,
+    has_position_profit_evaluation,
     list_drawdown_tier_records,
     list_enabled_rules,
     list_manual_add_actions,
@@ -30,6 +31,7 @@ from fund_alert_bot.db import (
     list_position_profit_threshold_keys,
     persist_drawdown_plan_evaluation,
     persist_position_profit_alert,
+    record_position_profit_evaluation,
     reserve_alert_event,
     set_scheduled_dca_effective_date,
     skip_scheduled_dca_occurrence,
@@ -1411,6 +1413,14 @@ def evaluate_position_profit_rules(
             configured_thresholds = _load_params(str(row["params_json"]))["thresholds"]
             if len(recorded_threshold_keys) >= len(configured_thresholds):
                 continue
+            nav_date = expected_date.isoformat()
+            if has_position_profit_evaluation(
+                connection,
+                rule_id=rule_id,
+                position_cycle_id=cycle_id,
+                nav_date=nav_date,
+            ):
+                continue
             nav_key = (symbol, expected_date)
             if nav_key in cached_errors:
                 raise cached_errors[nav_key]
@@ -1438,6 +1448,12 @@ def evaluate_position_profit_rules(
                 recorded_threshold_keys=recorded_threshold_keys,
             )
             if built is None:
+                record_position_profit_evaluation(
+                    connection,
+                    rule_id=rule_id,
+                    position_cycle_id=cycle_id,
+                    nav_date=nav_date,
+                )
                 continue
             alert, thresholds = built
             event_id = persist_position_profit_alert(
@@ -1446,6 +1462,7 @@ def evaluate_position_profit_rules(
                 position_cycle_id=cycle_id,
                 alert=alert,
                 thresholds=thresholds,
+                nav_date=nav_date,
             )
             LOGGER.info(
                 "Position-linked Price-Gain reserved rule_id=%s symbol=%s "

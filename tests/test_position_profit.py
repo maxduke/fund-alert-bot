@@ -10,10 +10,13 @@ from fund_alert_bot import scheduler
 from fund_alert_bot.checks import evaluate_position_profit_rules
 from fund_alert_bot.commands import CommandParseError, parse_add_profit_args
 from fund_alert_bot.db import (
+    add_alert_event,
     add_position_profit_rule,
+    delete_rule,
     get_active_position_cycle,
     init_db,
     list_position_profit_threshold_keys,
+    list_retryable_drawdown_plan_alert_events,
     list_retryable_position_profit_alert_events,
     open_connection,
     upsert_position_snapshot,
@@ -185,6 +188,64 @@ def test_stale_nav_and_missing_position_never_emit(tmp_path) -> None:
         assert stale.no_data_skips
 
 
+def test_same_nav_date_is_not_replayed_after_cost_sync(tmp_path) -> None:
+    with open_connection(tmp_path / "fund-alert.sqlite3") as connection:
+        init_db(connection)
+        add_position_profit_rule(
+            connection,
+            fund_symbol="000001",
+            name="A500 feeder",
+            thresholds=(0.2, 0.3),
+        )
+        upsert_position_snapshot(
+            connection,
+            fund_symbol="000001",
+            units=100,
+            average_unit_cost=1,
+        )
+        provider = NavProvider(
+            FundNav("000001", date(2024, 1, 2), 1.25, "akshare_eastmoney")
+        )
+        assert (
+            len(
+                evaluate_position_profit_rules(
+                    connection,
+                    provider,
+                    OpenCalendar(),
+                    processing_date=date(2024, 1, 3),
+                ).notifications
+            )
+            == 1
+        )
+
+        upsert_position_snapshot(
+            connection,
+            fund_symbol="000001",
+            units=100,
+            average_unit_cost=0.9,
+        )
+        assert not evaluate_position_profit_rules(
+            connection,
+            provider,
+            OpenCalendar(),
+            processing_date=date(2024, 1, 3),
+        ).notifications
+        assert len(provider.calls) == 1
+
+        provider.nav = FundNav("000001", date(2024, 1, 3), 1.25, "akshare_eastmoney")
+        assert (
+            len(
+                evaluate_position_profit_rules(
+                    connection,
+                    provider,
+                    OpenCalendar(),
+                    processing_date=date(2024, 1, 4),
+                ).notifications
+            )
+            == 1
+        )
+
+
 def test_failed_delivery_retries_without_reopening_threshold(tmp_path) -> None:
     sqlite_path = tmp_path / "fund-alert.sqlite3"
     with open_connection(sqlite_path) as connection:
@@ -220,6 +281,8 @@ def test_failed_delivery_retries_without_reopening_threshold(tmp_path) -> None:
         )
         == 1
     )
+    with open_connection(sqlite_path) as connection:
+        assert delete_rule(connection, rule_id)
     bot = RecordingBot()
     assert (
         asyncio.run(
@@ -245,3 +308,27 @@ def test_failed_delivery_retries_without_reopening_threshold(tmp_path) -> None:
         ) == {"0.2"}
     assert len(bot.messages) == 1
     assert bot.messages[0]["reply_markup"] is not None
+
+
+def test_fund_nav_data_notice_uses_existing_retry_path(tmp_path) -> None:
+    with open_connection(tmp_path / "fund-alert.sqlite3") as connection:
+        init_db(connection)
+        rule_id = add_position_profit_rule(
+            connection,
+            fund_symbol="000001",
+            name="A500 feeder",
+            thresholds=(0.2,),
+        )
+        event_id = add_alert_event(
+            connection,
+            rule_id=rule_id,
+            alert_key="data_unavailable:fund_nav:2024-01-03",
+            title="Feeder-fund data unavailable",
+            message="No exact NAV.",
+            payload={"phase": "fund_nav", "data_date": "2024-01-03"},
+        )
+
+        assert [
+            int(row["id"])
+            for row in list_retryable_drawdown_plan_alert_events(connection)
+        ] == [event_id]

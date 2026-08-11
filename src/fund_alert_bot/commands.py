@@ -1151,8 +1151,12 @@ def format_plan_overview(
                 + ", ".join(format_plan_percent(value) for value in thresholds),
             )
         )
-        if row["position_cycle_id"] is None or row["units"] is None:
+        if row["units"] is None:
             lines.append("Position: unavailable — remember /sync_position")
+        elif float(row["units"]) == 0:
+            lines.append("Position: closed (exact zero units)")
+        elif row["position_cycle_id"] is None:
+            lines.append("Position cycle unavailable — rerun /sync_position")
         else:
             accuracy = "estimated" if row["is_estimated"] else "exact"
             lines.append(

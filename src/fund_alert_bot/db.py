@@ -180,6 +180,14 @@ def init_db(connection: sqlite3.Connection) -> None:
             UNIQUE(rule_id, position_cycle_id, threshold_key)
         );
 
+        CREATE TABLE IF NOT EXISTS position_profit_evaluations (
+            rule_id INTEGER NOT NULL REFERENCES rules(id),
+            position_cycle_id INTEGER NOT NULL REFERENCES position_cycles(id),
+            nav_date TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (rule_id, position_cycle_id, nav_date)
+        );
+
         CREATE TABLE IF NOT EXISTS manual_add_estimates (
             id INTEGER PRIMARY KEY,
             rule_id INTEGER NOT NULL REFERENCES rules(id),
@@ -720,6 +728,47 @@ def list_position_profit_threshold_keys(
     }
 
 
+def has_position_profit_evaluation(
+    connection: sqlite3.Connection,
+    *,
+    rule_id: int,
+    position_cycle_id: int,
+    nav_date: str,
+) -> bool:
+    """Return whether this exact NAV date was already evaluated."""
+
+    return (
+        connection.execute(
+            """
+            SELECT 1 FROM position_profit_evaluations
+            WHERE rule_id = ? AND position_cycle_id = ? AND nav_date = ?
+            """,
+            (rule_id, position_cycle_id, nav_date),
+        ).fetchone()
+        is not None
+    )
+
+
+def record_position_profit_evaluation(
+    connection: sqlite3.Connection,
+    *,
+    rule_id: int,
+    position_cycle_id: int,
+    nav_date: str,
+) -> None:
+    """Remember one successful no-alert evaluation."""
+
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO position_profit_evaluations (
+            rule_id, position_cycle_id, nav_date, created_at
+        ) VALUES (?, ?, ?, ?)
+        """,
+        (rule_id, position_cycle_id, nav_date, _utc_now_text()),
+    )
+    connection.commit()
+
+
 def list_position_profit_statuses(
     connection: sqlite3.Connection,
 ) -> list[sqlite3.Row]:
@@ -764,6 +813,7 @@ def persist_position_profit_alert(
     position_cycle_id: int,
     alert: Any,
     thresholds: Sequence[tuple[str, float]],
+    nav_date: str,
 ) -> int:
     """Atomically reserve one aggregate alert and its individual thresholds."""
 
@@ -797,6 +847,14 @@ def persist_position_profit_alert(
         if any(key in existing for key, _value in thresholds):
             raise sqlite3.IntegrityError("Price-Gain threshold already recorded.")
         now = _utc_now_text()
+        connection.execute(
+            """
+            INSERT INTO position_profit_evaluations (
+                rule_id, position_cycle_id, nav_date, created_at
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (rule_id, position_cycle_id, nav_date, now),
+        )
         cursor = connection.execute(
             """
             INSERT INTO alert_events (
@@ -2410,10 +2468,16 @@ def list_retryable_drawdown_plan_alert_events(
             FROM alert_events AS e
             JOIN rules AS r ON r.id = e.rule_id
             WHERE
-                r.type = 'drawdown_plan'
-                AND e.notification_status IN (?, ?)
-                AND COALESCE(json_extract(e.payload_json, '$.phase'), '')
-                    != 'before_close'
+                e.notification_status IN (?, ?)
+                AND (
+                    (
+                        r.type = 'drawdown_plan'
+                        AND COALESCE(
+                            json_extract(e.payload_json, '$.phase'), ''
+                        ) != 'before_close'
+                    )
+                    OR json_extract(e.payload_json, '$.phase') = 'fund_nav'
+                )
             ORDER BY e.id
             """,
             (ALERT_NOTIFICATION_PENDING, ALERT_NOTIFICATION_FAILED),
@@ -2433,8 +2497,7 @@ def list_retryable_position_profit_alert_events(
             FROM alert_events AS e
             JOIN rules AS r ON r.id = e.rule_id
             WHERE
-                r.enabled = 1
-                AND r.type = 'profit_reminder'
+                r.type = 'profit_reminder'
                 AND json_extract(e.payload_json, '$.phase') = 'position_profit'
                 AND e.notification_status IN (?, ?)
             ORDER BY e.id
@@ -2495,8 +2558,7 @@ def close_position_from_profit_event(
             connection.rollback()
             return False
         if (
-            not bool(event["enabled"])
-            or int(event["active_cycle_id"]) != expected_cycle_id
+            int(event["active_cycle_id"]) != expected_cycle_id
             or float(event["units"] or 0) <= 0
         ):
             raise sqlite3.IntegrityError(
