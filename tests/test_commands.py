@@ -11,6 +11,7 @@ import pytest
 from fund_alert_bot.checks import (
     _drawdown_plan_action_rows,
     evaluate_drawdown_plan_rule,
+    evaluate_position_profit_rules,
 )
 from fund_alert_bot.commands import (
     DCA_RULE_TYPE,
@@ -45,6 +46,7 @@ from fund_alert_bot.db import (
     add_rule,
     connect,
     get_active_drawdown_cycle,
+    get_active_position_cycle,
     get_fund_settings,
     get_position_snapshot,
     init_db,
@@ -97,7 +99,7 @@ EXPECTED_DCA_MESSAGE = "\n".join(
 
 EXPECTED_PROFIT_MESSAGE = "\n".join(
     (
-        "💵 Profit-taking reminder",
+        "💰 Price-Gain reminder",
         "",
         "• Symbol: 159915",
         "• Name: ChiNext ETF",
@@ -107,7 +109,8 @@ EXPECTED_PROFIT_MESSAGE = "\n".join(
         "• Profit rate: 29.7%",
         "• Triggered threshold: 25.0%",
         "",
-        "Reminder: this is not automatic trading and no orders will be placed.",
+        "This is a price-gain reminder only.",
+        "No trade has been placed.",
     )
 )
 
@@ -1473,6 +1476,14 @@ def test_plans_and_check_show_plan_state_without_mutation(tmp_path) -> None:
                 "sma_slope_window": 20,
             },
         )
+        add_rule(
+            connection,
+            type=PROFIT_RULE_TYPE,
+            symbol="000009",
+            name="broken",
+            asset_type=AssetType.CN_OPEN_FUND.value,
+            params={"cost": "auto"},
+        )
     provider = FakeProvider(_plan_history([100, 80]))
     handlers = build_command_handlers(
         {123},
@@ -1493,6 +1504,19 @@ def test_plans_and_check_show_plan_state_without_mutation(tmp_path) -> None:
             SimpleNamespace(bot=FakeBot(), args=[]),
         )
     )
+    setup_data = message.reply_markups[0].inline_keyboard[0][0].callback_data
+    setup_query = FakeCallbackQuery(setup_data)
+    asyncio.run(
+        _callback_by_name(handlers, "position_profit_setup_callback").callback(
+            SimpleNamespace(
+                effective_user=SimpleNamespace(id=123),
+                effective_chat=SimpleNamespace(id=456),
+                effective_message=message,
+                callback_query=setup_query,
+            ),
+            SimpleNamespace(),
+        )
+    )
     asyncio.run(
         _handler_by_command(handlers, "check").callback(
             update,
@@ -1507,6 +1531,10 @@ def test_plans_and_check_show_plan_state_without_mutation(tmp_path) -> None:
         ]
 
     assert "Drawdown: -20.0%" in message.replies[0]
+    assert "Template: /add_profit cn_open_fund 000001 A500 auto" in message.replies[0]
+    assert setup_data == "profit_setup:000001"
+    assert "/add_profit cn_open_fund 000001 A500 auto" in setup_query.edits[0]
+    assert "No rule was created by this button." in setup_query.edits[0]
     assert "Next open tier: -15% / ¥5,000" in message.replies[0]
     assert "Drawdown Add Plan status (read-only)" in message.replies[1]
     assert "Read-only Drawdown Add Plans checked: 1" in message.replies[1]
@@ -1597,6 +1625,206 @@ def test_add_profit_command_persists_rule(tmp_path) -> None:
     ]
 
 
+def test_auto_profit_preview_defers_pending_position_sync(tmp_path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    with open_connection(sqlite_path) as connection:
+        init_db(connection)
+        upsert_position_snapshot(
+            connection,
+            fund_symbol="000001",
+            units=100,
+            average_unit_cost=1,
+        )
+        connection.execute(
+            "UPDATE position_snapshots SET position_sync_required_since = ? "
+            "WHERE fund_symbol = ?",
+            ("2024-01-02T06:00:00+00:00", "000001"),
+        )
+        connection.commit()
+    provider = FakeProvider(
+        _history(["2024-01-02"], [1.3]),
+        nav=FundNav("000001", date(2024, 1, 2), 1.3, "akshare_eastmoney"),
+    )
+    provider.get_fund_type = lambda _symbol: "指数型-股票"
+    handlers = build_command_handlers(
+        {123}, sqlite_path=sqlite_path, market_data_provider=provider
+    )
+    message = FakeMessage()
+    asyncio.run(
+        _handler_by_command(handlers, "add_profit").callback(
+            SimpleNamespace(
+                effective_user=SimpleNamespace(id=123),
+                effective_chat=SimpleNamespace(id=456),
+                effective_message=message,
+            ),
+            SimpleNamespace(
+                bot=FakeBot(),
+                args=["cn_open_fund", "000001", "A500", "auto", "20,30"],
+            ),
+        )
+    )
+    asyncio.run(
+        _handler_by_command(handlers, "plans").callback(
+            SimpleNamespace(
+                effective_user=SimpleNamespace(id=123),
+                effective_chat=SimpleNamespace(id=456),
+                effective_message=message,
+            ),
+            SimpleNamespace(bot=FakeBot(), args=[]),
+        )
+    )
+
+    assert (
+        "Read-only preview unavailable: Position Sync is required."
+        in message.replies[0]
+    )
+    assert "Position Sync required — reminders paused" in message.replies[1]
+    assert provider.nav_calls == []
+
+
+def test_auto_profit_preview_and_position_actions(tmp_path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    with open_connection(sqlite_path) as connection:
+        init_db(connection)
+        upsert_position_snapshot(
+            connection,
+            fund_symbol="000001",
+            units=100,
+            average_unit_cost=1,
+        )
+    provider = FakeProvider(
+        _history(["2024-01-02"], [1.3]),
+        nav=FundNav("000001", date(2024, 1, 2), 1.3, "akshare_eastmoney"),
+    )
+    provider.get_fund_type = lambda _symbol: "指数型-股票"
+    calendar = FakeMarketCalendar(open_dates={date(2024, 1, 2)})
+    handlers = build_command_handlers(
+        {123},
+        sqlite_path=sqlite_path,
+        market_data_provider=provider,
+        market_calendar=calendar,
+        now_factory=lambda: datetime(2024, 1, 3, 8, 30, tzinfo=UTC),
+    )
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        effective_message=message,
+    )
+    asyncio.run(
+        _handler_by_command(handlers, "add_profit").callback(
+            update,
+            SimpleNamespace(
+                bot=FakeBot(),
+                args=["cn_open_fund", "000001", "A500", "auto", "20,30"],
+            ),
+        )
+    )
+
+    with open_connection(sqlite_path) as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM position_profit_thresholds"
+            ).fetchone()[0]
+            == 0
+        )
+        result = evaluate_position_profit_rules(
+            connection,
+            provider,
+            calendar,
+            processing_date=date(2024, 1, 3),
+        )
+        event_id = result.notifications[0].event_id
+    assert "2024-01-02 (akshare_eastmoney)" in message.replies[0]
+    assert "Preview only; no threshold was consumed" in message.replies[0]
+
+    active_plans_message = FakeMessage()
+    update.effective_message = active_plans_message
+    asyncio.run(
+        _handler_by_command(handlers, "plans").callback(
+            update,
+            SimpleNamespace(bot=FakeBot(), args=[]),
+        )
+    )
+    assert "Position: exact; last sync" in active_plans_message.replies[0]
+    assert "Position value: ¥130.00" in active_plans_message.replies[0]
+
+    partial_query = FakeCallbackQuery(f"profit_action:{event_id}:partial")
+    callback_update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        callback_query=partial_query,
+    )
+    asyncio.run(
+        _callback_by_name(handlers, "position_profit_action_callback").callback(
+            callback_update,
+            SimpleNamespace(),
+        )
+    )
+    assert "/sync_position 000001 <remaining_units>" in partial_query.edits[0]
+    with open_connection(sqlite_path) as connection:
+        assert get_position_snapshot(connection, "000001")["units"] == 100
+
+    close_query = FakeCallbackQuery(f"profit_action:{event_id}:close")
+    callback_update.callback_query = close_query
+    action_handler = _callback_by_name(handlers, "position_profit_action_callback")
+    asyncio.run(action_handler.callback(callback_update, SimpleNamespace()))
+    assert close_query.reply_markups
+    confirm_data = close_query.reply_markups[0].inline_keyboard[0][0].callback_data
+    confirm_query = FakeCallbackQuery(confirm_data)
+    callback_update.callback_query = confirm_query
+    asyncio.run(
+        _callback_by_name(handlers, "position_profit_close_callback").callback(
+            callback_update,
+            SimpleNamespace(),
+        )
+    )
+    with open_connection(sqlite_path) as connection:
+        assert get_position_snapshot(connection, "000001")["units"] == 0
+        assert get_active_position_cycle(connection, "000001") is None
+
+    closed_plans_message = FakeMessage()
+    update.effective_message = closed_plans_message
+    asyncio.run(
+        _handler_by_command(handlers, "plans").callback(
+            update,
+            SimpleNamespace(bot=FakeBot(), args=[]),
+        )
+    )
+    assert "Position: closed (exact zero units)" in closed_plans_message.replies[0]
+    assert "remember /sync_position" not in closed_plans_message.replies[0]
+
+
+def test_auto_profit_rejects_qdii_before_saving(tmp_path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    provider = FakeProvider(_history(["2024-01-02"], [1.3]))
+    provider.get_fund_type = lambda _symbol: "QDII-普通股票"
+    handlers = build_command_handlers(
+        {123},
+        sqlite_path=sqlite_path,
+        market_data_provider=provider,
+    )
+    message = FakeMessage()
+    asyncio.run(
+        _handler_by_command(handlers, "add_profit").callback(
+            SimpleNamespace(
+                effective_user=SimpleNamespace(id=123),
+                effective_chat=SimpleNamespace(id=456),
+                effective_message=message,
+            ),
+            SimpleNamespace(
+                bot=FakeBot(),
+                args=["cn_open_fund", "000001", "QDII", "auto", "20"],
+            ),
+        )
+    )
+
+    with open_connection(sqlite_path) as connection:
+        init_db(connection)
+        assert list_rules(connection) == []
+    assert "does not use the domestic CN valuation calendar" in message.replies[0]
+
+
 def test_delete_command_reports_disabled_drawdown_plan(tmp_path) -> None:
     sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
     with open_connection(sqlite_path) as connection:
@@ -1627,6 +1855,47 @@ def test_delete_command_reports_disabled_drawdown_plan(tmp_path) -> None:
     assert rule["enabled"] == 0
     assert "status=disabled" in format_rules_list([rule])
     assert message.replies == [f"Disabled drawdown plan id={rule_id}"]
+
+
+@pytest.mark.parametrize("malformed", [False, True])
+def test_delete_command_keeps_legacy_open_fund_behavior(
+    tmp_path,
+    malformed: bool,
+) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    with open_connection(sqlite_path) as connection:
+        init_db(connection)
+        rule_id = add_rule(
+            connection,
+            type=PROFIT_RULE_TYPE,
+            symbol="000001",
+            name="A500",
+            asset_type=AssetType.CN_OPEN_FUND.value,
+            params={"cost": 1.2, "thresholds": [0.2]},
+        )
+        if malformed:
+            connection.execute(
+                "UPDATE rules SET params_json = '{' WHERE id = ?", (rule_id,)
+            )
+            connection.commit()
+
+    handlers = build_command_handlers({123}, sqlite_path=sqlite_path)
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        effective_message=message,
+    )
+    asyncio.run(
+        _handler_by_command(handlers, "del").callback(
+            update,
+            SimpleNamespace(bot=FakeBot(), args=[str(rule_id)]),
+        )
+    )
+
+    with open_connection(sqlite_path) as connection:
+        assert list_rules(connection) == []
+    assert message.replies == [f"Deleted rule id={rule_id}"]
 
 
 def test_check_sends_due_dca_without_market_data_fetch(tmp_path) -> None:

@@ -156,6 +156,38 @@ def init_db(connection: sqlite3.Connection) -> None:
             )
         );
 
+        CREATE TABLE IF NOT EXISTS position_cycles (
+            id INTEGER PRIMARY KEY,
+            fund_symbol TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            ended_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS position_cycles_one_active_fund
+        ON position_cycles(fund_symbol)
+        WHERE ended_at IS NULL;
+
+        CREATE TABLE IF NOT EXISTS position_profit_thresholds (
+            id INTEGER PRIMARY KEY,
+            rule_id INTEGER NOT NULL REFERENCES rules(id),
+            position_cycle_id INTEGER NOT NULL REFERENCES position_cycles(id),
+            threshold_key TEXT NOT NULL,
+            threshold REAL NOT NULL,
+            alert_event_id INTEGER REFERENCES alert_events(id),
+            created_at TEXT NOT NULL,
+            UNIQUE(rule_id, position_cycle_id, threshold_key)
+        );
+
+        CREATE TABLE IF NOT EXISTS position_profit_evaluations (
+            rule_id INTEGER NOT NULL REFERENCES rules(id),
+            position_cycle_id INTEGER NOT NULL REFERENCES position_cycles(id),
+            nav_date TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (rule_id, position_cycle_id, nav_date)
+        );
+
         CREATE TABLE IF NOT EXISTS manual_add_estimates (
             id INTEGER PRIMARY KEY,
             rule_id INTEGER NOT NULL REFERENCES rules(id),
@@ -226,6 +258,22 @@ def init_db(connection: sqlite3.Connection) -> None:
     )
     _ensure_alert_event_delivery_columns(connection)
     _ensure_fund_settings_columns(connection)
+    now = _utc_now_text()
+    connection.execute(
+        """
+        INSERT INTO position_cycles (
+            fund_symbol, started_at, created_at, updated_at
+        )
+        SELECT
+            p.fund_symbol, p.last_synced_at, ?, ?
+        FROM position_snapshots AS p
+        WHERE p.units > 0 AND NOT EXISTS (
+            SELECT 1 FROM position_cycles AS c
+            WHERE c.fund_symbol = p.fund_symbol AND c.ended_at IS NULL
+        )
+        """,
+        (now, now),
+    )
     connection.commit()
 
 
@@ -347,6 +395,55 @@ def add_enhanced_dca_rule(
                         "holiday_policy": holiday_policy,
                     }
                 ),
+                now,
+                now,
+            ),
+        )
+        connection.commit()
+        return int(cursor.lastrowid)
+    except Exception:
+        connection.rollback()
+        raise
+
+
+def add_position_profit_rule(
+    connection: sqlite3.Connection,
+    *,
+    fund_symbol: str,
+    name: str,
+    thresholds: Sequence[float],
+) -> int:
+    """Add the only enabled auto-cost Price-Gain rule for one feeder fund."""
+
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        duplicate = connection.execute(
+            """
+            SELECT id FROM rules
+            WHERE type = 'profit_reminder' AND asset_type = 'cn_open_fund'
+                AND symbol = ? AND enabled = 1
+                AND json_valid(params_json)
+                AND json_extract(params_json, '$.cost') = 'auto'
+            LIMIT 1
+            """,
+            (fund_symbol,),
+        ).fetchone()
+        if duplicate is not None:
+            raise sqlite3.IntegrityError(
+                "An enabled auto-cost Price-Gain rule already uses this fund."
+            )
+        now = _utc_now_text()
+        cursor = connection.execute(
+            """
+            INSERT INTO rules (
+                type, symbol, name, asset_type, params_json,
+                enabled, created_at, updated_at
+            ) VALUES ('profit_reminder', ?, ?, 'cn_open_fund', ?, 1, ?, ?)
+            """,
+            (
+                fund_symbol,
+                name,
+                _json_text({"cost": "auto", "thresholds": list(thresholds)}),
                 now,
                 now,
             ),
@@ -487,18 +584,32 @@ def list_enabled_rules(connection: sqlite3.Connection) -> list[sqlite3.Row]:
     )
 
 
+def is_auto_cost_profit_rule(rule: Any) -> bool:
+    """Return whether a rule is a valid position-linked Price-Gain rule."""
+
+    if rule["type"] != "profit_reminder" or rule["asset_type"] != "cn_open_fund":
+        return False
+    try:
+        params = json.loads(str(rule["params_json"]))
+    except (json.JSONDecodeError, TypeError):
+        return False
+    return isinstance(params, dict) and params.get("cost") == "auto"
+
+
 def delete_rule(connection: sqlite3.Connection, rule_id: int) -> bool:
     """Delete a legacy rule or disable a stateful drawdown plan."""
 
     row = connection.execute(
-        "SELECT type, asset_type FROM rules WHERE id = ?",
+        "SELECT type, asset_type, params_json FROM rules WHERE id = ?",
         (rule_id,),
     ).fetchone()
     if row is None:
         return False
 
-    if row["type"] == "drawdown_plan" or (
-        row["type"] == "dca_reminder" and row["asset_type"] == "cn_open_fund"
+    if (
+        row["type"] == "drawdown_plan"
+        or (row["type"] == "dca_reminder" and row["asset_type"] == "cn_open_fund")
+        or is_auto_cost_profit_rule(row)
     ):
         connection.execute(
             "UPDATE rules SET enabled = 0, updated_at = ? WHERE id = ?",
@@ -591,6 +702,279 @@ def get_fund_settings(
     ).fetchone()
 
 
+def get_active_position_cycle(
+    connection: sqlite3.Connection,
+    fund_symbol: str,
+) -> sqlite3.Row | None:
+    """Return the continuous positive-position cycle for one fund."""
+
+    return connection.execute(
+        """
+        SELECT * FROM position_cycles
+        WHERE fund_symbol = ? AND ended_at IS NULL
+        """,
+        (fund_symbol,),
+    ).fetchone()
+
+
+def list_position_profit_threshold_keys(
+    connection: sqlite3.Connection,
+    *,
+    rule_id: int,
+    position_cycle_id: int,
+) -> set[str]:
+    """Return thresholds already recorded for one rule and position cycle."""
+
+    return {
+        str(row["threshold_key"])
+        for row in connection.execute(
+            """
+            SELECT threshold_key FROM position_profit_thresholds
+            WHERE rule_id = ? AND position_cycle_id = ?
+            """,
+            (rule_id, position_cycle_id),
+        ).fetchall()
+    }
+
+
+def has_position_profit_evaluation(
+    connection: sqlite3.Connection,
+    *,
+    rule_id: int,
+    position_cycle_id: int,
+    nav_date: str,
+) -> bool:
+    """Return whether this exact NAV date was already evaluated."""
+
+    return (
+        connection.execute(
+            """
+            SELECT 1 FROM position_profit_evaluations
+            WHERE rule_id = ? AND position_cycle_id = ? AND nav_date = ?
+            """,
+            (rule_id, position_cycle_id, nav_date),
+        ).fetchone()
+        is not None
+    )
+
+
+def _position_profit_state_matches(
+    connection: sqlite3.Connection,
+    *,
+    rule_id: int,
+    position_cycle_id: int,
+    units: float,
+    average_unit_cost: float,
+    is_estimated: bool,
+) -> bool:
+    rule = connection.execute("SELECT * FROM rules WHERE id = ?", (rule_id,)).fetchone()
+    if rule is None or not bool(rule["enabled"]) or not is_auto_cost_profit_rule(rule):
+        return False
+    cycle = connection.execute(
+        "SELECT fund_symbol, ended_at FROM position_cycles WHERE id = ?",
+        (position_cycle_id,),
+    ).fetchone()
+    position = get_position_snapshot(connection, str(rule["symbol"]))
+    settings = get_fund_settings(connection, str(rule["symbol"]))
+    return bool(
+        cycle is not None
+        and cycle["ended_at"] is None
+        and str(cycle["fund_symbol"]) == str(rule["symbol"])
+        and position is not None
+        and float(position["units"]) == units
+        and float(position["average_unit_cost"]) == average_unit_cost
+        and bool(position["is_estimated"]) == is_estimated
+        and position["position_sync_required_since"] is None
+        and (settings is None or settings["position_sync_required_since"] is None)
+    )
+
+
+def record_position_profit_evaluation(
+    connection: sqlite3.Connection,
+    *,
+    rule_id: int,
+    position_cycle_id: int,
+    nav_date: str,
+    position: Any,
+) -> None:
+    """Remember one successful no-alert evaluation."""
+
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        if not _position_profit_state_matches(
+            connection,
+            rule_id=rule_id,
+            position_cycle_id=position_cycle_id,
+            units=float(position["units"]),
+            average_unit_cost=float(position["average_unit_cost"]),
+            is_estimated=bool(position["is_estimated"]),
+        ):
+            raise sqlite3.IntegrityError("Position-linked gain state changed.")
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO position_profit_evaluations (
+                rule_id, position_cycle_id, nav_date, created_at
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (rule_id, position_cycle_id, nav_date, _utc_now_text()),
+        )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+
+
+def list_position_profit_statuses(
+    connection: sqlite3.Connection,
+) -> list[sqlite3.Row]:
+    """Return enabled auto-cost Price-Gain rules with current position state."""
+
+    return list(
+        connection.execute(
+            """
+            SELECT
+                r.id AS rule_id,
+                r.symbol AS fund_symbol,
+                r.name,
+                r.params_json,
+                p.units,
+                p.average_unit_cost,
+                p.is_estimated,
+                p.last_synced_at,
+                p.position_sync_required_since AS snapshot_sync_required_since,
+                fs.position_sync_required_since AS settings_sync_required_since,
+                c.id AS position_cycle_id,
+                COUNT(t.id) AS reached_thresholds
+            FROM rules AS r
+            LEFT JOIN position_snapshots AS p ON p.fund_symbol = r.symbol
+            LEFT JOIN fund_settings AS fs ON fs.fund_symbol = r.symbol
+            LEFT JOIN position_cycles AS c
+                ON c.fund_symbol = r.symbol AND c.ended_at IS NULL
+            LEFT JOIN position_profit_thresholds AS t
+                ON t.rule_id = r.id AND t.position_cycle_id = c.id
+            WHERE
+                r.enabled = 1
+                AND r.type = 'profit_reminder'
+                AND r.asset_type = 'cn_open_fund'
+                AND json_valid(r.params_json)
+                AND json_extract(r.params_json, '$.cost') = 'auto'
+            GROUP BY r.id, p.fund_symbol, c.id
+            ORDER BY r.id
+            """
+        ).fetchall()
+    )
+
+
+def persist_position_profit_alert(
+    connection: sqlite3.Connection,
+    *,
+    rule_id: int,
+    position_cycle_id: int,
+    alert: Any,
+    thresholds: Sequence[tuple[str, float]],
+    nav_date: str,
+) -> int:
+    """Atomically reserve one aggregate alert and its individual thresholds."""
+
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        payload = alert["payload"]
+        if not _position_profit_state_matches(
+            connection,
+            rule_id=rule_id,
+            position_cycle_id=position_cycle_id,
+            units=float(payload["position_units"]),
+            average_unit_cost=float(payload["average_unit_cost"]),
+            is_estimated=payload["accuracy"] == "estimated",
+        ):
+            raise sqlite3.IntegrityError("Position-linked gain state changed.")
+        existing = list_position_profit_threshold_keys(
+            connection,
+            rule_id=rule_id,
+            position_cycle_id=position_cycle_id,
+        )
+        if any(key in existing for key, _value in thresholds):
+            raise sqlite3.IntegrityError("Price-Gain threshold already recorded.")
+        now = _utc_now_text()
+        connection.execute(
+            """
+            INSERT INTO position_profit_evaluations (
+                rule_id, position_cycle_id, nav_date, created_at
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (rule_id, position_cycle_id, nav_date, now),
+        )
+        cursor = connection.execute(
+            """
+            INSERT INTO alert_events (
+                rule_id, alert_key, title, message, payload_json, triggered_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                rule_id,
+                str(alert["alert_key"]),
+                str(alert["title"]),
+                str(alert["message"]),
+                _json_text(alert.get("payload")),
+                now,
+            ),
+        )
+        event_id = int(cursor.lastrowid)
+        connection.executemany(
+            """
+            INSERT INTO position_profit_thresholds (
+                rule_id, position_cycle_id, threshold_key,
+                threshold, alert_event_id, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (rule_id, position_cycle_id, key, value, event_id, now)
+                for key, value in thresholds
+            ],
+        )
+        connection.commit()
+        return event_id
+    except Exception:
+        connection.rollback()
+        raise
+
+
+def _maintain_position_cycle(
+    connection: sqlite3.Connection,
+    *,
+    fund_symbol: str,
+    new_units: float,
+    changed_at: str,
+) -> sqlite3.Row | None:
+    active = get_active_position_cycle(connection, fund_symbol)
+    now = _utc_now_text()
+    if new_units == 0:
+        if active is not None:
+            connection.execute(
+                """
+                UPDATE position_cycles
+                SET ended_at = ?, updated_at = ?
+                WHERE id = ? AND ended_at IS NULL
+                """,
+                (changed_at, now, int(active["id"])),
+            )
+        return None
+    if active is None:
+        cursor = connection.execute(
+            """
+            INSERT INTO position_cycles (
+                fund_symbol, started_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (fund_symbol, changed_at, now, now),
+        )
+        return connection.execute(
+            "SELECT * FROM position_cycles WHERE id = ?",
+            (int(cursor.lastrowid),),
+        ).fetchone()
+    return active
+
+
 def upsert_position_snapshot(
     connection: sqlite3.Connection,
     *,
@@ -603,47 +987,51 @@ def upsert_position_snapshot(
 
     sync_time = _timestamp_text(synced_at)
     now = _utc_now_text()
-    connection.execute(
-        """
-        INSERT INTO position_snapshots (
-            fund_symbol,
-            units,
-            average_unit_cost,
-            is_estimated,
-            last_synced_at,
-            estimates_since_sync,
-            position_sync_required_since,
-            created_at,
-            updated_at
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        _maintain_position_cycle(
+            connection,
+            fund_symbol=fund_symbol,
+            new_units=units,
+            changed_at=sync_time,
         )
-        VALUES (?, ?, ?, 0, ?, 0, NULL, ?, ?)
-        ON CONFLICT(fund_symbol) DO UPDATE SET
-            units = excluded.units,
-            average_unit_cost = excluded.average_unit_cost,
-            is_estimated = 0,
-            last_synced_at = excluded.last_synced_at,
-            estimates_since_sync = 0,
-            position_sync_required_since = NULL,
-            updated_at = excluded.updated_at
-        """,
-        (
-            fund_symbol,
-            units,
-            average_unit_cost,
-            sync_time,
-            now,
-            now,
-        ),
-    )
-    connection.execute(
-        """
-        UPDATE fund_settings
-        SET position_sync_required_since = NULL, updated_at = ?
-        WHERE fund_symbol = ?
-        """,
-        (now, fund_symbol),
-    )
-    connection.commit()
+        connection.execute(
+            """
+            INSERT INTO position_snapshots (
+                fund_symbol,
+                units,
+                average_unit_cost,
+                is_estimated,
+                last_synced_at,
+                estimates_since_sync,
+                position_sync_required_since,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, 0, ?, 0, NULL, ?, ?)
+            ON CONFLICT(fund_symbol) DO UPDATE SET
+                units = excluded.units,
+                average_unit_cost = excluded.average_unit_cost,
+                is_estimated = 0,
+                last_synced_at = excluded.last_synced_at,
+                estimates_since_sync = 0,
+                position_sync_required_since = NULL,
+                updated_at = excluded.updated_at
+            """,
+            (fund_symbol, units, average_unit_cost, sync_time, now, now),
+        )
+        connection.execute(
+            """
+            UPDATE fund_settings
+            SET position_sync_required_since = NULL, updated_at = ?
+            WHERE fund_symbol = ?
+            """,
+            (now, fund_symbol),
+        )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
     row = get_position_snapshot(connection, fund_symbol)
     if row is None:
         raise RuntimeError("Position snapshot upsert did not persist a row.")
@@ -682,17 +1070,19 @@ def list_position_snapshots(connection: sqlite3.Connection) -> list[sqlite3.Row]
         connection.execute(
             """
             SELECT
-                fund_symbol,
-                units,
-                average_unit_cost,
-                is_estimated,
-                last_synced_at,
-                estimates_since_sync,
-                position_sync_required_since,
-                created_at,
-                updated_at
-            FROM position_snapshots
-            ORDER BY fund_symbol
+                p.fund_symbol,
+                p.units,
+                p.average_unit_cost,
+                p.is_estimated,
+                p.last_synced_at,
+                p.estimates_since_sync,
+                p.position_sync_required_since,
+                fs.position_sync_required_since AS settings_sync_required_since,
+                p.created_at,
+                p.updated_at
+            FROM position_snapshots AS p
+            LEFT JOIN fund_settings AS fs ON fs.fund_symbol = p.fund_symbol
+            ORDER BY p.fund_symbol
             """
         ).fetchall()
     )
@@ -1286,6 +1676,12 @@ def apply_scheduled_dca_occurrence(
             old_units * float(position["average_unit_cost"]) + gross_amount
         ) / new_units
         now = _utc_now_text()
+        _maintain_position_cycle(
+            connection,
+            fund_symbol=str(occurrence["fund_symbol"]),
+            new_units=new_units,
+            changed_at=now,
+        )
         connection.execute(
             """
             UPDATE position_snapshots
@@ -1407,6 +1803,12 @@ def reconcile_position_snapshot(
             )
         sync_time = _timestamp_text(synced_at)
         now = _utc_now_text()
+        _maintain_position_cycle(
+            connection,
+            fund_symbol=fund_symbol,
+            new_units=units,
+            changed_at=sync_time,
+        )
         connection.execute(
             """
             INSERT INTO position_snapshots (
@@ -1563,6 +1965,12 @@ def apply_manual_add_estimate(
             old_units * float(position["average_unit_cost"]) + gross_amount
         ) / new_units
         now = _utc_now_text()
+        _maintain_position_cycle(
+            connection,
+            fund_symbol=str(occurrence["fund_symbol"]),
+            new_units=new_units,
+            changed_at=now,
+        )
         connection.execute(
             """
             UPDATE position_snapshots
@@ -2111,15 +2519,142 @@ def list_retryable_drawdown_plan_alert_events(
             FROM alert_events AS e
             JOIN rules AS r ON r.id = e.rule_id
             WHERE
-                r.type = 'drawdown_plan'
-                AND e.notification_status IN (?, ?)
-                AND COALESCE(json_extract(e.payload_json, '$.phase'), '')
-                    != 'before_close'
+                e.notification_status IN (?, ?)
+                AND (
+                    (
+                        r.type = 'drawdown_plan'
+                        AND COALESCE(
+                            json_extract(e.payload_json, '$.phase'), ''
+                        ) != 'before_close'
+                    )
+                    OR json_extract(e.payload_json, '$.phase') = 'fund_nav'
+                )
             ORDER BY e.id
             """,
             (ALERT_NOTIFICATION_PENDING, ALERT_NOTIFICATION_FAILED),
         ).fetchall()
     )
+
+
+def list_retryable_position_profit_alert_events(
+    connection: sqlite3.Connection,
+) -> list[sqlite3.Row]:
+    """Return undelivered position-linked Price-Gain reminders."""
+
+    return list(
+        connection.execute(
+            """
+            SELECT e.id, e.title, e.message
+            FROM alert_events AS e
+            JOIN rules AS r ON r.id = e.rule_id
+            WHERE
+                r.type = 'profit_reminder'
+                AND json_extract(e.payload_json, '$.phase') = 'position_profit'
+                AND e.notification_status IN (?, ?)
+            ORDER BY e.id
+            """,
+            (ALERT_NOTIFICATION_PENDING, ALERT_NOTIFICATION_FAILED),
+        ).fetchall()
+    )
+
+
+def get_position_profit_event(
+    connection: sqlite3.Connection,
+    event_id: int,
+) -> sqlite3.Row | None:
+    """Return one position-linked Price-Gain event and current position state."""
+
+    return connection.execute(
+        """
+        SELECT
+            e.id,
+            e.payload_json,
+            r.enabled,
+            r.symbol,
+            c.id AS active_cycle_id,
+            p.units,
+            p.average_unit_cost
+        FROM alert_events AS e
+        JOIN rules AS r ON r.id = e.rule_id
+        LEFT JOIN position_cycles AS c
+            ON c.fund_symbol = r.symbol AND c.ended_at IS NULL
+        LEFT JOIN position_snapshots AS p ON p.fund_symbol = r.symbol
+        WHERE
+            e.id = ?
+            AND r.type = 'profit_reminder'
+            AND json_extract(e.payload_json, '$.phase') = 'position_profit'
+        """,
+        (event_id,),
+    ).fetchone()
+
+
+def close_position_from_profit_event(
+    connection: sqlite3.Connection,
+    *,
+    event_id: int,
+    synced_at: str | datetime | None = None,
+) -> bool:
+    """Close the still-active position cycle referenced by a reminder."""
+
+    sync_time = _timestamp_text(synced_at)
+    now = _utc_now_text()
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        event = get_position_profit_event(connection, event_id)
+        if event is None:
+            raise sqlite3.IntegrityError("Price-Gain reminder was not found.")
+        payload = json.loads(str(event["payload_json"]))
+        expected_cycle_id = int(payload["position_cycle_id"])
+        if event["active_cycle_id"] is None:
+            connection.rollback()
+            return False
+        if (
+            int(event["active_cycle_id"]) != expected_cycle_id
+            or float(event["units"] or 0) <= 0
+        ):
+            raise sqlite3.IntegrityError(
+                "Position changed since this reminder; rerun /sync_position."
+            )
+        pending_items = list_pending_position_items(connection, str(event["symbol"]))
+        if pending_items:
+            raise sqlite3.IntegrityError(
+                f"Pending additions exist; run /sync_position {event['symbol']} 0 0 "
+                "to classify them before closing."
+            )
+        connection.execute(
+            """
+            UPDATE position_snapshots
+            SET
+                units = 0,
+                average_unit_cost = 0,
+                is_estimated = 0,
+                last_synced_at = ?,
+                estimates_since_sync = 0,
+                position_sync_required_since = NULL,
+                updated_at = ?
+            WHERE fund_symbol = ?
+            """,
+            (sync_time, now, str(event["symbol"])),
+        )
+        _maintain_position_cycle(
+            connection,
+            fund_symbol=str(event["symbol"]),
+            new_units=0,
+            changed_at=sync_time,
+        )
+        connection.execute(
+            """
+            UPDATE fund_settings
+            SET position_sync_required_since = NULL, updated_at = ?
+            WHERE fund_symbol = ?
+            """,
+            (now, str(event["symbol"])),
+        )
+        connection.commit()
+        return True
+    except Exception:
+        connection.rollback()
+        raise
 
 
 def _ensure_alert_event_delivery_columns(connection: sqlite3.Connection) -> None:

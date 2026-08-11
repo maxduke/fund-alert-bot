@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 
 from fund_alert_bot.checks import (
     DCA_RULE_TYPE,
+    DRAW_DOWN_PLAN_RULE_TYPE,
     DRAW_DOWN_RULE_TYPE,
     PROFIT_RULE_TYPE,
     DcaCheckResult,
@@ -30,24 +31,31 @@ from fund_alert_bot.checks import (
     evaluate_dca_rules,
     evaluate_drawdown_rules,
     evaluate_profit_rules,
+    latest_completed_open_date,
     read_drawdown_plan_statuses,
 )
 from fund_alert_bot.config import NotificationSettings
 from fund_alert_bot.db import (
     add_drawdown_plan_rule,
     add_enhanced_dca_rule,
+    add_position_profit_rule,
     add_rule,
+    close_position_from_profit_event,
     delete_rule,
     find_enabled_drawdown_plan_conflict,
     get_active_drawdown_cycle,
+    get_active_position_cycle,
     get_drawdown_plan_action_event,
     get_fund_settings,
+    get_position_profit_event,
     get_position_snapshot,
     initialize_database,
+    is_auto_cost_profit_rule,
     list_enabled_drawdown_plan_fund_symbols,
     list_enhanced_dca_statuses,
     list_manual_add_actions,
     list_pending_position_items,
+    list_position_profit_statuses,
     list_position_snapshots,
     open_connection,
     reconcile_position_snapshot,
@@ -84,6 +92,11 @@ from fund_alert_bot.rules.drawdown_plan import (
     required_history_start,
     validate_drawdown_plan_notification_size,
 )
+from fund_alert_bot.rules.profit import (
+    build_position_profit_alert,
+    format_profit_threshold_key,
+    validate_position_profit_notification_size,
+)
 
 if TYPE_CHECKING:
     from telegram import Update
@@ -101,7 +114,9 @@ ADD_DCA_USAGE = "\n".join(
         "<rate:<percent>%|fixed:<RMB>> [holiday:next|holiday:skip]",
     )
 )
-ADD_PROFIT_USAGE = "Usage: /add_profit <asset_type> <symbol> <name> <cost> <thresholds>"
+ADD_PROFIT_USAGE = (
+    "Usage: /add_profit <asset_type> <symbol> <name> <cost|auto> <thresholds>"
+)
 SET_FUND_FEE_USAGE = "Usage: /set_fund_fee <fund_symbol> <rate:<percent>%|fixed:<RMB>>"
 SET_FUND_CUTOFF_USAGE = "Usage: /set_fund_cutoff <fund_symbol> <HH:MM>"
 SYNC_POSITION_USAGE = "Usage: /sync_position <fund_symbol> <units> <average_unit_cost>"
@@ -117,7 +132,7 @@ HELP_MESSAGE = "\n".join(
         "/start - Start the bot",
         "/help - Show available commands",
         "/add_drawdown <asset_type> <symbol> <name> <lookback_days> <thresholds>",
-        "/add_profit <asset_type> <symbol> <name> <cost> <thresholds>",
+        "/add_profit <asset_type> <symbol> <name> <cost|auto> <thresholds>",
         "/add_dca <name> <weekday> <amount> - Reminder only",
         "/add_dca <fund_symbol> <name> <weekday> <amount> <fee> "
         "[holiday:next|holiday:skip] - Fixed fund DCA estimate",
@@ -187,7 +202,7 @@ class ProfitCommand:
     asset_type: AssetType
     symbol: str
     name: str
-    cost: float
+    cost: float | str
     thresholds: list[float]
 
 
@@ -346,12 +361,35 @@ def parse_add_profit_args(args: Sequence[str]) -> ProfitCommand:
     if not name:
         raise CommandParseError("name must not be empty")
 
+    thresholds = parse_thresholds(raw_thresholds)
+    if raw_cost.strip().lower() == "auto":
+        if asset_type is not AssetType.CN_OPEN_FUND:
+            raise CommandParseError("auto cost is only valid for cn_open_fund")
+        symbol = _parse_fund_symbol(symbol)
+        threshold_keys = [format_profit_threshold_key(value) for value in thresholds]
+        if thresholds != sorted(thresholds) or len(threshold_keys) != len(
+            set(threshold_keys)
+        ):
+            raise CommandParseError(
+                "auto thresholds must be unique and strictly ascending"
+            )
+        try:
+            validate_position_profit_notification_size(
+                symbol=symbol,
+                name=name,
+                thresholds=thresholds,
+            )
+        except ValueError as exc:
+            raise CommandParseError(str(exc)) from exc
+        cost: float | str = "auto"
+    else:
+        cost = parse_profit_cost(raw_cost)
     return ProfitCommand(
         asset_type=asset_type,
         symbol=symbol,
         name=name,
-        cost=parse_profit_cost(raw_cost),
-        thresholds=parse_thresholds(raw_thresholds),
+        cost=cost,
+        thresholds=thresholds,
     )
 
 
@@ -371,7 +409,11 @@ def parse_thresholds(raw_thresholds: str) -> list[float]:
                 "thresholds must be comma-separated percentages"
             ) from exc
 
-        if threshold_percent <= 0 or threshold_percent >= 100:
+        if (
+            not math.isfinite(threshold_percent)
+            or threshold_percent <= 0
+            or threshold_percent >= 100
+        ):
             raise CommandParseError(
                 "thresholds must be greater than 0 and less than 100"
             )
@@ -1094,6 +1136,8 @@ def format_plan_overview(
     result: DrawdownPlanStatusResult,
     unmatched_positions: Sequence[tuple[Any, FundNav | None, str]] = (),
     dca_statuses: Sequence[Any] = (),
+    profit_statuses: Sequence[Any] = (),
+    profit_setup_funds: Sequence[tuple[str, str]] = (),
 ) -> str:
     """Format concise `/plans` output."""
 
@@ -1101,11 +1145,64 @@ def format_plan_overview(
         not result.statuses
         and not unmatched_positions
         and not dca_statuses
+        and not profit_statuses
+        and not profit_setup_funds
         and not result.no_data_skips
         and not result.errors
     ):
         return "No investment plans or positions configured."
     lines = ["📊 Investment Plans"]
+    for row in profit_statuses:
+        try:
+            params = _load_params(str(row["params_json"]))
+            thresholds = [float(value) for value in params["thresholds"]]
+            threshold_keys = [
+                format_profit_threshold_key(value) for value in thresholds
+            ]
+            if (
+                not thresholds
+                or any(
+                    not math.isfinite(value) or value <= 0 or value >= 1
+                    for value in thresholds
+                )
+                or thresholds != sorted(thresholds)
+                or len(threshold_keys) != len(set(threshold_keys))
+            ):
+                raise ValueError("invalid thresholds")
+        except (KeyError, TypeError, ValueError):
+            LOGGER.warning(
+                "Skipping malformed Price-Gain status rule_id=%s", row["rule_id"]
+            )
+            continue
+        lines.extend(
+            (
+                "",
+                f"{row['name']} (Price-Gain {row['rule_id']})",
+                f"Fund {row['fund_symbol']} / auto position cost",
+                "Thresholds: "
+                + ", ".join(format_plan_percent(value) for value in thresholds),
+            )
+        )
+        if (
+            row["snapshot_sync_required_since"] is not None
+            or row["settings_sync_required_since"] is not None
+        ):
+            lines.append(
+                "Position Sync required — reminders paused; run /sync_position"
+            )
+        elif row["units"] is None:
+            lines.append("Position: unavailable — remember /sync_position")
+        elif float(row["units"]) == 0:
+            lines.append("Position: closed (exact zero units)")
+        elif row["position_cycle_id"] is None:
+            lines.append("Position cycle unavailable — rerun /sync_position")
+        else:
+            accuracy = "estimated" if row["is_estimated"] else "exact"
+            lines.append(
+                f"Position: {accuracy}; average cost "
+                f"{float(row['average_unit_cost']):.6f}; "
+                f"reached {row['reached_thresholds']}/{len(thresholds)}"
+            )
     for row in dca_statuses:
         params = _load_params(str(row["params_json"]))
         lines.extend(
@@ -1170,6 +1267,13 @@ def format_plan_overview(
                 f"later estimates {position['estimates_since_sync']}",
             )
         )
+        if (
+            position["position_sync_required_since"] is not None
+            or position["settings_sync_required_since"] is not None
+        ):
+            lines.append(
+                "Position Sync required — reminders paused; run /sync_position"
+            )
         if units == 0:
             lines.append("Position value: ¥0.00 (closed)")
         elif nav is None:
@@ -1179,6 +1283,16 @@ def format_plan_overview(
                 f"Position value: ¥{units * nav.value:,.2f} using NAV "
                 f"{nav.value:.12g} on {nav.date}"
             )
+    for fund_symbol, name in profit_setup_funds:
+        safe_name = re.sub(r"\s+", "_", name.strip()) or fund_symbol
+        lines.extend(
+            (
+                "",
+                f"Price-Gain setup available for {fund_symbol} / {name}",
+                "Template: /add_profit cn_open_fund "
+                f"{fund_symbol} {safe_name} auto <thresholds，例如20,30>",
+            )
+        )
     _append_plan_failures(lines, result)
     return "\n".join(lines)
 
@@ -1459,6 +1573,7 @@ def build_command_handlers(
     plan_drafts: dict[str, DrawdownPlanDraft] = {}
     manual_add_drafts: dict[str, ManualAddDraft] = {}
     position_sync_drafts: dict[str, PositionSyncDraft] = {}
+    profit_setup_names: dict[tuple[int, str], str] = {}
     clock = now_factory or (lambda: datetime.now(UTC))
     timezone_info = ZoneInfo(timezone)
     cn_market_timezone = ZoneInfo("Asia/Shanghai")
@@ -1513,26 +1628,137 @@ def build_command_handlers(
             await _reply_text(update, str(exc))
             return
 
+        if command.cost == "auto":
+            metadata_reader = getattr(market_data_provider, "get_fund_type", None)
+            if not callable(metadata_reader):
+                await _reply_text(
+                    update,
+                    "The market-data provider cannot verify the fund's domestic "
+                    "calendar. No auto-cost Price-Gain rule was created.",
+                )
+                return
+            try:
+                fund_type = str(metadata_reader(command.symbol))
+            except MarketDataProviderError as exc:
+                await _reply_text(
+                    update,
+                    "Unable to verify the fund's domestic calendar from "
+                    f"metadata: {exc}. No rule was created; try again later.",
+                )
+                return
+            if "QDII" in fund_type.upper() or "海外" in fund_type:
+                await _reply_text(
+                    update,
+                    f"Fund type {fund_type} does not use the domestic CN "
+                    "valuation calendar; no auto-cost Price-Gain rule was created.",
+                )
+                return
+
         with open_connection(sqlite_path) as connection:
             initialize_database(connection)
-            rule_id = add_rule(
-                connection,
-                type=PROFIT_RULE_TYPE,
-                symbol=command.symbol,
-                name=command.name,
-                asset_type=command.asset_type.value,
-                params=profit_params(command),
-            )
+            try:
+                if command.cost == "auto":
+                    rule_id = add_position_profit_rule(
+                        connection,
+                        fund_symbol=command.symbol,
+                        name=command.name,
+                        thresholds=command.thresholds,
+                    )
+                else:
+                    rule_id = add_rule(
+                        connection,
+                        type=PROFIT_RULE_TYPE,
+                        symbol=command.symbol,
+                        name=command.name,
+                        asset_type=command.asset_type.value,
+                        params=profit_params(command),
+                    )
+            except sqlite3.IntegrityError as exc:
+                await _reply_text(update, str(exc))
+                return
 
-        await _reply_text(
-            update,
-            (
+            preview = None
+            preview_error = None
+            if command.cost == "auto":
+                try:
+                    position = get_position_snapshot(connection, command.symbol)
+                    cycle = get_active_position_cycle(connection, command.symbol)
+                    if (
+                        position is None
+                        or cycle is None
+                        or float(position["units"]) <= 0
+                    ):
+                        raise ValueError("positive Position Snapshot is missing")
+                    settings = get_fund_settings(connection, command.symbol)
+                    if (
+                        settings is not None
+                        and settings["position_sync_required_since"] is not None
+                    ) or position["position_sync_required_since"] is not None:
+                        raise ValueError("Position Sync is required")
+                    expected_date = latest_completed_open_date(
+                        market_calendar,
+                        _clock_now(clock).astimezone(timezone_info).date(),
+                    )
+                    nav = market_data_provider.get_fund_nav(
+                        Instrument(
+                            command.symbol,
+                            command.name,
+                            AssetType.CN_OPEN_FUND,
+                        ),
+                        nav_date=expected_date,
+                    )
+                    rule = next(
+                        row
+                        for row in db_list_rules(connection)
+                        if int(row["id"]) == rule_id
+                    )
+                    preview = build_position_profit_alert(
+                        rule,
+                        nav,
+                        position,
+                        position_cycle_id=int(cycle["id"]),
+                        recorded_threshold_keys=set(),
+                    )
+                except (MarketDataProviderError, ValueError) as exc:
+                    preview_error = str(exc)
+
+        if command.cost != "auto":
+            response = (
                 f"Added profit rule id={rule_id} "
                 f"asset_type={command.asset_type.value} "
                 f"symbol={command.symbol} name={command.name} "
-                f"cost={command.cost:.12g}"
-            ),
-        )
+                f"cost={float(command.cost):.12g}"
+            )
+        else:
+            lines = [
+                f"Added auto-cost Price-Gain rule id={rule_id}",
+                f"Fund: {command.symbol} / {command.name}",
+                "Thresholds: "
+                + ", ".join(format_plan_percent(value) for value in command.thresholds),
+            ]
+            if preview_error is not None:
+                lines.append(f"Read-only preview unavailable: {preview_error}.")
+            elif preview is None:
+                lines.append("Read-only preview: no configured threshold is reached.")
+            else:
+                payload = preview[0]["payload"]
+                reached = payload["crossed_thresholds"]
+                lines.extend(
+                    (
+                        f"Read-only preview ({payload['accuracy']}): gain "
+                        f"{float(payload['profit_rate']):+.1%} on "
+                        f"{payload['nav_date']} ({payload['nav_source']})",
+                        "Currently reached: "
+                        + ", ".join(
+                            format_plan_percent(float(item["threshold"]))
+                            for item in reached
+                        ),
+                        "Preview only; no threshold was consumed and no trade "
+                        "occurred.",
+                    )
+                )
+            response = "\n".join(lines)
+        await _reply_text(update, response)
 
     async def add_dca(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if await reject_if_unauthorized(update, allowed_user_ids):
@@ -2399,6 +2625,108 @@ def build_command_handlers(
         draft.completed_message = message
         await query.edit_message_text(message)
 
+    async def position_profit_action_callback(
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        del context
+        query = getattr(update, "callback_query", None)
+        if query is None:
+            return
+        await query.answer()
+        if await reject_if_unauthorized(update, allowed_user_ids):
+            return
+        parts = str(getattr(query, "data", "")).split(":")
+        if len(parts) != 3:
+            return
+        try:
+            event_id = int(parts[1])
+        except ValueError:
+            return
+        with open_connection(sqlite_path) as connection:
+            initialize_database(connection)
+            event = get_position_profit_event(connection, event_id)
+        if event is None:
+            await query.edit_message_text("Price-Gain reminder was not found.")
+            return
+        choice = parts[2]
+        if choice == "partial":
+            await query.edit_message_text(
+                "After the platform confirms the redemption, run:\n"
+                f"/sync_position {event['symbol']} <remaining_units> "
+                "<new_average_unit_cost>\n\nNothing was changed by this button."
+            )
+            return
+        if choice == "none":
+            await query.edit_message_text(
+                "Recorded: no position update. Nothing was changed and no trade "
+                "was placed."
+            )
+            return
+        if choice != "close":
+            return
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+        await query.edit_message_text(
+            "Confirm only after the platform shows zero units. This will set the "
+            f"tracked position for {event['symbol']} to 0 and close this position "
+            "cycle.",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "Confirm zero position",
+                            callback_data=f"profit_close_confirm:{event_id}",
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "Cancel",
+                            callback_data=f"profit_close_cancel:{event_id}",
+                        )
+                    ],
+                ]
+            ),
+        )
+
+    async def position_profit_close_callback(
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        del context
+        query = getattr(update, "callback_query", None)
+        if query is None:
+            return
+        await query.answer()
+        if await reject_if_unauthorized(update, allowed_user_ids):
+            return
+        parts = str(getattr(query, "data", "")).split(":")
+        if len(parts) != 2:
+            return
+        try:
+            event_id = int(parts[1])
+        except ValueError:
+            return
+        if str(query.data).startswith("profit_close_cancel:"):
+            await query.edit_message_text("Position close cancelled. Nothing changed.")
+            return
+        try:
+            with open_connection(sqlite_path) as connection:
+                initialize_database(connection)
+                changed = close_position_from_profit_event(
+                    connection,
+                    event_id=event_id,
+                    synced_at=_clock_now(clock),
+                )
+        except sqlite3.IntegrityError as exc:
+            await query.edit_message_text(str(exc))
+            return
+        await query.edit_message_text(
+            "Tracked position set to zero; position cycle closed."
+            if changed
+            else "Position was already zero; nothing changed."
+        )
+
     async def list_rules(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context
         if await reject_if_unauthorized(update, allowed_user_ids):
@@ -2414,6 +2742,7 @@ def build_command_handlers(
         del context
         if await reject_if_unauthorized(update, allowed_user_ids):
             return
+        user_id = int(update.effective_user.id)
         with open_connection(sqlite_path) as connection:
             initialize_database(connection)
             result = read_drawdown_plan_statuses(
@@ -2423,19 +2752,26 @@ def build_command_handlers(
             )
             planned_funds = set(list_enabled_drawdown_plan_fund_symbols(connection))
             dca_statuses = list_enhanced_dca_statuses(connection)
+            profit_statuses = list_position_profit_statuses(connection)
+            all_rules = db_list_rules(connection)
             dca_funds = {str(row["fund_symbol"]) for row in dca_statuses}
             evaluated_funds = {
                 status.config.investment_fund_symbol for status in result.statuses
             } | dca_funds
+            position_rows = list_position_snapshots(connection)
             unmatched_rows = [
                 row
-                for row in list_position_snapshots(connection)
+                for row in position_rows
                 if row["fund_symbol"] not in evaluated_funds
             ]
             unmatched_positions = []
             for row in unmatched_rows:
                 nav = None
-                if float(row["units"]) > 0:
+                sync_required = (
+                    row["position_sync_required_since"] is not None
+                    or row["settings_sync_required_since"] is not None
+                )
+                if float(row["units"]) > 0 and not sync_required:
                     try:
                         nav = market_data_provider.get_fund_nav(
                             Instrument(
@@ -2455,9 +2791,92 @@ def build_command_handlers(
                     else "no enabled Drawdown Add Plan"
                 )
                 unmatched_positions.append((row, nav, ownership))
+            known_funds = {
+                status.config.investment_fund_symbol: status.name
+                for status in result.statuses
+            }
+            for row in all_rules:
+                if not bool(row["enabled"]) or row["type"] != DRAW_DOWN_PLAN_RULE_TYPE:
+                    continue
+                try:
+                    params = _load_params(str(row["params_json"]))
+                    fund_symbol = str(params["investment_fund_symbol"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                known_funds.setdefault(fund_symbol, str(row["name"]))
+            known_funds.update(
+                (str(row["fund_symbol"]), str(row["name"])) for row in dca_statuses
+            )
+            for row in position_rows:
+                symbol = str(row["fund_symbol"])
+                known_funds.setdefault(symbol, symbol)
+            profit_funds = {
+                str(row["symbol"])
+                for row in all_rules
+                if bool(row["enabled"]) and is_auto_cost_profit_rule(row)
+            }
+            profit_setup_funds = sorted(
+                (symbol, name)
+                for symbol, name in known_funds.items()
+                if symbol not in profit_funds
+            )
+            for key in tuple(profit_setup_names):
+                if key[0] == user_id:
+                    profit_setup_names.pop(key)
+            profit_setup_names.update(
+                ((user_id, symbol), name) for symbol, name in profit_setup_funds
+            )
+        markup = None
+        if profit_setup_funds:
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+            markup = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            f"Set gain thresholds — {symbol}",
+                            callback_data=f"profit_setup:{symbol}",
+                        )
+                    ]
+                    for symbol, _name in profit_setup_funds
+                ]
+            )
         await _reply_text(
             update,
-            format_plan_overview(result, unmatched_positions, dca_statuses),
+            format_plan_overview(
+                result,
+                unmatched_positions,
+                dca_statuses,
+                profit_statuses,
+                profit_setup_funds,
+            ),
+            reply_markup=markup,
+        )
+
+    async def position_profit_setup_callback(
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        del context
+        query = getattr(update, "callback_query", None)
+        if query is None:
+            return
+        await query.answer()
+        if await reject_if_unauthorized(update, allowed_user_ids):
+            return
+        symbol = str(getattr(query, "data", "")).removeprefix("profit_setup:")
+        name = profit_setup_names.get((int(update.effective_user.id), symbol))
+        if name is None:
+            await query.edit_message_text(
+                "Price-Gain setup is no longer available. Run /plans again."
+            )
+            return
+        safe_name = re.sub(r"\s+", "_", name.strip()) or symbol
+        await query.edit_message_text(
+            "Edit the threshold placeholder, then send this separate command:\n"
+            f"/add_profit cn_open_fund {symbol} {safe_name} auto "
+            "<thresholds，例如20,30>\n\n"
+            "No rule was created by this button."
         )
 
     async def delete_rule_command(
@@ -2480,7 +2899,11 @@ def build_command_handlers(
             initialize_database(connection)
             rule_identity = next(
                 (
-                    (str(row["type"]), str(row["asset_type"]))
+                    (
+                        str(row["type"]),
+                        str(row["asset_type"]),
+                        "auto" if is_auto_cost_profit_rule(row) else None,
+                    )
                     for row in db_list_rules(connection)
                     if int(row["id"]) == rule_id
                 ),
@@ -2488,10 +2911,18 @@ def build_command_handlers(
             )
             removed = delete_rule(connection, rule_id)
 
-        if removed and rule_identity == ("drawdown_plan", "cn_etf"):
+        if removed and rule_identity == ("drawdown_plan", "cn_etf", None):
             await _reply_text(update, f"Disabled drawdown plan id={rule_id}")
-        elif removed and rule_identity == (DCA_RULE_TYPE, "cn_open_fund"):
+        elif removed and rule_identity == (DCA_RULE_TYPE, "cn_open_fund", None):
             await _reply_text(update, f"Disabled fixed DCA rule id={rule_id}")
+        elif removed and rule_identity == (
+            PROFIT_RULE_TYPE,
+            "cn_open_fund",
+            "auto",
+        ):
+            await _reply_text(
+                update, f"Disabled auto-cost Price-Gain rule id={rule_id}"
+            )
         elif removed:
             await _reply_text(update, f"Deleted rule id={rule_id}")
         else:
@@ -2630,6 +3061,18 @@ def build_command_handlers(
             pattern=r"^position_sync:",
         ),
         CallbackQueryHandler(dca_skip_callback, pattern=r"^dca_skip:"),
+        CallbackQueryHandler(
+            position_profit_setup_callback,
+            pattern=r"^profit_setup:[0-9]{6}$",
+        ),
+        CallbackQueryHandler(
+            position_profit_action_callback,
+            pattern=r"^profit_action:[0-9]+:(?:partial|close|none)$",
+        ),
+        CallbackQueryHandler(
+            position_profit_close_callback,
+            pattern=r"^profit_close_(?:confirm|cancel):[0-9]+$",
+        ),
         CommandHandler("test_notify", test_notify),
     ]
 
