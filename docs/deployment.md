@@ -146,9 +146,18 @@ cd /opt/fund-alert-bot
 id -u
 id -g
 nano .env
+curl -fsSL \
+  https://raw.githubusercontent.com/maxduke/fund-alert-bot/main/deploy/docker-compose.prod.yml \
+  -o docker-compose.yml.new
+docker compose -f docker-compose.yml.new config >/dev/null
+mv docker-compose.yml.new docker-compose.yml
 docker compose stop
 sudo chown -R "$(id -u):$(id -g)" data
 ```
+
+The download and validation above install the current production Compose file
+before ownership changes. Do not run the ownership step with an older Compose
+file that lacks the configured `user` value.
 
 The production Compose file refuses to start when either setting is missing;
 this prevents an upgrade from silently making an existing SQLite database

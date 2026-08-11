@@ -260,6 +260,11 @@ Configuration should be created from `.env.example`:
 Copy-Item .env.example .env
 ```
 
+Before using Docker Compose on Linux, set `BOT_UID` and `BOT_GID` in `.env` to
+the output of `id -u` and `id -g`; this lets the non-root container write the
+host-owned `data` directory. Docker Desktop users can use `1000` for both. The
+Compose file stops with a clear error when either value is empty.
+
 Do not commit `.env` or real secrets.
 
 Once tooling exists, use:

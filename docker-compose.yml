@@ -5,7 +5,7 @@ services:
     # image: ghcr.io/maxduke/fund-alert-bot:latest
     container_name: fund_alert_bot
     restart: unless-stopped
-    user: "${BOT_UID:-1000}:${BOT_GID:-1000}"
+    user: "${BOT_UID:?Set BOT_UID in .env}:${BOT_GID:?Set BOT_GID in .env}"
     env_file: .env
     environment:
       SQLITE_PATH: /app/data/fund_alert_bot.sqlite3
