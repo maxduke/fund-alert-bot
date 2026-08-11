@@ -680,6 +680,7 @@ async def run_scheduled_fund_nav_process(
                 evaluation_date=(position_profit_result.data_date or processing_date),
                 result=position_profit_result,
                 phase="fund_nav",
+                key_scope="price_gain",
             )
         for skip in result.no_data_skips:
             LOGGER.info(

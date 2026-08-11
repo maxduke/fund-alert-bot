@@ -205,6 +205,17 @@ def test_stale_nav_and_missing_position_never_emit(tmp_path) -> None:
                 evaluation_date=stale.data_date,
                 result=stale,
                 phase="fund_nav",
+                key_scope="price_gain",
+            )
+            is not None
+        )
+        assert (
+            reserve_drawdown_plan_data_unavailable_notice(
+                connection,
+                evaluation_date=stale.data_date,
+                result=stale,
+                phase="fund_nav",
+                key_scope="price_gain",
             )
             is None
         )

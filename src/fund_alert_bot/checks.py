@@ -217,6 +217,7 @@ def reserve_drawdown_plan_data_unavailable_notice(
     evaluation_date: date,
     result: Any,
     phase: str = "after_close",
+    key_scope: str | None = None,
 ) -> AlertNotification | None:
     """Reserve one phase-level notice for plans that could not be evaluated."""
 
@@ -232,6 +233,8 @@ def reserve_drawdown_plan_data_unavailable_notice(
         "fund_nav": "Feeder-fund NAV settlement",
     }[phase]
     alert_key = f"data_unavailable:{phase}:{evaluation_date.isoformat()}"
+    if key_scope is not None:
+        alert_key = f"{alert_key}:{key_scope}"
     notice_name = (
         "Feeder-fund data unavailable"
         if phase == "fund_nav"
