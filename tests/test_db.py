@@ -275,7 +275,13 @@ def test_init_db_does_not_recover_ambiguous_preexisting_history(
         )
         init_db(connection)
 
-        assert list_retryable_standard_alert_events(connection) == []
+        retryable = list_retryable_standard_alert_events(connection)
+        assert [str(row["title"]) for row in retryable] == ["Reminder recovery notice"]
+        record_alert_notification_result(
+            connection,
+            event_id=int(retryable[0]["id"]),
+            results=[{"channel": "telegram", "success": True}],
+        )
         record_alert_notification_result(
             connection,
             event_id=1,
@@ -349,24 +355,40 @@ def test_init_db_preserves_delivery_aware_pending_event(tmp_path: Path) -> None:
         connection.executemany(
             """
             INSERT INTO alert_events (
-                rule_id, alert_key, title, message, triggered_at
-            ) VALUES (99, ?, 'Drawdown reminder', ?, ?)
+                rule_id, alert_key, title, message, triggered_at,
+                notification_status, notification_attempted_at
+            ) VALUES (99, ?, 'Drawdown reminder', ?, ?, ?, ?)
             """,
             (
-                ("migrated-history", "already sent", "2024-01-01T00:00:00+00:00"),
+                (
+                    "migrated-history",
+                    "already sent",
+                    "2026-07-01T00:00:00+00:00",
+                    "pending",
+                    None,
+                ),
+                (
+                    "tracked-delivery",
+                    "sent with delivery tracking",
+                    "2026-07-02T00:00:00+00:00",
+                    "sent",
+                    "2026-07-02T00:01:00+00:00",
+                ),
                 (
                     "delivery-aware-pending",
                     "reserved before crash",
-                    "2026-08-11T00:00:00+00:00",
+                    "2026-07-03T00:00:00+00:00",
+                    "pending",
+                    None,
                 ),
             ),
         )
 
         init_db(connection)
 
-        assert [
-            int(row["id"]) for row in list_retryable_standard_alert_events(connection)
-        ] == [2]
+        retryable = list_retryable_standard_alert_events(connection)
+        assert [int(row["id"]) for row in retryable] == [3, 4]
+        assert str(retryable[1]["title"]) == "Reminder recovery notice"
 
 
 def test_rule_helpers_add_list_filter_and_delete_rules(tmp_path: Path) -> None:

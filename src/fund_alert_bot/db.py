@@ -22,7 +22,7 @@ SUPPRESSING_ALERT_NOTIFICATION_STATUSES = (
     ALERT_NOTIFICATION_SENT,
 )
 STANDARD_NOTIFICATION_RECOVERY_MIGRATION_KEY = "standard_notification_recovery_v1"
-DELIVERY_TRACKING_INTRODUCED_AT = "2026-06-05T14:41:42+00:00"
+STANDARD_NOTIFICATION_RECOVERY_NOTICE_TITLE = "Reminder recovery notice"
 
 
 def connect(sqlite_path: str | Path) -> sqlite3.Connection:
@@ -2594,12 +2594,23 @@ def list_retryable_standard_alert_events(
                 )
             WHERE
                 e.notification_status IN (?, ?)
-                AND e.title IN (
-                    'DCA reminder',
-                    'Drawdown reminder',
-                    'Price-Gain reminder'
+                AND (
+                    (
+                        e.title IN (
+                            'DCA reminder',
+                            'Drawdown reminder',
+                            'Price-Gain reminder'
+                        )
+                        AND COALESCE(
+                            json_extract(e.payload_json, '$.phase'), ''
+                        ) = ''
+                    )
+                    OR (
+                        e.title = 'Reminder recovery notice'
+                        AND json_extract(e.payload_json, '$.phase') =
+                            'standard_recovery'
+                    )
                 )
-                AND COALESCE(json_extract(e.payload_json, '$.phase'), '') = ''
             ORDER BY e.id
             """,
             (ALERT_NOTIFICATION_PENDING, ALERT_NOTIFICATION_FAILED),
@@ -2738,38 +2749,75 @@ def _ensure_standard_notification_recovery_migration(
     ).fetchone():
         return
 
-    if delivery_columns_added:
-        connection.execute(
+    first_tracked_id = None
+    if not delivery_columns_added:
+        first_tracked_id = connection.execute(
             """
-            UPDATE alert_events
-            SET notification_status = ?
-            WHERE notification_status = ?
-                AND title IN (
-                    'DCA reminder',
-                    'Drawdown reminder',
-                    'Price-Gain reminder'
-                )
-            """,
-            (ALERT_NOTIFICATION_SENT, ALERT_NOTIFICATION_PENDING),
-        )
-    else:
-        connection.execute(
+            SELECT MIN(id) FROM alert_events
+            WHERE notification_attempted_at IS NOT NULL
             """
+        ).fetchone()[0]
+    id_filter = "" if first_tracked_id is None else "AND id < ?"
+    params: tuple[object, ...] = (
+        ALERT_NOTIFICATION_PENDING,
+        *(() if first_tracked_id is None else (int(first_tracked_id),)),
+    )
+    ambiguous = connection.execute(
+        f"""
+        SELECT COUNT(*) AS event_count, MIN(rule_id) AS rule_id
+        FROM alert_events
+        WHERE notification_status = ?
+            AND notification_attempted_at IS NULL
+            AND title IN (
+                'DCA reminder',
+                'Drawdown reminder',
+                'Price-Gain reminder'
+            )
+            {id_filter}
+        """,
+        params,
+    ).fetchone()
+    ambiguous_count = int(ambiguous["event_count"])
+    if ambiguous_count:
+        connection.execute(
+            f"""
             UPDATE alert_events
             SET notification_status = ?
             WHERE notification_status = ?
                 AND notification_attempted_at IS NULL
-                AND triggered_at < ?
                 AND title IN (
                     'DCA reminder',
                     'Drawdown reminder',
                     'Price-Gain reminder'
                 )
+                {id_filter}
+            """,
+            (ALERT_NOTIFICATION_SENT, *params),
+        )
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO alert_events (
+                rule_id, alert_key, title, message, payload_json, triggered_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
-                ALERT_NOTIFICATION_SENT,
-                ALERT_NOTIFICATION_PENDING,
-                DELIVERY_TRACKING_INTRODUCED_AT,
+                int(ambiguous["rule_id"]),
+                "standard_notification_recovery:v1",
+                STANDARD_NOTIFICATION_RECOVERY_NOTICE_TITLE,
+                (
+                    "⚠️ Reminder recovery notice\n\n"
+                    f"{ambiguous_count} older reminder(s) had no reliable "
+                    "delivery record during database upgrade. They were not "
+                    "replayed to avoid stale duplicate reminders.\n\n"
+                    "Please run /check to review the current state."
+                ),
+                _json_text(
+                    {
+                        "phase": "standard_recovery",
+                        "ambiguous_event_count": ambiguous_count,
+                    }
+                ),
+                now,
             ),
         )
     connection.execute(

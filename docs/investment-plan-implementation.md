@@ -655,8 +655,10 @@ Keep confirmed business state separate from delivery state:
   reopening recorded thresholds;
 - pending and failed simple drawdown, fixed-cost Price-Gain, and DCA reminders
   retry during the next morning NAV process or application startup;
-- the one-time delivery-state migration marks pre-tracking standard reminders
-  as already handled, while preserving delivery-aware pending and failed events;
+- the one-time delivery-state migration derives its boundary from the first
+  attempted event in that SQLite database, preserves later pending and all
+  failed events, and replaces ambiguous older rows with one `/check` notice
+  rather than replaying stale reminders;
 - a recovered DCA action requires the event's persisted fund symbol to match
   the current occurrence, preventing deleted SQLite rule IDs from being reused;
 - expired pre-alerts are not retried;

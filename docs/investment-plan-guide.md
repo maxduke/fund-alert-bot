@@ -748,6 +748,12 @@ delivery state in SQLite. An undelivered reminder is retried by the next morning
 NAV process or application startup; a recovered DCA message only keeps its
 failure button while that scheduled occurrence is still pending.
 
+On the first upgrade that enables this recovery, SQLite uses the database's
+first recorded delivery attempt to separate older ambiguous history. The bot
+does not replay those possibly stale reminders individually; it sends one
+recovery notice asking you to run `/check`. Later pending and failed reminders
+continue through normal retry handling.
+
 All market-driven alerts include their market-data date. Missing, stale, or
 insufficient data is reported without creating an incorrect reminder.
 
