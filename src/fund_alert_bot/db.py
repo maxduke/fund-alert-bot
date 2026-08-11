@@ -422,6 +422,7 @@ def add_position_profit_rule(
             SELECT id FROM rules
             WHERE type = 'profit_reminder' AND asset_type = 'cn_open_fund'
                 AND symbol = ? AND enabled = 1
+                AND json_valid(params_json)
                 AND json_extract(params_json, '$.cost') = 'auto'
             LIMIT 1
             """,
@@ -806,6 +807,7 @@ def list_position_profit_statuses(
                 r.enabled = 1
                 AND r.type = 'profit_reminder'
                 AND r.asset_type = 'cn_open_fund'
+                AND json_valid(r.params_json)
                 AND json_extract(r.params_json, '$.cost') = 'auto'
             GROUP BY r.id, p.fund_symbol, c.id
             ORDER BY r.id

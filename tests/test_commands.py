@@ -1792,7 +1792,7 @@ def test_delete_command_keeps_legacy_open_fund_behavior(
         )
         if malformed:
             connection.execute(
-                "UPDATE rules SET params_json = '[]' WHERE id = ?", (rule_id,)
+                "UPDATE rules SET params_json = '{' WHERE id = ?", (rule_id,)
             )
             connection.commit()
 

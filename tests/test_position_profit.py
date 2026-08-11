@@ -20,6 +20,7 @@ from fund_alert_bot.db import (
     delete_rule,
     get_active_position_cycle,
     init_db,
+    list_position_profit_statuses,
     list_position_profit_threshold_keys,
     list_retryable_drawdown_plan_alert_events,
     list_retryable_position_profit_alert_events,
@@ -88,13 +89,13 @@ def test_malformed_legacy_rule_does_not_abort_other_profit_rules(tmp_path) -> No
         malformed_id = add_rule(
             connection,
             type="profit_reminder",
-            symbol="510300",
+            symbol="000099",
             name="bad",
-            asset_type="cn_etf",
+            asset_type="cn_open_fund",
             params={"cost": 1, "thresholds": [0.2]},
         )
         connection.execute(
-            "UPDATE rules SET params_json = '[]' WHERE id = ?",
+            "UPDATE rules SET params_json = '{' WHERE id = ?",
             (malformed_id,),
         )
         connection.commit()
@@ -130,6 +131,9 @@ def test_malformed_legacy_rule_does_not_abort_other_profit_rules(tmp_path) -> No
             OpenCalendar(),
             processing_date=date(2024, 1, 3),
         )
+        assert [
+            row["fund_symbol"] for row in list_position_profit_statuses(connection)
+        ] == ["000001"]
 
     assert position_result.checked_rules == 1
     assert len(position_result.errors) == 1
