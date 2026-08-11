@@ -137,12 +137,28 @@ Stop following logs with `Ctrl+C`; the container keeps running.
 
 ## Updating
 
-Pull the latest image and recreate the container:
+Before the first update that uses `BOT_UID` and `BOT_GID`, run `id -u` and
+`id -g`, add those values to `.env`, and give that same account ownership of
+the existing database directory:
 
 ```bash
 cd /opt/fund-alert-bot
+id -u
+id -g
+nano .env
+sudo chown -R "$(id -u):$(id -g)" data
+```
+
+The production Compose file refuses to start when either setting is missing;
+this prevents an upgrade from silently making an existing SQLite database
+unwritable.
+
+Then pull the latest image, recreate the container, and verify data access:
+
+```bash
 docker compose pull
 docker compose up -d
+docker compose run --rm --entrypoint sh fund-alert-bot -c 'test -w /app/data'
 ```
 
 Check logs after updating:
