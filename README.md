@@ -263,21 +263,47 @@ Copy-Item .env.example .env
 Before using Docker Compose on Linux, set `BOT_UID` and `BOT_GID` in `.env` to
 the output of `id -u` and `id -g`; this lets the non-root container write the
 host-owned `data` directory. Docker Desktop users can use `1000` for both. The
-Compose file stops with a clear error when either value is empty.
+Compose file stops with a clear error when either value is empty. On a new
+Linux checkout, create the bind source as the same non-root account before the
+first start:
+
+```bash
+(
+set -eu
+BOT_OWNER_UID="$(id -u)"
+BOT_OWNER_GID="$(id -g)"
+if [ "$BOT_OWNER_UID" -eq 0 ] || [ "$BOT_OWNER_GID" -eq 0 ]; then
+  echo "Use a non-root account." >&2
+  exit 1
+fi
+mkdir -p data
+printf 'BOT_UID=%s\nBOT_GID=%s\n' "$BOT_OWNER_UID" "$BOT_OWNER_GID"
+)
+```
+
+Compose will not create a missing `data` directory as root.
 
 When upgrading an existing Linux Compose checkout, set those values first,
 then migrate existing SQLite ownership while the bot is stopped:
 
 ```bash
-test "$(id -u)" -ne 0
-test "$(id -g)" -ne 0
+(
+set -eu
+BOT_OWNER_UID="$(id -u)"
+BOT_OWNER_GID="$(id -g)"
+if [ "$BOT_OWNER_UID" -eq 0 ] || [ "$BOT_OWNER_GID" -eq 0 ]; then
+  echo "Use a non-root account." >&2
+  exit 1
+fi
 docker compose stop
-sudo chown -R "$(id -u):$(id -g)" data
+sudo chown -R "$BOT_OWNER_UID:$BOT_OWNER_GID" data
 docker compose up -d
+)
 ```
 
 Do not use `0` for either setting. New checkouts with no `data` directory do
-not need the ownership-migration commands.
+not need the ownership-migration commands, but must create `data` before the
+first `docker compose up` as shown above.
 
 Do not commit `.env` or real secrets.
 

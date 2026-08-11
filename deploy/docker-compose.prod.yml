@@ -5,4 +5,8 @@ services:
     user: "${BOT_UID:?Set BOT_UID in .env}:${BOT_GID:?Set BOT_GID in .env}"
     env_file: .env
     volumes:
-      - ./data:/app/data
+      - type: bind
+        source: ./data
+        target: /app/data
+        bind:
+          create_host_path: false

@@ -62,10 +62,16 @@ Copy `.env.example` from this repository to:
 Record the owner IDs of the deployment directory:
 
 ```bash
-test "$(id -u)" -ne 0
-test "$(id -g)" -ne 0
-id -u
-id -g
+(
+set -eu
+BOT_OWNER_UID="$(id -u)"
+BOT_OWNER_GID="$(id -g)"
+if [ "$BOT_OWNER_UID" -eq 0 ] || [ "$BOT_OWNER_GID" -eq 0 ]; then
+  echo "Use a non-root deployment account." >&2
+  exit 1
+fi
+printf 'BOT_UID=%s\nBOT_GID=%s\n' "$BOT_OWNER_UID" "$BOT_OWNER_GID"
+)
 ```
 
 Run these steps from a dedicated non-root deployment account. If either test
@@ -147,11 +153,16 @@ Before the first update that uses `BOT_UID` and `BOT_GID`, run `id -u` and
 the existing database directory:
 
 ```bash
+(
+set -eu
 cd /opt/fund-alert-bot
-test "$(id -u)" -ne 0
-test "$(id -g)" -ne 0
-id -u
-id -g
+BOT_OWNER_UID="$(id -u)"
+BOT_OWNER_GID="$(id -g)"
+if [ "$BOT_OWNER_UID" -eq 0 ] || [ "$BOT_OWNER_GID" -eq 0 ]; then
+  echo "Use a non-root deployment account." >&2
+  exit 1
+fi
+printf 'BOT_UID=%s\nBOT_GID=%s\n' "$BOT_OWNER_UID" "$BOT_OWNER_GID"
 nano .env
 curl -fsSL \
   https://raw.githubusercontent.com/maxduke/fund-alert-bot/main/deploy/docker-compose.prod.yml \
@@ -159,7 +170,8 @@ curl -fsSL \
 docker compose -f docker-compose.yml.new config >/dev/null
 mv docker-compose.yml.new docker-compose.yml
 docker compose stop
-sudo chown -R "$(id -u):$(id -g)" data
+sudo chown -R "$BOT_OWNER_UID:$BOT_OWNER_GID" data
+)
 ```
 
 The download and validation above install the current production Compose file

@@ -15,4 +15,8 @@ services:
       DCA_REMINDER_TIME: "${DCA_REMINDER_TIME:-09:30}"
       FUND_NAV_PROCESS_TIME: "${FUND_NAV_PROCESS_TIME:-08:30}"
     volumes:
-      - ./data:/app/data
+      - type: bind
+        source: ./data
+        target: /app/data
+        bind:
+          create_host_path: false
