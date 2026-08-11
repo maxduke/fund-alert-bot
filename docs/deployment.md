@@ -146,6 +146,7 @@ cd /opt/fund-alert-bot
 id -u
 id -g
 nano .env
+docker compose stop
 sudo chown -R "$(id -u):$(id -g)" data
 ```
 
