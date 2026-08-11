@@ -2019,21 +2019,43 @@ def build_command_handlers(
             )
             from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-            lines = [
+            instructions = [
                 "Pending additions exist. Classify this platform snapshot:",
                 "Choose All only if every item below is included. Choose None only "
                 "if no item below is included. If it includes some items, cancel and "
                 "sync again after all items settle.",
-                "",
-                *(
-                    f"• {item['kind']} / {item['date']} / "
-                    f"{format_plan_amount(float(item['amount']))}"
-                    for item in pending_items
-                ),
             ]
+            item_lines = [
+                f"• {item['kind']} / {item['date']} / "
+                f"{format_plan_amount(float(item['amount']))}"
+                for item in pending_items
+            ]
+            preview = "\n".join((*instructions, "", *item_lines))
+            if len(preview) > 4096:
+                pages: list[list[str]] = [[]]
+                for line in item_lines:
+                    candidate = "\n".join((*pages[-1], line))
+                    if pages[-1] and len(candidate) > 3800:
+                        pages.append([line])
+                    else:
+                        pages[-1].append(line)
+                for index, page in enumerate(pages, start=1):
+                    await _reply_text(
+                        update,
+                        f"Pending additions ({index}/{len(pages)}):\n\n"
+                        + "\n".join(page),
+                    )
+                preview = "\n".join(
+                    (
+                        *instructions,
+                        "",
+                        f"Review all {len(item_lines)} pending additions listed "
+                        "above before choosing.",
+                    )
+                )
             await _reply_text(
                 update,
-                "\n".join(lines),
+                preview,
                 reply_markup=InlineKeyboardMarkup(
                     [
                         [

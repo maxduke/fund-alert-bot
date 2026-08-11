@@ -1033,6 +1033,48 @@ def test_sync_none_included_keeps_unestimated_manual_add_sync_warning(tmp_path) 
     assert "eligible for dated-NAV processing" not in query.edits[-1]
 
 
+def test_sync_position_paginates_large_pending_preview(tmp_path, monkeypatch) -> None:
+    pending_items = [
+        {
+            "key": f"action:{index}:0.15",
+            "kind": "manual add requiring sync",
+            "date": "2024-01-02",
+            "amount": 5000,
+        }
+        for index in range(100)
+    ]
+    monkeypatch.setattr(
+        "fund_alert_bot.commands.list_pending_position_items",
+        lambda connection, fund_symbol: pending_items,
+    )
+    handlers = build_command_handlers(
+        {123},
+        sqlite_path=tmp_path / "fund_alert_bot.sqlite3",
+    )
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        effective_message=message,
+    )
+
+    asyncio.run(
+        _handler_by_command(handlers, "sync_position").callback(
+            update,
+            SimpleNamespace(args=["000001", "1100", "1.1"]),
+        )
+    )
+
+    assert len(message.replies) >= 3
+    assert all(len(reply) <= 4096 for reply in message.replies)
+    assert (
+        sum(reply.count("manual add requiring sync") for reply in message.replies)
+        == 100
+    )
+    assert "Review all 100 pending additions" in message.replies[-1]
+    assert len(message.reply_markups) == 1
+
+
 def test_partial_position_sync_changes_nothing(tmp_path) -> None:
     sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
     rule_id = _prepare_ready_plan_alert(
