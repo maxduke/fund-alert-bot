@@ -108,10 +108,32 @@ def test_malformed_legacy_rule_does_not_abort_other_profit_rules(tmp_path) -> No
         )
 
         result = evaluate_profit_rules(connection, LatestProvider())
+        assert result.checked_rules == 2
+        assert len(result.errors) == 1
+        assert result.errors[0].rule_id == malformed_id
 
-    assert result.checked_rules == 2
-    assert len(result.errors) == 1
-    assert result.errors[0].rule_id == malformed_id
+        add_position_profit_rule(
+            connection,
+            fund_symbol="000001",
+            name="A500 feeder",
+            thresholds=(0.2,),
+        )
+        upsert_position_snapshot(
+            connection,
+            fund_symbol="000001",
+            units=100,
+            average_unit_cost=1,
+        )
+        position_result = evaluate_position_profit_rules(
+            connection,
+            NavProvider(FundNav("000001", date(2024, 1, 2), 1.1, "test")),
+            OpenCalendar(),
+            processing_date=date(2024, 1, 3),
+        )
+
+    assert position_result.checked_rules == 1
+    assert len(position_result.errors) == 1
+    assert position_result.errors[0].rule_id == malformed_id
 
 
 def test_thresholds_are_once_per_continuous_positive_position_cycle(tmp_path) -> None:

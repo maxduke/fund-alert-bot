@@ -1372,15 +1372,18 @@ def evaluate_position_profit_rules(
 ) -> ProfitCheckResult:
     """Evaluate auto-cost Price-Gain rules from one exact completed fund NAV."""
 
-    rules = [
-        row
-        for row in list_enabled_rules(connection)
-        if row["type"] == PROFIT_RULE_TYPE
-        and _load_params(str(row["params_json"])).get("cost") == "auto"
-    ]
+    rules = []
+    errors: list[RuleCheckError] = []
+    for row in list_enabled_rules(connection):
+        if row["type"] != PROFIT_RULE_TYPE:
+            continue
+        try:
+            if _load_params(str(row["params_json"])).get("cost") == "auto":
+                rules.append(row)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(RuleCheckError(int(row["id"]), str(row["symbol"]), str(exc)))
     notifications: list[AlertNotification] = []
     no_data_skips: list[RuleNoDataSkip] = []
-    errors: list[RuleCheckError] = []
     navs = {} if nav_cache is None else nav_cache
     cached_errors = {} if nav_errors is None else nav_errors
     try:
@@ -1394,7 +1397,7 @@ def evaluate_position_profit_rules(
                 RuleNoDataSkip(int(row["id"]), str(row["symbol"]), str(exc))
                 for row in rules
             ],
-            errors=[],
+            errors=errors,
         )
     for row in rules:
         rule_id = int(row["id"])
