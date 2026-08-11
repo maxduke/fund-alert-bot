@@ -132,6 +132,8 @@ The creation preview is read-only and consumes no threshold. If a Price-Gain
 reminder arrives after a partial redemption, wait for the platform's exact units
 and cost, then run `/sync_position` again. Do not forget this step: the Bot has
 no brokerage connection and cannot detect the changed holding itself.
+Creation performs one per-symbol Xueqiu metadata check and rejects QDII/overseas
+funds before saving because auto-cost scheduling uses the domestic CN calendar.
 
 ### Drawdown Add Plans
 

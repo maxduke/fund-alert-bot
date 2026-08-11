@@ -1241,7 +1241,10 @@ def evaluate_profit_rules(
     """Evaluate enabled profit reminder rules and store new alert events."""
 
     rules = [
-        row for row in list_enabled_rules(connection) if row["type"] == PROFIT_RULE_TYPE
+        row
+        for row in list_enabled_rules(connection)
+        if row["type"] == PROFIT_RULE_TYPE
+        and _load_params(str(row["params_json"])).get("cost") != "auto"
     ]
 
     notifications: list[AlertNotification] = []
@@ -1252,8 +1255,6 @@ def evaluate_profit_rules(
 
     for row in rules:
         try:
-            if _load_params(str(row["params_json"])).get("cost") == "auto":
-                continue
             asset_type = AssetType(row["asset_type"])
             instrument = Instrument(
                 symbol=row["symbol"],

@@ -1571,6 +1571,32 @@ def build_command_handlers(
             await _reply_text(update, str(exc))
             return
 
+        if command.cost == "auto":
+            metadata_reader = getattr(market_data_provider, "get_fund_type", None)
+            if not callable(metadata_reader):
+                await _reply_text(
+                    update,
+                    "The market-data provider cannot verify the fund's domestic "
+                    "calendar. No auto-cost Price-Gain rule was created.",
+                )
+                return
+            try:
+                fund_type = str(metadata_reader(command.symbol))
+            except MarketDataProviderError as exc:
+                await _reply_text(
+                    update,
+                    "Unable to verify the fund's domestic calendar from "
+                    f"metadata: {exc}. No rule was created; try again later.",
+                )
+                return
+            if "QDII" in fund_type.upper() or "海外" in fund_type:
+                await _reply_text(
+                    update,
+                    f"Fund type {fund_type} does not use the domestic CN "
+                    "valuation calendar; no auto-cost Price-Gain rule was created.",
+                )
+                return
+
         with open_connection(sqlite_path) as connection:
             initialize_database(connection)
             try:

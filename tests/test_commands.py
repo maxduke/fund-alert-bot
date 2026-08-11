@@ -1614,6 +1614,7 @@ def test_auto_profit_preview_and_position_actions(tmp_path) -> None:
         _history(["2024-01-02"], [1.3]),
         nav=FundNav("000001", date(2024, 1, 2), 1.3, "akshare_eastmoney"),
     )
+    provider.get_fund_type = lambda _symbol: "指数型-股票"
     calendar = FakeMarketCalendar(open_dates={date(2024, 1, 2)})
     handlers = build_command_handlers(
         {123},
@@ -1709,6 +1710,36 @@ def test_auto_profit_preview_and_position_actions(tmp_path) -> None:
     )
     assert "Position: closed (exact zero units)" in closed_plans_message.replies[0]
     assert "remember /sync_position" not in closed_plans_message.replies[0]
+
+
+def test_auto_profit_rejects_qdii_before_saving(tmp_path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    provider = FakeProvider(_history(["2024-01-02"], [1.3]))
+    provider.get_fund_type = lambda _symbol: "QDII-普通股票"
+    handlers = build_command_handlers(
+        {123},
+        sqlite_path=sqlite_path,
+        market_data_provider=provider,
+    )
+    message = FakeMessage()
+    asyncio.run(
+        _handler_by_command(handlers, "add_profit").callback(
+            SimpleNamespace(
+                effective_user=SimpleNamespace(id=123),
+                effective_chat=SimpleNamespace(id=456),
+                effective_message=message,
+            ),
+            SimpleNamespace(
+                bot=FakeBot(),
+                args=["cn_open_fund", "000001", "QDII", "auto", "20"],
+            ),
+        )
+    )
+
+    with open_connection(sqlite_path) as connection:
+        init_db(connection)
+        assert list_rules(connection) == []
+    assert "does not use the domestic CN valuation calendar" in message.replies[0]
 
 
 def test_delete_command_reports_disabled_drawdown_plan(tmp_path) -> None:

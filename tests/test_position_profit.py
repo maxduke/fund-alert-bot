@@ -9,6 +9,7 @@ import pytest
 from fund_alert_bot import scheduler
 from fund_alert_bot.checks import (
     evaluate_position_profit_rules,
+    evaluate_profit_rules,
     reserve_drawdown_plan_data_unavailable_notice,
 )
 from fund_alert_bot.commands import CommandParseError, parse_add_profit_args
@@ -84,6 +85,7 @@ def test_thresholds_are_once_per_continuous_positive_position_cycle(tmp_path) ->
             name="A500 feeder",
             thresholds=(0.2, 0.3),
         )
+        assert evaluate_profit_rules(connection, object()).checked_rules == 0
         upsert_position_snapshot(
             connection,
             fund_symbol="000001",
