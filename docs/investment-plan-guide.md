@@ -754,6 +754,10 @@ does not replay those possibly stale reminders individually; it sends one
 recovery notice asking you to run `/check`. Later pending and failed reminders
 continue through normal retry handling.
 
+If the database has no recorded delivery attempt at all, there is no reliable
+automatic boundary. The bot uses the same single recovery notice instead of
+guessing that an old reminder is current. This is a one-time upgrade safeguard.
+
 All market-driven alerts include their market-data date. Missing, stale, or
 insufficient data is reported without creating an incorrect reminder.
 

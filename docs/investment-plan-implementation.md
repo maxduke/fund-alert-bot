@@ -659,6 +659,8 @@ Keep confirmed business state separate from delivery state:
   attempted event in that SQLite database, preserves later pending and all
   failed events, and replaces ambiguous older rows with one `/check` notice
   rather than replaying stale reminders;
+- when no attempted event exists, treat all unattempted pre-migration standard
+  rows as ambiguous and use that same notice instead of guessing;
 - a recovered DCA action requires the event's persisted fund symbol to match
   the current occurrence, preventing deleted SQLite rule IDs from being reused;
 - expired pre-alerts are not retried;

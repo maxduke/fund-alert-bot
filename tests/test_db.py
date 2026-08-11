@@ -410,6 +410,52 @@ def test_init_db_preserves_delivery_aware_pending_event(tmp_path: Path) -> None:
         assert position_status["notification_status"] == ALERT_NOTIFICATION_PENDING
 
 
+def test_init_db_uses_notice_when_delivery_boundary_is_unknowable(
+    tmp_path: Path,
+) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+
+    with open_connection(sqlite_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE alert_events (
+                id INTEGER PRIMARY KEY,
+                rule_id INTEGER NOT NULL,
+                alert_key TEXT NOT NULL UNIQUE,
+                title TEXT NOT NULL,
+                message TEXT NOT NULL,
+                payload_json TEXT,
+                triggered_at TEXT NOT NULL,
+                notification_status TEXT NOT NULL DEFAULT 'pending',
+                notification_attempted_at TEXT,
+                notification_sent_at TEXT,
+                notification_result_json TEXT
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO alert_events (
+                rule_id, alert_key, title, message, triggered_at
+            ) VALUES (99, 'ambiguous-pending', 'Drawdown reminder',
+                      'delivery provenance is unavailable',
+                      '2026-07-01T00:00:00+00:00')
+            """
+        )
+
+        init_db(connection)
+
+        events = connection.execute(
+            """
+            SELECT title, notification_status FROM alert_events ORDER BY id
+            """
+        ).fetchall()
+        assert [(row["title"], row["notification_status"]) for row in events] == [
+            ("Drawdown reminder", ALERT_NOTIFICATION_SENT),
+            ("Reminder recovery notice", ALERT_NOTIFICATION_PENDING),
+        ]
+
+
 def test_rule_helpers_add_list_filter_and_delete_rules(tmp_path: Path) -> None:
     sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
 

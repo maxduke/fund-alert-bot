@@ -2757,6 +2757,8 @@ def _ensure_standard_notification_recovery_migration(
             WHERE notification_attempted_at IS NOT NULL
             """
         ).fetchone()[0]
+    # Pre-v1 pending rows have no per-event provenance; never guess that an
+    # investment reminder is current when this database has no attempt boundary.
     id_filter = "" if first_tracked_id is None else "AND id < ?"
     params: tuple[object, ...] = (
         ALERT_NOTIFICATION_PENDING,
