@@ -1435,6 +1435,18 @@ def evaluate_position_profit_rules(
                     symbol,
                 )
                 continue
+            settings = get_fund_settings(connection, symbol)
+            if (
+                settings is not None
+                and settings["position_sync_required_since"] is not None
+            ) or position["position_sync_required_since"] is not None:
+                LOGGER.info(
+                    "Position-linked Price-Gain skipped rule_id=%s symbol=%s "
+                    "reason=position_sync_required",
+                    rule_id,
+                    symbol,
+                )
+                continue
             cycle_id = int(cycle["id"])
             recorded_threshold_keys = list_position_profit_threshold_keys(
                 connection,

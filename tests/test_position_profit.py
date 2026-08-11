@@ -182,6 +182,26 @@ def test_thresholds_are_once_per_continuous_positive_position_cycle(tmp_path) ->
             FundNav("000001", date(2024, 1, 2), 1.35, "akshare_eastmoney")
         )
 
+        connection.execute(
+            "UPDATE position_snapshots SET position_sync_required_since = ? "
+            "WHERE fund_symbol = ?",
+            ("2024-01-02T06:00:00+00:00", "000001"),
+        )
+        connection.commit()
+        assert not evaluate_position_profit_rules(
+            connection,
+            provider,
+            OpenCalendar(),
+            processing_date=date(2024, 1, 3),
+        ).notifications
+        assert provider.calls == []
+        connection.execute(
+            "UPDATE position_snapshots SET position_sync_required_since = NULL "
+            "WHERE fund_symbol = ?",
+            ("000001",),
+        )
+        connection.commit()
+
         first = evaluate_position_profit_rules(
             connection,
             provider,
