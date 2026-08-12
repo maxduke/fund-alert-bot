@@ -25,6 +25,7 @@ Implemented Telegram commands:
 - `/add_profit <asset_type> <symbol> <name> <cost> <thresholds>`
 - `/add_dca <name> <weekday> <amount>`
 - `/add_dca <fund_symbol> <name> <weekday> <gross_amount> <fee> [holiday:next|holiday:skip]`
+- `/set_dca_amount <rule_id> <new_amount>`
 - `/dca_skip <rule_id> <due_date>`
 - `/set_fund_fee <fund_symbol> <rate:<percent>%|fixed:<RMB>>`
 - `/set_fund_cutoff <fund_symbol> <HH:MM>`
@@ -86,6 +87,9 @@ At rule creation the default AKShare provider makes one per-symbol Xueqiu
 metadata request to verify the declared fund type; QDII/overseas funds are
 rejected, and an unavailable metadata response creates no rule. This avoids a
 bulk Eastmoney fund-list request and never adds traffic to recurring checks.
+
+Use `/set_dca_amount 12 500` to change only future occurrences of DCA rule 12.
+Already-created occurrences keep their original amount, rule ID, and history.
 
 ### Feeder-fund setup and position sync
 

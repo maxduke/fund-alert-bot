@@ -413,6 +413,52 @@ def add_enhanced_dca_rule(
         raise
 
 
+def update_dca_rule_amount(
+    connection: sqlite3.Connection,
+    *,
+    rule_id: int,
+    amount: int | float,
+) -> sqlite3.Row:
+    """Change one enabled DCA rule without modifying stored occurrences."""
+
+    if isinstance(amount, bool) or not math.isfinite(float(amount)) or amount <= 0:
+        raise ValueError("DCA amount must be a positive finite number.")
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        row = connection.execute(
+            "SELECT * FROM rules WHERE id = ? AND type = 'dca_reminder'",
+            (rule_id,),
+        ).fetchone()
+        if row is None or not bool(row["enabled"]):
+            raise sqlite3.IntegrityError("Enabled DCA rule was not found.")
+        params = json.loads(str(row["params_json"]))
+        if not isinstance(params, dict):
+            raise sqlite3.IntegrityError("DCA rule parameters are invalid.")
+        if str(row["asset_type"]) == "cn_open_fund":
+            settings = get_fund_settings(connection, str(row["symbol"]))
+            if (
+                settings is not None
+                and settings["fee_mode"] == "fixed"
+                and float(settings["fee_value"]) >= float(amount)
+            ):
+                raise ValueError("Fixed fee must be lower than the DCA amount.")
+        params["amount"] = amount
+        connection.execute(
+            "UPDATE rules SET params_json = ?, updated_at = ? WHERE id = ?",
+            (_json_text(params), _utc_now_text(), rule_id),
+        )
+        updated = connection.execute(
+            "SELECT * FROM rules WHERE id = ?", (rule_id,)
+        ).fetchone()
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    if updated is None:
+        raise RuntimeError("Updated DCA rule was not found.")
+    return updated
+
+
 def add_position_profit_rule(
     connection: sqlite3.Connection,
     *,

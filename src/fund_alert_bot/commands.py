@@ -61,6 +61,7 @@ from fund_alert_bot.db import (
     reconcile_position_snapshot,
     record_manual_addition,
     skip_scheduled_dca_occurrence,
+    update_dca_rule_amount,
     upsert_fund_cutoff,
     upsert_fund_fee,
     upsert_position_snapshot,
@@ -115,6 +116,7 @@ ADD_DCA_USAGE = "\n".join(
         "<rate:<percent>%|fixed:<RMB>> [holiday:next|holiday:skip]",
     )
 )
+SET_DCA_AMOUNT_USAGE = "Usage: /set_dca_amount <rule_id> <new_amount>"
 ADD_PROFIT_USAGE = (
     "Usage: /add_profit <asset_type> <symbol> <name> <cost|auto> <thresholds>"
 )
@@ -138,6 +140,7 @@ HELP_MESSAGE = "\n".join(
         "/add_dca <fund_symbol> <name> <weekday> <amount> <fee> "
         "[holiday:next|holiday:skip] - Fixed fund DCA estimate",
         "/dca_skip <rule_id> <due_date> - Deduction failed/not executed",
+        "/set_dca_amount <rule_id> <new_amount> - Future occurrences only",
         "/set_fund_fee <fund_symbol> <rate:<percent>%|fixed:<RMB>>",
         "/set_fund_cutoff <fund_symbol> <HH:MM>",
         "/sync_position <fund_symbol> <units> <average_unit_cost>",
@@ -1876,6 +1879,46 @@ def build_command_handlers(
             )
         await _reply_text(update, response)
 
+    async def set_dca_amount(
+        update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        if await reject_if_unauthorized(update, allowed_user_ids):
+            return
+        args = getattr(context, "args", ())
+        if len(args) != 2:
+            await _reply_text(update, SET_DCA_AMOUNT_USAGE)
+            return
+        try:
+            rule_id = int(args[0])
+        except ValueError:
+            await _reply_text(update, "rule_id must be a positive integer")
+            return
+        if rule_id <= 0:
+            await _reply_text(update, "rule_id must be a positive integer")
+            return
+        try:
+            amount = parse_dca_amount(args[1])
+        except CommandParseError as exc:
+            await _reply_text(update, str(exc))
+            return
+        try:
+            with open_connection(sqlite_path) as connection:
+                initialize_database(connection)
+                row = update_dca_rule_amount(connection, rule_id=rule_id, amount=amount)
+        except ValueError as exc:
+            await _reply_text(update, str(exc))
+            return
+        except sqlite3.IntegrityError as exc:
+            await _reply_text(update, str(exc))
+            return
+        await _reply_text(
+            update,
+            (
+                f"Updated DCA rule id={rule_id} {row['name']} future amount to "
+                f"{format_plan_amount(amount)}. Existing occurrences are unchanged."
+            ),
+        )
+
     async def add_drawdown_plan(
         update: Update,
         context: ContextTypes.DEFAULT_TYPE,
@@ -3049,6 +3092,7 @@ def build_command_handlers(
         CommandHandler("add_drawdown", add_drawdown),
         CommandHandler("add_profit", add_profit),
         CommandHandler("add_dca", add_dca),
+        CommandHandler("set_dca_amount", set_dca_amount),
         CommandHandler("add_drawdown_plan", add_drawdown_plan),
         CommandHandler("mark_added", mark_added),
         CommandHandler("set_fund_fee", set_fund_fee),

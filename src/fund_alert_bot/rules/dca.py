@@ -60,6 +60,7 @@ def build_dca_reminder_alert(
     *,
     occurrence_status: str | None = None,
     effective_date: str | None = None,
+    occurrence_amount: int | float | None = None,
 ) -> dict[str, object] | None:
     """Build a DCA reminder alert when the rule is due today."""
 
@@ -78,6 +79,8 @@ def build_dca_reminder_alert(
     due_date = today.isoformat()
     enhanced = str(_read_rule_value(rule, "asset_type", "")) == "cn_open_fund"
     if enhanced:
+        if occurrence_amount is not None:
+            amount = _read_amount({"amount": occurrence_amount})
         fund_symbol = str(_read_rule_value(rule, "symbol", ""))
         holiday_policy = str(params.get("holiday_policy", "next"))
         status_line = (

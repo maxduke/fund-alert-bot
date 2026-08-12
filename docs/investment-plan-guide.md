@@ -567,6 +567,18 @@ future estimates and never rewrites a historical cost calculation. Existing
 `/add_dca <name> <weekday> <amount>` rules continue as reminder-only rules and do
 not estimate a position.
 
+Change a DCA rule's future weekly amount without replacing its rule ID:
+
+```text
+/set_dca_amount <rule_id> <new_amount>
+```
+
+For example, `/set_dca_amount 12 500` changes rule 12 to ¥500. An occurrence
+already created for a due date keeps its original gross amount, fee snapshot,
+reminder text, and later position estimate. Only occurrences created after the
+command use ¥500. The command never changes a drawdown-plan tier or submits an
+order.
+
 The Investment Feeder Fund settings also hold the sales-platform subscription
 cutoff, using `15:00` for this configuration. It can be corrected once without
 changing historical occurrences:
