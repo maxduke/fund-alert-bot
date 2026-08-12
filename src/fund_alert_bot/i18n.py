@@ -172,10 +172,8 @@ _EN_TO_ZH = {
     "Deduction failed / not executed": "扣款失败或未执行",
     "Skipped fixed DCA occurrence": "已跳过固定定投期次",
     "The occurrence is still pending; try again.": "该期次仍在处理中，请稍后重试。",
-    "This estimate was already applied. Use /sync_position to correct the platform position; no units were subtracted.":
-        "该估算已经应用。请使用 /sync_position 按平台数据修正持仓；Bot 没有扣减份额。",
-    "This occurrence was already reconciled by Position Sync.":
-        "该期次已经通过持仓同步完成对账。",
+    "This estimate was already applied. Use /sync_position to correct the platform position; no units were subtracted.": "该估算已经应用。请使用 /sync_position 按平台数据修正持仓；Bot 没有扣减份额。",
+    "This occurrence was already reconciled by Position Sync.": "该期次已经通过持仓同步完成对账。",
     "Fixed DCA occurrence not found.": "未找到固定定投期次。",
     "Confirm zero position": "确认持仓为零",
     "Position close cancelled. Nothing changed.": "已取消清仓确认，未作任何修改。",
