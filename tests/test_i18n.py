@@ -61,6 +61,17 @@ def test_localization_does_not_modify_user_provided_english_names() -> None:
     try:
         assert localize_text("• Name: Updated Income") == "• 名称： Updated Income"
         assert localize_text("Fund: Falling Star") == "基金： Falling Star"
+        assert localize_text("• Name: No action") == "• 名称： No action"
+    finally:
+        set_language("en")
+
+
+def test_chinese_translates_dynamic_profit_setup_button() -> None:
+    set_language("zh-CN")
+    try:
+        assert localize_text("Set gain thresholds — 110026") == (
+            "设置涨幅阈值 — 110026"
+        )
     finally:
         set_language("en")
 

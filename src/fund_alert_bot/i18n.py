@@ -122,6 +122,8 @@ _EN_TO_ZH = {
     "Peak date:": "高点日期：",
     "Buy-plan pre-alert": "加仓计划预警",
     "Buy-plan reminder": "加仓计划提醒",
+    "Buy-plan pre-alert —": "加仓计划预警 —",
+    "Buy-plan reminder —": "加仓计划提醒 —",
     "Realtime estimate before close": "收盘前实时估算",
     "Market date:": "市场日期：",
     "Realtime drawdown:": "实时回撤：",
@@ -350,6 +352,7 @@ _EN_TO_ZH.update(
         "Edit the threshold placeholder, then send this separate command:": "请修改阈值占位符，然后单独发送此命令：",
         "No rule was created by this button.": "此按钮未创建规则。",
         "Notification delivery failures:": "通知投递失败：",
+        "Set gain thresholds —": "设置涨幅阈值 —",
         "Reference ETF data: unavailable": "参考 ETF 数据：不可用",
         "Feeder-fund NAV: unavailable": "联接基金净值：不可用",
         "Position value: unavailable": "持仓市值：不可用",
@@ -394,6 +397,40 @@ _ZH_TO_EN = {
 
 _EXACT_ZH_TO_EN = {"取消": "Cancel"}
 
+_DECORATIONS = (
+    "📉 ",
+    "💰 ",
+    "⚠️ ",
+    "✅ ",
+    "⏭ ",
+    "♻️ ",
+    "❌ ",
+    "👌 ",
+    "📋 ",
+    "📈 ",
+    "🎯 ",
+    "• ",
+)
+_DYNAMIC_PREFIXES = (
+    "Added drawdown rule id=",
+    "Added profit rule id=",
+    "Added auto-cost Price-Gain rule id=",
+    "Added DCA rule id=",
+    "Added fixed DCA rule id=",
+    "Saved Drawdown Add Plan id=",
+    "Updated DCA rule id=",
+    "Updated fund",
+    "Disabled drawdown plan id=",
+    "Disabled fixed DCA rule id=",
+    "Disabled auto-cost Price-Gain rule id=",
+    "Deleted rule id=",
+    "Rule id=",
+    "Skipped fixed DCA occurrence",
+    "Set gain thresholds —",
+    "Buy-plan pre-alert —",
+    "Buy-plan reminder —",
+)
+
 
 def set_language(language: str) -> None:
     """Set the process-wide output language after validated startup config."""
@@ -409,14 +446,77 @@ def get_language() -> str:
 
 
 def localize_text(text: str) -> str:
-    """Translate one fully rendered user-facing string."""
+    """Translate UI structure without rewriting interpolated user values."""
+    return "\n".join(_localize_line(line) for line in text.split("\n"))
+
+
+def _localize_line(line: str) -> str:
     exact = _EXACT_EN_TO_ZH if _language == "zh-CN" else _EXACT_ZH_TO_EN
-    if text in exact:
-        return exact[text]
+    if line in exact:
+        return exact[line]
     replacements = _EN_TO_ZH if _language == "zh-CN" else _ZH_TO_EN
-    for source in sorted(replacements, key=len, reverse=True):
-        text = text.replace(source, replacements[source])
-    return text
+    if line in replacements:
+        return replacements[line]
+
+    full_line_label = next(
+        (
+            source
+            for source in sorted(replacements, key=len, reverse=True)
+            if source.endswith((":", "：")) and line.startswith(source)
+        ),
+        None,
+    )
+    if full_line_label is not None:
+        value = line[len(full_line_label) :]
+        if _language == "en" and full_line_label == "• 计划金额：":
+            value = value.removesuffix(" 元") + " RMB"
+        return replacements[full_line_label] + value
+
+    decoration = next((item for item in _DECORATIONS if line.startswith(item)), "")
+    content = line[len(decoration) :]
+    if content in replacements:
+        return decoration + replacements[content]
+
+    label = next(
+        (
+            source
+            for source in sorted(replacements, key=len, reverse=True)
+            if source.endswith((":", "：")) and content.startswith(source)
+        ),
+        None,
+    )
+    if label is not None:
+        return decoration + replacements[label] + content[len(label) :]
+
+    dynamic_prefix = next(
+        (source for source in _DYNAMIC_PREFIXES if content.startswith(source)),
+        None,
+    )
+    if dynamic_prefix is not None and dynamic_prefix in replacements:
+        return (
+            decoration + replacements[dynamic_prefix] + content[len(dynamic_prefix) :]
+        )
+
+    # Prose lines contain no configured identifier field. Translate complete
+    # leading sentences, then continue with the remaining prose.
+    sentence = next(
+        (
+            source
+            for source in sorted(replacements, key=len, reverse=True)
+            if source.endswith(".") and content.startswith(source)
+        ),
+        None,
+    )
+    if sentence is not None:
+        remainder = content[len(sentence) :]
+        separator = remainder[: len(remainder) - len(remainder.lstrip())]
+        return (
+            decoration
+            + replacements[sentence]
+            + separator
+            + _localize_line(remainder.lstrip())
+        )
+    return line
 
 
 def localize_actions(
