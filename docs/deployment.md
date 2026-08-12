@@ -1,5 +1,7 @@
 # VPS Deployment
 
+[English](deployment.md) | [简体中文](deployment.zh-CN.md)
+
 This guide runs `fund-alert-bot` as a small Docker Compose service on a VPS.
 The production compose file uses the published container image and stores local
 SQLite data under the deployment directory.
@@ -93,7 +95,7 @@ Minimum configuration:
 
 ```dotenv
 TELEGRAM_BOT_TOKEN=replace-with-fund-alert-bot-token
-TELEGRAM_ALLOWED_USER_IDS=
+TELEGRAM_ALLOWED_USER_IDS=123456789
 BOT_UID=1000
 BOT_GID=1000
 SQLITE_PATH=/app/data/fund_alert_bot.sqlite3
@@ -103,6 +105,10 @@ BEFORE_CLOSE_CHECK_TIME=14:50
 DCA_REMINDER_TIME=09:30
 FUND_NAV_PROCESS_TIME=08:30
 ```
+
+Replace `123456789` with at least one authorized numeric Telegram user ID; use
+commas for multiple IDs. An empty allowlist rejects every command and leaves the
+default Telegram notification channel with no recipient.
 
 Replace `BOT_UID` and `BOT_GID` with the two values printed by `id -u` and
 `id -g`. Compose uses them for the non-root bot process so it can write the
@@ -241,4 +247,4 @@ Example:
 ```
 
 This keeps RSI6 alerts owned by `rsi6_monitor_bot` and drawdown, DCA, and
-profit-taking reminders owned by `fund-alert-bot`.
+Price-Gain reminders owned by `fund-alert-bot`.

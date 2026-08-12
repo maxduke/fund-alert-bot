@@ -1,10 +1,10 @@
 # Architecture
 
-`fund-alert-bot` is planned as a small Python service that periodically evaluates personal reminder rules and sends notifications. It does not host a web app and does not trade.
+`fund-alert-bot` is a small Python service that periodically evaluates personal reminder rules and sends notifications. It does not host a web app and does not trade.
 
 ## Runtime Shape
 
-The bot should run as a single Python process:
+The bot runs as a single Python process:
 
 1. Load configuration from environment variables.
 2. Open a local SQLite database.
@@ -16,7 +16,7 @@ The bot should run as a single Python process:
 
 Docker and Docker Compose should package this same process for repeatable local deployment.
 
-## Planned Modules
+## Modules
 
 ### Configuration
 
@@ -47,11 +47,11 @@ Storage code should hide raw SQL from alert evaluation and notification modules 
 
 Responsible for deciding whether a reminder should be emitted.
 
-Initial supported evaluator families:
+Supported evaluator families:
 
 - drawdown from recent high
 - DCA reminder due
-- profit-taking threshold reminder
+- price-gain threshold reminder
 
 RSI and RSI6 evaluators are explicitly out of scope.
 
@@ -59,10 +59,12 @@ RSI and RSI6 evaluators are explicitly out of scope.
 
 Responsible for registering APScheduler jobs, running checks on configured intervals, and handling job-level logging.
 
-After-close market checks should use the CN market calendar to skip official
-holidays, with weekday fallback when AKShare calendar data is unavailable. DCA
-reminders remain personal weekday reminders and do not depend on the market
-calendar.
+After-close market checks use the CN market calendar to skip official holidays,
+with weekday fallback for ordinary reminder checks when AKShare calendar data is
+unavailable. Reminder-only DCA rules remain personal weekday reminders. Enhanced
+fund DCA settlement depends on a confirmed market calendar and keeps an
+occurrence pending when calendar coverage is unavailable instead of guessing a
+fund valuation date.
 
 The scheduler should coordinate modules without owning business rules.
 
