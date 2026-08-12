@@ -91,6 +91,7 @@ nano /opt/fund-alert-bot/.env
 ```dotenv
 TELEGRAM_BOT_TOKEN=replace-with-fund-alert-bot-token
 TELEGRAM_ALLOWED_USER_IDS=123456789
+BOT_LANGUAGE=zh-CN
 BOT_UID=1000
 BOT_GID=1000
 SQLITE_PATH=/app/data/fund_alert_bot.sqlite3
@@ -104,6 +105,9 @@ FUND_NAV_PROCESS_TIME=08:30
 必须把 `123456789` 替换为至少一个获准使用的 Telegram 数字用户 ID；多个 ID
 使用英文逗号分隔。allowlist 留空会拒绝所有命令，并使默认 Telegram 通知没有
 接收者。
+
+`BOT_LANGUAGE` 控制全部用户可见回复、按钮和通知渠道，仅支持 `zh-CN` 与
+`en`。修改后重启容器；Telegram 命令名称仍使用英文。
 
 把 `BOT_UID`、`BOT_GID` 替换为 `id -u`、`id -g` 实际输出。Compose 用这
 两个值以非 root 身份运行 Bot，并写入宿主机所有的 `data` 目录。值不匹配会

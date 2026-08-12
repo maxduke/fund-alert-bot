@@ -202,10 +202,14 @@ before replacing the position.
 
 Telegram remains the command channel and default notification channel; optional
 Bark, ntfy, and webhook channels can be enabled with environment variables.
+User-facing Telegram replies, buttons, and every notification channel use one
+global language. Set `BOT_LANGUAGE=zh-CN` (default) or `BOT_LANGUAGE=en`, then
+restart the service. Commands such as `/check` keep their English Telegram names.
 
 Default scheduler configuration:
 
 - `TZ=Asia/Shanghai`
+- `BOT_LANGUAGE=zh-CN`
 - `AFTER_CLOSE_CHECK_TIME=17:10`
 - `BEFORE_CLOSE_CHECK_TIME=14:50`
 - `DCA_REMINDER_TIME=09:30`

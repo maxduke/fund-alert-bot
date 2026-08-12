@@ -7,6 +7,7 @@ from collections.abc import Collection, Sequence
 from typing import Any
 
 from fund_alert_bot.config import NotificationSettings
+from fund_alert_bot.i18n import localize_actions, localize_text
 from fund_alert_bot.notifications.bark import BarkNotificationChannel
 from fund_alert_bot.notifications.base import (
     NotificationChannel,
@@ -45,9 +46,9 @@ class NotificationService:
             return []
 
         message = NotificationMessage(
-            title=title,
-            body=body,
-            telegram_actions=telegram_actions,
+            title=localize_text(title),
+            body=localize_text(body),
+            telegram_actions=localize_actions(telegram_actions),
         )
         results: list[NotificationResult] = []
         for channel in self._channels:

@@ -96,6 +96,7 @@ Minimum configuration:
 ```dotenv
 TELEGRAM_BOT_TOKEN=replace-with-fund-alert-bot-token
 TELEGRAM_ALLOWED_USER_IDS=123456789
+BOT_LANGUAGE=zh-CN
 BOT_UID=1000
 BOT_GID=1000
 SQLITE_PATH=/app/data/fund_alert_bot.sqlite3
@@ -109,6 +110,10 @@ FUND_NAV_PROCESS_TIME=08:30
 Replace `123456789` with at least one authorized numeric Telegram user ID; use
 commas for multiple IDs. An empty allowlist rejects every command and leaves the
 default Telegram notification channel with no recipient.
+
+`BOT_LANGUAGE` controls all user-facing replies, buttons, and notification
+channels. Supported values are `zh-CN` and `en`; restart the container after a
+change. Telegram command names remain English.
 
 Replace `BOT_UID` and `BOT_GID` with the two values printed by `id -u` and
 `id -g`. Compose uses them for the non-root bot process so it can write the

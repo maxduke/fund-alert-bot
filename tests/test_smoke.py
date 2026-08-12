@@ -17,6 +17,7 @@ from fund_alert_bot.config import (
     DEFAULT_AKSHARE_LATEST_LOOKBACK_DAYS,
     DEFAULT_AKSHARE_RETRIES,
     DEFAULT_AKSHARE_RETRY_DELAY_SECONDS,
+    DEFAULT_BOT_LANGUAGE,
     DEFAULT_DCA_REMINDER_TIME,
     DEFAULT_FUND_NAV_PROCESS_TIME,
     DEFAULT_SQLITE_PATH,
@@ -25,6 +26,7 @@ from fund_alert_bot.config import (
     load_settings,
     parse_allowed_user_ids,
     parse_bool_env,
+    parse_bot_language,
     parse_non_negative_float_env,
     parse_positive_int_env,
 )
@@ -78,6 +80,19 @@ def test_scheduler_settings_from_environment(monkeypatch) -> None:
     assert settings.after_close_check_time == "17:10"
     assert settings.dca_reminder_time == "09:30"
     assert settings.fund_nav_process_time == "08:45"
+
+
+def test_bot_language_defaults_to_chinese_and_accepts_english(monkeypatch) -> None:
+    monkeypatch.delenv("BOT_LANGUAGE", raising=False)
+    assert load_settings(load_env_file=False).bot_language == DEFAULT_BOT_LANGUAGE
+
+    monkeypatch.setenv("BOT_LANGUAGE", "en")
+    assert load_settings(load_env_file=False).bot_language == "en"
+
+
+def test_bot_language_rejects_unknown_values() -> None:
+    with pytest.raises(ValueError, match="BOT_LANGUAGE must be one of"):
+        parse_bot_language("fr")
 
 
 def test_compose_preserves_schedule_environment_overrides() -> None:
