@@ -1,28 +1,32 @@
 # fund-alert-bot
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 Lightweight personal investment alert bot for personal portfolio reminders.
 
 This project runs alongside `maxduke/rsi6_monitor_bot`. The existing RSI6 bot remains responsible for RSI6 alerts. `fund-alert-bot` focuses on a smaller set of non-trading reminders:
 
 - drawdown from recent high alerts
 - DCA reminders
-- profit-taking reminders
+- price-gain reminders
 - multi-channel notifications
 
 This repository is intentionally not a web platform, not an RSI implementation, and not an automatic trading system.
 
 ## Current Status
 
-The project has a Python package skeleton, environment-based configuration,
-SQLite storage helpers, drawdown-from-high rule evaluation, DCA reminder
-evaluation, profit-taking reminder evaluation, Telegram commands, scheduled
+The service includes environment-based configuration, SQLite storage,
+drawdown-from-high rule evaluation, DCA reminder
+evaluation, price-gain reminder evaluation, Telegram commands, scheduled
 market and DCA checks, multi-channel notification dispatch with delivery state,
 market data normalization, tests, Ruff configuration, and Docker packaging.
 
 Implemented Telegram commands:
 
+- `/start`
+- `/help`
 - `/add_drawdown <asset_type> <symbol> <name> <lookback_days> <thresholds>`
-- `/add_profit <asset_type> <symbol> <name> <cost> <thresholds>`
+- `/add_profit <asset_type> <symbol> <name> <cost|auto> <thresholds>`
 - `/add_dca <name> <weekday> <amount>`
 - `/add_dca <fund_symbol> <name> <weekday> <gross_amount> <fee> [holiday:next|holiday:skip]`
 - `/set_dca_amount <rule_id> <new_amount>`
@@ -231,7 +235,7 @@ here. The bot does not poll realtime endpoints: it performs one scheduled
 before-close pass, skips already completed plan/date work, and requests fund NAV
 only while a dated estimate is pending.
 
-## Planned Stack
+## Technology Stack
 
 - Python 3.12
 - python-telegram-bot
@@ -311,7 +315,7 @@ first `docker compose up` as shown above.
 
 Do not commit `.env` or real secrets.
 
-Once tooling exists, use:
+Run:
 
 ```powershell
 ruff check .
@@ -331,10 +335,11 @@ especially on Windows workstations.
 ## Project Documents
 
 - `AGENTS.md`: contributor and coding-agent guardrails
-- `docs/architecture.md`: planned module responsibilities
-- `docs/investment-plan-guide.md`: accepted Drawdown Add Plan and position-usage design
-- `docs/investment-plan-implementation.md`: accepted implementation design and PR plan
-- `docs/roadmap.md`: PR-sized implementation phases
+- [`docs/deployment.md`](docs/deployment.md): VPS deployment and SQLite backup guide ([简体中文](docs/deployment.zh-CN.md))
+- [`docs/architecture.md`](docs/architecture.md): current module responsibilities
+- [`docs/investment-plan-guide.md`](docs/investment-plan-guide.md): Drawdown Add Plan, DCA, position, and Price-Gain behavior ([简体中文](docs/investment-plan-guide.zh-CN.md))
+- [`docs/investment-plan-implementation.md`](docs/investment-plan-implementation.md): accepted technical design and acceptance checks
+- [`docs/roadmap.md`](docs/roadmap.md): historical implementation phases
 - `.env.example`: placeholder-only configuration template
 
 ## Scope Boundaries

@@ -1,5 +1,7 @@
 # VPS Deployment
 
+[English](deployment.md) | [简体中文](deployment.zh-CN.md)
+
 This guide runs `fund-alert-bot` as a small Docker Compose service on a VPS.
 The production compose file uses the published container image and stores local
 SQLite data under the deployment directory.
@@ -241,4 +243,4 @@ Example:
 ```
 
 This keeps RSI6 alerts owned by `rsi6_monitor_bot` and drawdown, DCA, and
-profit-taking reminders owned by `fund-alert-bot`.
+Price-Gain reminders owned by `fund-alert-bot`.

@@ -1,5 +1,7 @@
 # Investment Plan Enhancement Guide
 
+[English](investment-plan-guide.md) | [简体中文](investment-plan-guide.zh-CN.md)
+
 > Status: Drawdown Add Plans, before-close actions, Manual Add Estimates,
 > Position Sync reconciliation, enhanced fixed DCA position estimates, and
 > position-linked Price-Gain Reminders are implemented. Generic allocation
@@ -785,7 +787,7 @@ Keep the existing command and stored rule type, and allow `auto` in the cost
 position for an Investment Feeder Fund:
 
 ```text
-/add_profit <asset_type> <symbol> <name> <cost> <thresholds>
+/add_profit <asset_type> <symbol> <name> <cost|auto> <thresholds>
 
 Position-linked example:
 /add_profit cn_open_fund <fund_symbol> <name> auto 20,30

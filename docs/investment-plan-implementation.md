@@ -494,6 +494,16 @@ and direct the user to `/set_fund_fee <fund_symbol> <fee>`. A fee update affects
 only later occurrences: copy the current fee form and value into each occurrence
 when it is created, so pending or applied history is not reinterpreted.
 
+Allow `/set_dca_amount <rule_id> <new_amount>` for an enabled DCA rule. Update
+only `rules.params_json.amount` while retaining the rule ID. Never rewrite a
+row in `scheduled_dca_occurrences`: each occurrence is the authoritative
+snapshot of its due-date gross amount and fee. If an occurrence already exists
+when the command runs, reminder reconstruction and later unit estimation must
+use that occurrence's stored amount rather than the rule's new amount. Reject a
+new amount that is non-finite, non-positive, or not greater than the fund's
+fixed subscription fee. Reminder-only DCA rules use the same command but have no
+position estimate.
+
 Store the feeder fund's sales-platform subscription cutoff beside its shared
 fee, using `15:00` for this initial configuration and allowing an explicit
 `/set_fund_cutoff <fund_symbol> <HH:MM>` correction. A change applies only to
@@ -863,6 +873,8 @@ transaction ledger.
 - Fee-aware DCA units are labeled estimated until the next Position Sync.
 - A fund-fee change affects only future occurrences and never recalculates
   historical position estimates.
+- A DCA amount change retains the rule ID, affects only occurrences created
+  later, and never rewrites an existing occurrence, reminder, or estimate.
 - A position-linked Price-Gain Reminder uses feeder-fund unit NAV and the
   current exact-or-estimated average unit cost, never Reference ETF price.
 - Routine estimated cost changes do not create duplicate gain-threshold alerts.
