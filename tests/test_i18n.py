@@ -147,6 +147,21 @@ def test_chinese_localizes_dynamic_rule_not_found_suffix() -> None:
         set_language("en")
 
 
+def test_chinese_localizes_known_label_suffixes_and_active_decorations() -> None:
+    set_language("zh-CN")
+    try:
+        assert localize_text("Lookback: 365 calendar days") == "回看周期： 365 个日历日"
+        assert (
+            localize_text("Position value: unavailable (unit NAV could not be fetched)")
+            == "持仓市值： 不可用（无法获取单位净值）"
+        )
+        assert localize_text("📊 Investment Plans") == "📊 投资计划"
+        assert localize_text("🔔 New alerts: 1.") == "🔔 新提醒： 1."
+        assert localize_text("🧪 Test notification") == "🧪 测试通知"
+    finally:
+        set_language("en")
+
+
 def test_chinese_translates_every_dca_skip_outcome() -> None:
     set_language("zh-CN")
     try:

@@ -49,6 +49,7 @@ _EN_TO_ZH = {
     "Applied estimates since sync:": "同步后已应用估算：",
     "Position value:": "持仓市值：",
     "Position value": "持仓市值",
+    "unavailable (unit NAV could not be fetched)": "不可用（无法获取单位净值）",
     "Position: unavailable": "持仓：不可用",
     "Position: closed": "持仓：已清仓",
     "Position: not synced": "持仓：尚未同步",
@@ -413,6 +414,9 @@ _DECORATIONS = (
     "📋 ",
     "📈 ",
     "🎯 ",
+    "📊 ",
+    "🔔 ",
+    "🧪 ",
     "• ",
 )
 _DYNAMIC_PREFIXES = (
@@ -438,6 +442,10 @@ _DYNAMIC_PREFIXES = (
     "Record only ",
     "仅记录 ",
 )
+_LABEL_VALUE_SUFFIXES = {
+    "Lookback:": ("calendar days",),
+    "Position value:": ("unavailable (unit NAV could not be fetched)",),
+}
 
 
 def set_language(language: str) -> None:
@@ -451,6 +459,23 @@ def set_language(language: str) -> None:
 def get_language() -> str:
     """Return the active output language."""
     return _language
+
+
+def _localize_label_value(label: str, value: str, replacements: dict[str, str]) -> str:
+    if _language == "en" and label == "• 计划金额：":
+        value = value.removesuffix(" 元") + " RMB"
+    elif _language == "zh-CN":
+        suffix = next(
+            (
+                item
+                for item in _LABEL_VALUE_SUFFIXES.get(label, ())
+                if value.endswith(item)
+            ),
+            None,
+        )
+        if suffix is not None:
+            value = value.removesuffix(suffix) + replacements[suffix]
+    return replacements[label] + value
 
 
 def localize_text(text: str) -> str:
@@ -480,9 +505,7 @@ def _localize_line(line: str) -> str:
     )
     if full_line_label is not None:
         value = line[len(full_line_label) :]
-        if _language == "en" and full_line_label == "• 计划金额：":
-            value = value.removesuffix(" 元") + " RMB"
-        return replacements[full_line_label] + value
+        return _localize_label_value(full_line_label, value, replacements)
 
     decoration = next((item for item in _DECORATIONS if line.startswith(item)), "")
     content = line[len(decoration) :]
@@ -566,7 +589,9 @@ def _localize_line(line: str) -> str:
         None,
     )
     if label is not None:
-        return decoration + replacements[label] + content[len(label) :]
+        return decoration + _localize_label_value(
+            label, content[len(label) :], replacements
+        )
 
     dynamic_prefix = next(
         (source for source in _DYNAMIC_PREFIXES if content.startswith(source)),
