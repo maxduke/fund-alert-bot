@@ -59,10 +59,12 @@ RSI and RSI6 evaluators are explicitly out of scope.
 
 Responsible for registering APScheduler jobs, running checks on configured intervals, and handling job-level logging.
 
-After-close market checks should use the CN market calendar to skip official
-holidays, with weekday fallback when AKShare calendar data is unavailable. DCA
-reminders remain personal weekday reminders and do not depend on the market
-calendar.
+After-close market checks use the CN market calendar to skip official holidays,
+with weekday fallback for ordinary reminder checks when AKShare calendar data is
+unavailable. Reminder-only DCA rules remain personal weekday reminders. Enhanced
+fund DCA settlement depends on a confirmed market calendar and keeps an
+occurrence pending when calendar coverage is unavailable instead of guessing a
+fund valuation date.
 
 The scheduler should coordinate modules without owning business rules.
 
