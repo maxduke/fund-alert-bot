@@ -89,6 +89,40 @@ def test_localizes_help_and_dynamic_status_structures() -> None:
     assert localize_text("仅记录 -10% → ¥5000") == "Record only -10% → ¥5000"
 
 
+def test_localizes_dynamic_success_messages_without_changing_names() -> None:
+    set_language("zh-CN")
+    try:
+        assert (
+            localize_text(
+                "Updated DCA rule id=12 Falling Star future amount to ¥500."
+                " Existing occurrences are unchanged."
+            )
+            == "已更新定投规则 id=12 Falling Star 未来金额更新为 ¥500。"
+            "已有期次保持不变。"
+        )
+        assert localize_text(
+            "Saved Drawdown Add Plan id=3: ETF 588000 → fund 011608. "
+            "The first scheduled confirmed-close evaluation will initialize "
+            "its cycle. No order has been placed."
+        ) == (
+            "已保存回撤加仓计划 id=3：ETF 588000 → 基金 011608。"
+            "首次定时收盘确认将初始化其周期。未执行任何交易。"
+        )
+    finally:
+        set_language("en")
+
+
+def test_english_localizes_dynamic_cutoff_buttons() -> None:
+    set_language("en")
+
+    assert localize_text("15:00前已提交 — 当日净值") == (
+        "15:00 submitted before cutoff — same-day NAV"
+    )
+    assert localize_text("15:00后才提交 — 下一开放日") == (
+        "15:00 submitted after cutoff — next open-day NAV"
+    )
+
+
 def test_chinese_translates_every_dca_skip_outcome() -> None:
     set_language("zh-CN")
     try:

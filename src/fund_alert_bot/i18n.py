@@ -361,11 +361,13 @@ _EN_TO_ZH.update(
         "trend: falling": "趋势：下降",
         "trend: rising": "趋势：上升",
         "Updated fund": "已更新基金",
+        "Updated DCA rule id=": "已更新定投规则 id=",
         "Added drawdown rule id=": "已添加回撤规则 id=",
         "Added profit rule id=": "已添加涨幅规则 id=",
         "Added auto-cost Price-Gain rule id=": "已添加自动成本涨幅规则 id=",
         "Added DCA rule id=": "已添加定投规则 id=",
         "Added fixed DCA rule id=": "已添加固定定投规则 id=",
+        "Saved Drawdown Add Plan id=": "已保存回撤加仓计划 id=",
         "Disabled drawdown plan id=": "已停用回撤加仓计划 id=",
         "Disabled fixed DCA rule id=": "已停用固定定投规则 id=",
         "Disabled auto-cost Price-Gain rule id=": "已停用自动成本涨幅规则 id=",
@@ -485,6 +487,58 @@ def _localize_line(line: str) -> str:
     content = line[len(decoration) :]
     if content in replacements:
         return decoration + replacements[content]
+
+    if _language == "zh-CN" and content.startswith("Updated DCA rule id="):
+        before_amount, separator, after_amount = content.partition(" future amount to ")
+        if separator:
+            amount, suffix, _ = after_amount.partition(
+                ". Existing occurrences are unchanged."
+            )
+            if suffix:
+                return (
+                    decoration
+                    + before_amount.replace(
+                        "Updated DCA rule id=", replacements["Updated DCA rule id="], 1
+                    )
+                    + " 未来金额更新为 "
+                    + amount
+                    + "。已有期次保持不变。"
+                )
+
+    if _language == "zh-CN" and content.startswith("Saved Drawdown Add Plan id="):
+        identity, separator, after_identity = content.partition(": ETF ")
+        reference, fund_separator, after_fund = after_identity.partition(" → fund ")
+        fund, suffix, _ = after_fund.partition(
+            ". The first scheduled confirmed-close evaluation will initialize "
+            "its cycle. No order has been placed."
+        )
+        if separator and fund_separator and suffix:
+            return (
+                decoration
+                + identity.replace(
+                    "Saved Drawdown Add Plan id=",
+                    replacements["Saved Drawdown Add Plan id="],
+                    1,
+                )
+                + f"：ETF {reference} → 基金 {fund}。"
+                + "首次定时收盘确认将初始化其周期。未执行任何交易。"
+            )
+
+    if _language == "en":
+        cutoff_suffix = next(
+            (
+                source
+                for source in ("前已提交 — 当日净值", "后才提交 — 下一开放日")
+                if content.endswith(source)
+                and len(content.removesuffix(source)) == 5
+                and content.removesuffix(source)[2:3] == ":"
+                and content.removesuffix(source).replace(":", "").isdigit()
+            ),
+            None,
+        )
+        if cutoff_suffix is not None:
+            cutoff = content.removesuffix(cutoff_suffix)
+            return decoration + cutoff + replacements[cutoff_suffix]
 
     label = next(
         (
