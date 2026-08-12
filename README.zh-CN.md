@@ -212,9 +212,14 @@ Telegram 是命令通道和默认通知通道。Bark、ntfy、Webhook 可通过�
 启用。提醒先在 SQLite 中保留，再投递；失败或进程中断后的未投递提醒会在下次
 启动或晨间任务恢复。投递失败不会重复创建定投 occurrence 或回撤档位记录。
 
+Telegram 回复、按钮以及所有通知渠道共用一个全局语言。默认
+`BOT_LANGUAGE=zh-CN`；如需英文，改为 `BOT_LANGUAGE=en` 并重启服务。
+`/check` 等 Telegram 命令名称始终保持英文。
+
 默认调度配置：
 
 - `TZ=Asia/Shanghai`
+- `BOT_LANGUAGE=zh-CN`
 - `AFTER_CLOSE_CHECK_TIME=17:10`
 - `BEFORE_CLOSE_CHECK_TIME=14:50`
 - `DCA_REMINDER_TIME=09:30`

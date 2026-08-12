@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from fund_alert_bot.commands import create_application
 from fund_alert_bot.config import load_settings
 from fund_alert_bot.db import initialize_database, open_connection
+from fund_alert_bot.i18n import set_language
 from fund_alert_bot.market_data import AkshareMarketDataProvider, CNMarketCalendar
 from fund_alert_bot.scheduler import (
     create_scheduler,
@@ -38,6 +39,7 @@ def run() -> None:
     """Start the bot process."""
     configure_logging()
     settings = load_settings()
+    set_language(settings.bot_language)
 
     with open_connection(settings.sqlite_path) as connection:
         initialize_database(connection)
@@ -100,7 +102,7 @@ def run() -> None:
         "fund-alert-bot starting with SQLite database at %s, "
         "%d allowed Telegram users, before-close realtime check %s %s, "
         "after-close check %s %s, DCA reminder check %s %s, "
-        "fund NAV processing %s %s",
+        "fund NAV processing %s %s, language %s",
         settings.sqlite_path,
         len(settings.telegram_allowed_user_ids),
         settings.before_close_check_time,
@@ -111,6 +113,7 @@ def run() -> None:
         settings.timezone,
         settings.fund_nav_process_time,
         settings.timezone,
+        settings.bot_language,
     )
 
     try:

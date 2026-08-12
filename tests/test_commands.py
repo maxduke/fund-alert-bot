@@ -90,11 +90,11 @@ EXPECTED_DCA_MESSAGE = "\n".join(
     (
         "💰 DCA reminder",
         "",
-        "• 标的：创业板",
-        "• 日期：2024-01-04",
-        "• 计划金额：1000 元",
+        "• Asset: 创业板",
+        "• Date: 2024-01-04",
+        "• Planned amount: 1000 RMB",
         "",
-        "提醒：这是纪律提醒，不会自动交易。",
+        "Reminder: this is a discipline reminder; no automatic trade occurs.",
     )
 )
 

@@ -69,6 +69,7 @@ from fund_alert_bot.db import (
 from fund_alert_bot.db import (
     list_rules as db_list_rules,
 )
+from fund_alert_bot.i18n import localize_text
 from fund_alert_bot.market_data import (
     AkshareMarketDataProvider,
     AssetType,
@@ -1527,12 +1528,51 @@ async def _reply_text(
         LOGGER.warning("Telegram command update has no effective message")
         return
 
+    text = localize_text(text)
+    if reply_markup is not None:
+        reply_markup = _localize_reply_markup(reply_markup)
     chunks = _split_telegram_text(text)
     for index, chunk in enumerate(chunks):
         if reply_markup is not None and index == len(chunks) - 1:
             await update.effective_message.reply_text(chunk, reply_markup=reply_markup)
         else:
             await update.effective_message.reply_text(chunk)
+
+
+def _localize_reply_markup(reply_markup: object) -> object:
+    """Translate inline-button labels while retaining their callback data."""
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    keyboard = getattr(reply_markup, "inline_keyboard", None)
+    if keyboard is None:
+        return reply_markup
+    return InlineKeyboardMarkup(
+        tuple(
+            tuple(
+                InlineKeyboardButton.de_json(
+                    {**button.to_dict(), "text": localize_text(button.text)},
+                    None,
+                )
+                for button in row
+            )
+            for row in keyboard
+        )
+    )
+
+
+async def _edit_message_text(
+    query: object,
+    text: str,
+    *,
+    reply_markup: object | None = None,
+) -> None:
+    """Edit a callback message in the configured language."""
+    if reply_markup is not None:
+        reply_markup = _localize_reply_markup(reply_markup)
+    await query.edit_message_text(
+        localize_text(text),
+        reply_markup=reply_markup,
+    )
 
 
 def _split_telegram_text(text: str) -> tuple[str, ...]:
@@ -2017,14 +2057,15 @@ def build_command_handlers(
             or draft.user_id != get_update_user_id(update)
             or draft.chat_id != get_update_chat_id(update)
         ):
-            await query.edit_message_text(
+            await _edit_message_text(
+                query,
                 "This plan confirmation expired or belongs to another chat. "
-                "Rerun /add_drawdown_plan."
+                "Rerun /add_drawdown_plan.",
             )
             return
         if action == "drawdown_plan_cancel":
             plan_drafts.pop(token, None)
-            await query.edit_message_text("Drawdown Add Plan creation cancelled.")
+            await _edit_message_text(query, "Drawdown Add Plan creation cancelled.")
             return
         if draft.created_rule_id is None:
             try:
@@ -2038,14 +2079,15 @@ def build_command_handlers(
                         params=draft.command.params,
                     )
             except sqlite3.IntegrityError as exc:
-                await query.edit_message_text(f"Plan was not saved: {exc}")
+                await _edit_message_text(query, f"Plan was not saved: {exc}")
                 return
-        await query.edit_message_text(
+        await _edit_message_text(
+            query,
             f"Saved Drawdown Add Plan id={draft.created_rule_id}: "
             f"ETF {draft.command.reference_symbol} → fund "
             f"{draft.command.investment_fund_symbol}. The first scheduled "
             "confirmed-close evaluation will initialize its cycle. No order "
-            "has been placed."
+            "has been placed.",
         )
 
     def store_manual_add_draft(
@@ -2167,15 +2209,16 @@ def build_command_handlers(
             return
         selector = parts[3]
         if selector == "none":
-            await query.edit_message_text(
+            await _edit_message_text(
+                query,
                 "No addition recorded. The tier reminder state was not changed. "
-                "No order has been placed."
+                "No order has been placed.",
             )
             return
         user_id = get_update_user_id(update)
         chat_id = get_update_chat_id(update)
         if user_id is None or chat_id is None:
-            await query.edit_message_text("Unable to scope this action.")
+            await _edit_message_text(query, "Unable to scope this action.")
             return
         try:
             with open_connection(sqlite_path) as connection:
@@ -2189,14 +2232,15 @@ def build_command_handlers(
                     tier_index=tier_index,
                 )
         except (CommandParseError, ValueError) as exc:
-            await query.edit_message_text(str(exc))
+            await _edit_message_text(query, str(exc))
             return
         token, _draft = store_manual_add_draft(
             user_id=user_id,
             chat_id=chat_id,
             selection=selection,
         )
-        await query.edit_message_text(
+        await _edit_message_text(
+            query,
             format_manual_add_confirmation(selection),
             reply_markup=manual_add_confirmation_markup(token, selection.readiness),
         )
@@ -2221,13 +2265,14 @@ def build_command_handlers(
         cutoff_choice: str | None = None,
     ) -> None:
         if draft.completed_message is not None:
-            await query.edit_message_text(draft.completed_message)
+            await _edit_message_text(query, draft.completed_message)
             return
         now = _clock_now(clock).astimezone(cn_market_timezone)
         if now.date() != draft.selection.market_date:
-            await query.edit_message_text(
+            await _edit_message_text(
+                query,
                 "This reminder expired after its market date. Use /sync_position "
-                "after the fund platform updates."
+                "after the fund platform updates.",
             )
             return
         effective_date = None
@@ -2258,7 +2303,7 @@ def build_command_handlers(
                     ),
                 )
         except (MarketDataProviderError, ValueError, sqlite3.IntegrityError) as exc:
-            await query.edit_message_text(f"Addition was not recorded: {exc}")
+            await _edit_message_text(query, f"Addition was not recorded: {exc}")
             return
         tier_text = ", ".join(
             f"-{format_plan_percent(float(key))}" for key in recorded_keys
@@ -2278,7 +2323,7 @@ def build_command_handlers(
                 "or verify an order."
             )
         draft.completed_message = message
-        await query.edit_message_text(message)
+        await _edit_message_text(query, message)
 
     async def dca_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if await reject_if_unauthorized(update, allowed_user_ids):
@@ -2318,7 +2363,7 @@ def build_command_handlers(
             rule_id = int(raw_rule_id)
             due_date = date.fromisoformat(raw_due_date).isoformat()
         except (TypeError, ValueError):
-            await query.edit_message_text("Invalid DCA skip action.")
+            await _edit_message_text(query, "Invalid DCA skip action.")
             return
         with open_connection(sqlite_path) as connection:
             initialize_database(connection)
@@ -2327,7 +2372,7 @@ def build_command_handlers(
                 rule_id=rule_id,
                 due_date=due_date,
             )
-        await query.edit_message_text(_dca_skip_response(status, rule_id, due_date))
+        await _edit_message_text(query, _dca_skip_response(status, rule_id, due_date))
 
     async def manual_add_confirm_callback(
         update: Update,
@@ -2346,14 +2391,15 @@ def build_command_handlers(
         token, action = parts[1], parts[2]
         draft = get_manual_add_draft(update, token)
         if draft is None:
-            await query.edit_message_text(
+            await _edit_message_text(
+                query,
                 "This addition confirmation expired or belongs to another chat. "
-                "Rerun /mark_added."
+                "Rerun /mark_added.",
             )
             return
         if action == "cancel":
             manual_add_drafts.pop(token, None)
-            await query.edit_message_text("Manual addition recording cancelled.")
+            await _edit_message_text(query, "Manual addition recording cancelled.")
             return
         if action == "sync":
             await commit_manual_add(query, draft, create_estimate=False)
@@ -2372,7 +2418,8 @@ def build_command_handlers(
             return
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-        await query.edit_message_text(
+        await _edit_message_text(
+            query,
             "The confirmation is at or after the configured cutoff. When did you "
             "actually submit the fund subscription?",
             reply_markup=InlineKeyboardMarkup(
@@ -2416,11 +2463,11 @@ def build_command_handlers(
         token, choice = parts[1], parts[2]
         draft = get_manual_add_draft(update, token)
         if draft is None:
-            await query.edit_message_text("This cutoff confirmation expired.")
+            await _edit_message_text(query, "This cutoff confirmation expired.")
             return
         if choice == "cancel":
             manual_add_drafts.pop(token, None)
-            await query.edit_message_text("Manual addition recording cancelled.")
+            await _edit_message_text(query, "Manual addition recording cancelled.")
             return
         if choice not in {"before", "after"}:
             return
@@ -2634,8 +2681,8 @@ def build_command_handlers(
             or draft.user_id != get_update_user_id(update)
             or draft.chat_id != get_update_chat_id(update)
         ):
-            await query.edit_message_text(
-                "This position confirmation expired. Rerun /sync_position."
+            await _edit_message_text(
+                query, "This position confirmation expired. Rerun /sync_position."
             )
             return
         if choice in {"cancel", "partial"}:
@@ -2647,12 +2694,12 @@ def build_command_handlers(
                     "/sync_position after all listed additions settle. Nothing was "
                     "changed."
                 )
-            await query.edit_message_text(message)
+            await _edit_message_text(query, message)
             return
         if choice not in {"included", "none_included"}:
             return
         if draft.completed_message is not None:
-            await query.edit_message_text(draft.completed_message)
+            await _edit_message_text(query, draft.completed_message)
             return
         try:
             with open_connection(sqlite_path) as connection:
@@ -2667,7 +2714,7 @@ def build_command_handlers(
                     synced_at=now,
                 )
         except sqlite3.IntegrityError as exc:
-            await query.edit_message_text(str(exc))
+            await _edit_message_text(query, str(exc))
             return
         message = format_position_snapshot(row, None)
         if choice == "none_included":
@@ -2685,7 +2732,7 @@ def build_command_handlers(
                     "\nPending fixed DCA estimates remain eligible for NAV processing."
                 )
         draft.completed_message = message
-        await query.edit_message_text(message)
+        await _edit_message_text(query, message)
 
     async def position_profit_action_callback(
         update: Update,
@@ -2709,27 +2756,30 @@ def build_command_handlers(
             initialize_database(connection)
             event = get_position_profit_event(connection, event_id)
         if event is None:
-            await query.edit_message_text("Price-Gain reminder was not found.")
+            await _edit_message_text(query, "Price-Gain reminder was not found.")
             return
         choice = parts[2]
         if choice == "partial":
-            await query.edit_message_text(
+            await _edit_message_text(
+                query,
                 "After the platform confirms the redemption, run:\n"
                 f"/sync_position {event['symbol']} <remaining_units> "
-                "<new_average_unit_cost>\n\nNothing was changed by this button."
+                "<new_average_unit_cost>\n\nNothing was changed by this button.",
             )
             return
         if choice == "none":
-            await query.edit_message_text(
+            await _edit_message_text(
+                query,
                 "Recorded: no position update. Nothing was changed and no trade "
-                "was placed."
+                "was placed.",
             )
             return
         if choice != "close":
             return
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-        await query.edit_message_text(
+        await _edit_message_text(
+            query,
             "Confirm only after the platform shows zero units. This will set the "
             f"tracked position for {event['symbol']} to 0 and close this position "
             "cycle.",
@@ -2770,7 +2820,10 @@ def build_command_handlers(
         except ValueError:
             return
         if str(query.data).startswith("profit_close_cancel:"):
-            await query.edit_message_text("Position close cancelled. Nothing changed.")
+            await _edit_message_text(
+                query,
+                "Position close cancelled. Nothing changed.",
+            )
             return
         try:
             with open_connection(sqlite_path) as connection:
@@ -2781,12 +2834,13 @@ def build_command_handlers(
                     synced_at=_clock_now(clock),
                 )
         except sqlite3.IntegrityError as exc:
-            await query.edit_message_text(str(exc))
+            await _edit_message_text(query, str(exc))
             return
-        await query.edit_message_text(
+        await _edit_message_text(
+            query,
             "Tracked position set to zero; position cycle closed."
             if changed
-            else "Position was already zero; nothing changed."
+            else "Position was already zero; nothing changed.",
         )
 
     async def list_rules(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2929,16 +2983,17 @@ def build_command_handlers(
         symbol = str(getattr(query, "data", "")).removeprefix("profit_setup:")
         name = profit_setup_names.get((int(update.effective_user.id), symbol))
         if name is None:
-            await query.edit_message_text(
-                "Price-Gain setup is no longer available. Run /plans again."
+            await _edit_message_text(
+                query, "Price-Gain setup is no longer available. Run /plans again."
             )
             return
         safe_name = re.sub(r"\s+", "_", name.strip()) or symbol
-        await query.edit_message_text(
+        await _edit_message_text(
+            query,
             "Edit the threshold placeholder, then send this separate command:\n"
             f"/add_profit cn_open_fund {symbol} {safe_name} auto "
             "<thresholds，例如20,30>\n\n"
-            "No rule was created by this button."
+            "No rule was created by this button.",
         )
 
     async def delete_rule_command(
