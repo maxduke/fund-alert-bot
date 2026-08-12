@@ -54,3 +54,26 @@ def test_english_normalizes_existing_chinese_user_text() -> None:
         "• Asset: 创业板\n"
         "Reminder: this is a discipline reminder; no automatic trade occurs."
     )
+
+
+def test_localization_does_not_modify_user_provided_english_names() -> None:
+    set_language("zh-CN")
+    try:
+        assert localize_text("• Name: Updated Income") == "• 名称： Updated Income"
+        assert localize_text("Fund: Falling Star") == "基金： Falling Star"
+    finally:
+        set_language("en")
+
+
+def test_chinese_translates_every_dca_skip_outcome() -> None:
+    set_language("zh-CN")
+    try:
+        assert "已经应用" in localize_text(
+            "This estimate was already applied. Use /sync_position to correct "
+            "the platform position; no units were subtracted."
+        )
+        assert "持仓同步完成对账" in localize_text(
+            "This occurrence was already reconciled by Position Sync."
+        )
+    finally:
+        set_language("en")

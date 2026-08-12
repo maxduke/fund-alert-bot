@@ -105,7 +105,6 @@ _EN_TO_ZH = {
     "data unavailable": "数据不可用",
     "insufficient history": "历史数据不足",
     "Confirm pair + domestic calendar": "确认配对及境内估值日历",
-    "Cancel": "取消",
     "Drawdown Add Plan creation cancelled.": "已取消创建回撤加仓计划。",
     "Saved Drawdown Add Plan": "已保存回撤加仓计划",
     "No order has been placed.": "未执行任何交易。",
@@ -173,6 +172,10 @@ _EN_TO_ZH = {
     "Deduction failed / not executed": "扣款失败或未执行",
     "Skipped fixed DCA occurrence": "已跳过固定定投期次",
     "The occurrence is still pending; try again.": "该期次仍在处理中，请稍后重试。",
+    "This estimate was already applied. Use /sync_position to correct the platform position; no units were subtracted.":
+        "该估算已经应用。请使用 /sync_position 按平台数据修正持仓；Bot 没有扣减份额。",
+    "This occurrence was already reconciled by Position Sync.":
+        "该期次已经通过持仓同步完成对账。",
     "Fixed DCA occurrence not found.": "未找到固定定投期次。",
     "Confirm zero position": "确认持仓为零",
     "Position close cancelled. Nothing changed.": "已取消清仓确认，未作任何修改。",
@@ -188,14 +191,6 @@ _EN_TO_ZH = {
     "Purpose: channel connectivity check": "用途：通知渠道连通性检查",
     "Sent test notification to": "测试通知已发送至",
     "channel(s).": "个渠道。",
-    "unavailable": "不可用",
-    "falling": "下降",
-    "rising": "上升",
-    "Updated": "已更新",
-    "Added": "已添加",
-    "Disabled": "已停用",
-    "Deleted": "已删除",
-    "was not found": "未找到",
 }
 
 _EN_TO_ZH.update(
@@ -357,14 +352,33 @@ _EN_TO_ZH.update(
         "Edit the threshold placeholder, then send this separate command:": "请修改阈值占位符，然后单独发送此命令：",
         "No rule was created by this button.": "此按钮未创建规则。",
         "Notification delivery failures:": "通知投递失败：",
+        "Reference ETF data: unavailable": "参考 ETF 数据：不可用",
+        "Feeder-fund NAV: unavailable": "联接基金净值：不可用",
+        "Position value: unavailable": "持仓市值：不可用",
+        "unavailable (insufficient history)": "不可用（历史数据不足）",
+        "trend: falling": "趋势：下降",
+        "trend: rising": "趋势：上升",
+        "Updated fund": "已更新基金",
+        "Added drawdown rule id=": "已添加回撤规则 id=",
+        "Added profit rule id=": "已添加涨幅规则 id=",
+        "Added auto-cost Price-Gain rule id=": "已添加自动成本涨幅规则 id=",
+        "Added DCA rule id=": "已添加定投规则 id=",
+        "Added fixed DCA rule id=": "已添加固定定投规则 id=",
+        "Disabled drawdown plan id=": "已停用回撤加仓计划 id=",
+        "Disabled fixed DCA rule id=": "已停用固定定投规则 id=",
+        "Disabled auto-cost Price-Gain rule id=": "已停用自动成本涨幅规则 id=",
+        "Deleted rule id=": "已删除规则 id=",
+        "Rule id=": "规则 id=",
+        " was not found": " 未找到",
     }
 )
+
+_EXACT_EN_TO_ZH = {"Cancel": "取消"}
 
 _ZH_TO_EN = {
     "实际金额与配置总额完全一致": "Actual amount exactly matches the configured total",
     "金额不同，记录档位后同步持仓": "Different amount; record tiers then sync position",
     "记录档位，稍后同步持仓": "Record tiers and sync position later",
-    "取消": "Cancel",
     "前已提交 — 当日净值": " submitted before cutoff — same-day NAV",
     "后才提交 — 下一开放日": " submitted after cutoff — next open-day NAV",
     "已全部包含": "All included",
@@ -379,6 +393,8 @@ _ZH_TO_EN = {
     " 元": " RMB",
     "提醒：这是纪律提醒，不会自动交易。": "Reminder: this is a discipline reminder; no automatic trade occurs.",
 }
+
+_EXACT_ZH_TO_EN = {"取消": "Cancel"}
 
 
 def set_language(language: str) -> None:
@@ -396,6 +412,9 @@ def get_language() -> str:
 
 def localize_text(text: str) -> str:
     """Translate one fully rendered user-facing string."""
+    exact = _EXACT_EN_TO_ZH if _language == "zh-CN" else _EXACT_ZH_TO_EN
+    if text in exact:
+        return exact[text]
     replacements = _EN_TO_ZH if _language == "zh-CN" else _ZH_TO_EN
     for source in sorted(replacements, key=len, reverse=True):
         text = text.replace(source, replacements[source])
