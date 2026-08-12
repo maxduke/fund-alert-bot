@@ -193,11 +193,12 @@ amount or incomplete fund setup records the tiers but requires a later
 place or verify an order.
 
 The daily `08:30` NAV job runs on calendar days because a trading day's fund NAV
-may be published later. It requests data only while an estimate is pending and
-requires an exact NAV date; missing data remains pending and produces a data
-availability notice. If `/sync_position` sees pending additions, Telegram asks
-whether the platform snapshot already includes them before replacing the
-position.
+may be published later. It requests exact-dated NAV while an estimate is pending,
+and also evaluates enabled `auto` Price-Gain rules for positive positions from
+the latest completed trading day's NAV. Missing settlement data remains pending
+and produces a data availability notice. If `/sync_position` sees pending
+additions, Telegram asks whether the platform snapshot already includes them
+before replacing the position.
 
 Telegram remains the command channel and default notification channel; optional
 Bark, ntfy, and webhook channels can be enabled with environment variables.
@@ -233,7 +234,7 @@ unavailable. Exact feeder-fund NAV has no independent Sina equivalent, so it
 stays pending rather than guessing. RSI and RSI6 alerts are not implemented
 here. The bot does not poll realtime endpoints: it performs one scheduled
 before-close pass, skips already completed plan/date work, and requests fund NAV
-only while a dated estimate is pending.
+only for pending dated estimates or eligible `auto` Price-Gain evaluations.
 
 ## Technology Stack
 
