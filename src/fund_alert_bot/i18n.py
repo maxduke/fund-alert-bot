@@ -187,6 +187,7 @@ _EN_TO_ZH = {
     "Partially redeemed": "部分赎回",
     "Fully closed": "全部清仓",
     "No action": "不操作",
+    "fund-alert-bot test": "fund-alert-bot 测试",
     "Test notification": "测试通知",
     "Source: fund-alert-bot": "来源：fund-alert-bot",
     "Purpose: channel connectivity check": "用途：通知渠道连通性检查",
@@ -489,7 +490,9 @@ def _localize_line(line: str) -> str:
         return decoration + replacements[content]
 
     if _language == "zh-CN" and content.startswith("Updated DCA rule id="):
-        before_amount, separator, after_amount = content.partition(" future amount to ")
+        before_amount, separator, after_amount = content.rpartition(
+            " future amount to "
+        )
         if separator:
             amount, suffix, _ = after_amount.partition(
                 ". Existing occurrences are unchanged."

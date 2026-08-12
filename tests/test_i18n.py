@@ -94,10 +94,12 @@ def test_localizes_dynamic_success_messages_without_changing_names() -> None:
     try:
         assert (
             localize_text(
-                "Updated DCA rule id=12 Falling Star future amount to ¥500."
+                "Updated DCA rule id=12 Save future amount to Growth "
+                "future amount to ¥500."
                 " Existing occurrences are unchanged."
             )
-            == "已更新定投规则 id=12 Falling Star 未来金额更新为 ¥500。"
+            == "已更新定投规则 id=12 Save future amount to Growth "
+            "未来金额更新为 ¥500。"
             "已有期次保持不变。"
         )
         assert localize_text(
@@ -121,6 +123,14 @@ def test_english_localizes_dynamic_cutoff_buttons() -> None:
     assert localize_text("15:00后才提交 — 下一开放日") == (
         "15:00 submitted after cutoff — next open-day NAV"
     )
+
+
+def test_chinese_localizes_test_notification_title() -> None:
+    set_language("zh-CN")
+    try:
+        assert localize_text("fund-alert-bot test") == "fund-alert-bot 测试"
+    finally:
+        set_language("en")
 
 
 def test_chinese_translates_every_dca_skip_outcome() -> None:
