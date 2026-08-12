@@ -690,6 +690,43 @@ def test_add_dca_command_persists_rule(tmp_path) -> None:
     ]
 
 
+def test_set_dca_amount_updates_rule_without_replacing_it(tmp_path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    with open_connection(sqlite_path) as connection:
+        init_db(connection)
+        rule_id = add_rule(
+            connection,
+            type=DCA_RULE_TYPE,
+            symbol="科创50",
+            name="科创50",
+            asset_type="dca",
+            params={"weekday": "THU", "amount": 300},
+        )
+    handlers = build_command_handlers({123}, sqlite_path=sqlite_path)
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        effective_message=message,
+    )
+
+    asyncio.run(
+        _handler_by_command(handlers, "set_dca_amount").callback(
+            update, SimpleNamespace(args=[str(rule_id), "500"])
+        )
+    )
+
+    with open_connection(sqlite_path) as connection:
+        rules = list_rules(connection)
+    assert len(rules) == 1
+    assert int(rules[0]["id"]) == rule_id
+    assert json.loads(rules[0]["params_json"])["amount"] == 500
+    assert message.replies == [
+        f"Updated DCA rule id={rule_id} 科创50 future amount to ¥500. "
+        "Existing occurrences are unchanged."
+    ]
+
+
 def test_add_enhanced_dca_persists_settings_and_plans_instructions(tmp_path) -> None:
     sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
     provider = FakeProvider(_history(["2024-01-02"], [1]))

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import date
 from typing import Any
@@ -20,6 +21,7 @@ from fund_alert_bot.db import (
     list_pending_position_items,
     reconcile_position_snapshot,
     skip_scheduled_dca_occurrence,
+    update_dca_rule_amount,
     upsert_fund_fee,
     upsert_position_snapshot,
 )
@@ -439,6 +441,53 @@ def test_fee_change_affects_only_future_occurrences() -> None:
     second = get_scheduled_dca_occurrence(connection, rule_id, "2024-01-11")
     assert (first["fee_mode"], first["fee_value"]) == ("rate", 0.001)
     assert (second["fee_mode"], second["fee_value"]) == ("fixed", 1)
+
+
+def test_amount_change_affects_only_future_occurrences_and_reminders() -> None:
+    connection = connect(":memory:")
+    init_db(connection)
+    rule_id = _add_rule(connection)
+    calendar = Calendar({date(2024, 1, 4), date(2024, 1, 11)})
+    evaluate_dca_rules(
+        connection,
+        today=date(2024, 1, 4),
+        market_calendar=calendar,
+    )
+    connection.execute("DELETE FROM alert_events WHERE rule_id = ?", (rule_id,))
+    connection.commit()
+
+    update_dca_rule_amount(connection, rule_id=rule_id, amount=500)
+    same_day = evaluate_dca_rules(
+        connection,
+        today=date(2024, 1, 4),
+        market_calendar=calendar,
+    )
+    next_week = evaluate_dca_rules(
+        connection,
+        today=date(2024, 1, 11),
+        market_calendar=calendar,
+    )
+
+    first = get_scheduled_dca_occurrence(connection, rule_id, "2024-01-04")
+    second = get_scheduled_dca_occurrence(connection, rule_id, "2024-01-11")
+    assert first["gross_amount"] == 2000
+    assert second["gross_amount"] == 500
+    assert "Gross amount: 2000 RMB" in same_day.notifications[0].text
+    assert "Gross amount: 500 RMB" in next_week.notifications[0].text
+
+
+def test_amount_change_rejects_fixed_fee_that_consumes_new_amount() -> None:
+    connection = connect(":memory:")
+    init_db(connection)
+    rule_id = _add_rule(connection, fee_mode="fixed", fee_value=10)
+
+    with pytest.raises(ValueError, match="Fixed fee"):
+        update_dca_rule_amount(connection, rule_id=rule_id, amount=10)
+
+    rule = connection.execute(
+        "SELECT params_json FROM rules WHERE id = ?", (rule_id,)
+    ).fetchone()
+    assert json.loads(rule["params_json"])["amount"] == 2000
 
 
 @pytest.mark.parametrize(

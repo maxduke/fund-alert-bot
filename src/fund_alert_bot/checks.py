@@ -1659,6 +1659,9 @@ def evaluate_dca_rules(
                 effective_date=(
                     None if occurrence is None else occurrence["effective_date"]
                 ),
+                occurrence_amount=(
+                    None if occurrence is None else float(occurrence["gross_amount"])
+                ),
             )
         except Exception as exc:  # noqa: BLE001
             errors.append(
