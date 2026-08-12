@@ -527,6 +527,20 @@ def _localize_line(line: str) -> str:
                 + "首次定时收盘确认将初始化其周期。未执行任何交易。"
             )
 
+    if (
+        _language == "zh-CN"
+        and content.startswith("Sent test notification to ")
+        and content.endswith(" channel(s).")
+    ):
+        channels = content.removeprefix("Sent test notification to ").removesuffix(
+            " channel(s)."
+        )
+        if channels:
+            return (
+                decoration
+                + f"测试通知已发送至 {channels.replace(' of ', '/')} 个渠道。"
+            )
+
     if _language == "en":
         cutoff_suffix = next(
             (
@@ -559,9 +573,13 @@ def _localize_line(line: str) -> str:
         None,
     )
     if dynamic_prefix is not None and dynamic_prefix in replacements:
-        return (
-            decoration + replacements[dynamic_prefix] + content[len(dynamic_prefix) :]
-        )
+        remainder = content[len(dynamic_prefix) :]
+        if _language == "zh-CN" and remainder.endswith(" was not found"):
+            remainder = (
+                remainder.removesuffix(" was not found")
+                + replacements[" was not found"]
+            )
+        return decoration + replacements[dynamic_prefix] + remainder
 
     # Prose lines contain no configured identifier field. Translate complete
     # leading sentences, then continue with the remaining prose.

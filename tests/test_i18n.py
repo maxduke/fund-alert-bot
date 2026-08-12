@@ -129,6 +129,20 @@ def test_chinese_localizes_test_notification_title() -> None:
     set_language("zh-CN")
     try:
         assert localize_text("fund-alert-bot test") == "fund-alert-bot 测试"
+        assert localize_text("Sent test notification to 3 channel(s).") == (
+            "测试通知已发送至 3 个渠道。"
+        )
+        assert localize_text("Sent test notification to 1 of 3 channel(s).") == (
+            "测试通知已发送至 1/3 个渠道。"
+        )
+    finally:
+        set_language("en")
+
+
+def test_chinese_localizes_dynamic_rule_not_found_suffix() -> None:
+    set_language("zh-CN")
+    try:
+        assert localize_text("Rule id=4 was not found") == "规则 id=4 未找到"
     finally:
         set_language("en")
 
