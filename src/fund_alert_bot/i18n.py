@@ -32,6 +32,7 @@ _EN_TO_ZH = {
     "Configured rules:": "已配置规则：",
     "Check summary": "检查摘要",
     "Checked": "已检查",
+    "Checked ": "已检查 ",
     "New alerts:": "新提醒：",
     "No alerts triggered.": "没有触发提醒。",
     "Duplicate alerts skipped:": "已跳过重复提醒：",
@@ -429,6 +430,10 @@ _DYNAMIC_PREFIXES = (
     "Set gain thresholds —",
     "Buy-plan pre-alert —",
     "Buy-plan reminder —",
+    "Checked ",
+    "已检查 ",
+    "Record only ",
+    "仅记录 ",
 )
 
 
@@ -457,6 +462,10 @@ def _localize_line(line: str) -> str:
     replacements = _EN_TO_ZH if _language == "zh-CN" else _ZH_TO_EN
     if line in replacements:
         return replacements[line]
+
+    if line.startswith("/") and " - " in line:
+        command, description = line.split(" - ", 1)
+        return f"{command} - {replacements.get(description, description)}"
 
     full_line_label = next(
         (

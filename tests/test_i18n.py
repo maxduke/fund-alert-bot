@@ -76,6 +76,19 @@ def test_chinese_translates_dynamic_profit_setup_button() -> None:
         set_language("en")
 
 
+def test_localizes_help_and_dynamic_status_structures() -> None:
+    set_language("zh-CN")
+    try:
+        assert localize_text("/start - Start the bot") == "/start - 启动 Bot"
+        assert localize_text("✅ Checked 1 drawdown_from_high rule(s).") == (
+            "✅ 已检查 1 drawdown_from_high rule(s)."
+        )
+    finally:
+        set_language("en")
+
+    assert localize_text("仅记录 -10% → ¥5000") == "Record only -10% → ¥5000"
+
+
 def test_chinese_translates_every_dca_skip_outcome() -> None:
     set_language("zh-CN")
     try:
