@@ -896,6 +896,7 @@ async def retry_pending_standard_notifications(
                         due_date=str(row["due_date"]),
                         amount=float(row["dca_amount"]),
                         skipped=str(row["occurrence_status"]) == "skipped",
+                        current_status=str(row["occurrence_status"]),
                     )
                     if row["rule_type"] == "dca_reminder"
                     and row["fund_symbol"] is not None

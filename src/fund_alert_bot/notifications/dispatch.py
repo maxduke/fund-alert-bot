@@ -13,6 +13,7 @@ from fund_alert_bot.db import (
     record_alert_notification_result,
 )
 from fund_alert_bot.notifications.service import NotificationService
+from fund_alert_bot.rules.dca import format_dca_amount
 
 LOGGER = logging.getLogger(__name__)
 TELEGRAM_TEXT_LIMIT = 4096
@@ -106,7 +107,7 @@ def _merge_dca_batch(batch: list[AlertNotification]) -> AlertNotification:
     total = sum(summary.amount for summary in summaries if not summary.skipped)
     lines.extend(
         (
-            f"Total planned amount: {total:g} RMB",
+            f"Total planned amount: {format_dca_amount(total)} RMB",
             "",
             "The bot assumes the configured deduction executes; it does not verify it.",
             "Remember to run /sync_position after any visible platform mismatch.",

@@ -98,7 +98,7 @@ def build_dca_reminder_alert(
                 "",
                 f"• Fund: {fund_symbol} / {name}",
                 f"• Scheduled date: {due_date}",
-                f"• Gross amount: {_format_amount(amount)} RMB",
+                f"• Gross amount: {format_dca_amount(amount)} RMB",
                 f"• Holiday policy: {holiday_policy}",
                 f"• {status_line}",
                 "",
@@ -120,7 +120,7 @@ def build_dca_reminder_alert(
                 "",
                 f"• 标的：{name}",
                 f"• 日期：{due_date}",
-                f"• 计划金额：{_format_amount(amount)} 元",
+                f"• 计划金额：{format_dca_amount(amount)} 元",
                 "",
                 "提醒：这是纪律提醒，不会自动交易。",
             )
@@ -225,7 +225,9 @@ def _read_rule_value(rule: Any, key: str, default: Any) -> Any:
         return default
 
 
-def _format_amount(amount: int | float) -> str:
+def format_dca_amount(amount: int | float) -> str:
+    """Format a configured DCA amount without hiding valid precision."""
+
     if isinstance(amount, int):
         return str(amount)
     return f"{amount:.12g}"

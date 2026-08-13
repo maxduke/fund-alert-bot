@@ -117,14 +117,26 @@ class DcaNotificationSummary:
 
 
 def build_dca_notification_summary(
-    *, message: str, due_date: str, amount: float, skipped: bool
+    *,
+    message: str,
+    due_date: str,
+    amount: float,
+    skipped: bool,
+    current_status: str | None = None,
 ) -> DcaNotificationSummary:
     """Build the concise portion of a persisted fixed-DCA reminder."""
 
     lines = message.splitlines()
+    status_line = lines[6]
+    if current_status == "skipped" and "Holiday policy skipped" not in status_line:
+        status_line = "• Deduction failed/not executed; this occurrence is skipped."
+    elif current_status == "applied":
+        status_line = "• This estimate was already applied."
+    elif current_status == "reconciled_by_sync":
+        status_line = "• This occurrence was already reconciled by Position Sync."
     return DcaNotificationSummary(
         due_date=due_date,
-        lines=(lines[2], *lines[4:7]),
+        lines=(lines[2], *lines[4:6], status_line),
         amount=amount,
         skipped=skipped,
     )
