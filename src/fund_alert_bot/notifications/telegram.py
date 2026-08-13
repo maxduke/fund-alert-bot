@@ -30,9 +30,25 @@ class TelegramNotificationChannel:
 
         sent = 0
         failed = 0
+        reply_markup = None
+        if message.telegram_actions:
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+            reply_markup = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(label, callback_data=callback_data)
+                        for label, callback_data in row
+                    ]
+                    for row in message.telegram_actions
+                ]
+            )
         for chat_id in self._chat_ids:
             try:
-                await self._bot.send_message(chat_id=chat_id, text=message.body)
+                kwargs = {"chat_id": chat_id, "text": message.body}
+                if reply_markup is not None:
+                    kwargs["reply_markup"] = reply_markup
+                await self._bot.send_message(**kwargs)
             except Exception as exc:  # noqa: BLE001
                 failed += 1
                 LOGGER.warning(

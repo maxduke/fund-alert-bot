@@ -57,6 +57,10 @@ def build_dca_reminder_alert(
     rule: Any,
     today: date,
     existing_alert_checker: AlertChecker,
+    *,
+    occurrence_status: str | None = None,
+    effective_date: str | None = None,
+    occurrence_amount: int | float | None = None,
 ) -> dict[str, object] | None:
     """Build a DCA reminder alert when the rule is due today."""
 
@@ -73,10 +77,44 @@ def build_dca_reminder_alert(
     amount = _read_amount(params)
     name = str(_read_rule_value(rule, "name", ""))
     due_date = today.isoformat()
-    return {
-        "alert_key": alert_key,
-        "title": "DCA reminder",
-        "message": "\n".join(
+    enhanced = str(_read_rule_value(rule, "asset_type", "")) == "cn_open_fund"
+    if enhanced:
+        if occurrence_amount is not None:
+            amount = _read_amount({"amount": occurrence_amount})
+        fund_symbol = str(_read_rule_value(rule, "symbol", ""))
+        holiday_policy = str(params.get("holiday_policy", "next"))
+        status_line = (
+            "Holiday policy skipped this occurrence; no position estimate will apply."
+            if occurrence_status == "skipped"
+            else (
+                f"Estimated subscription NAV date: {effective_date}."
+                if effective_date is not None
+                else "Waiting for the next confirmed open day before estimating units."
+            )
+        )
+        message = "\n".join(
+            (
+                "💰 Fixed DCA reminder",
+                "",
+                f"• Fund: {fund_symbol} / {name}",
+                f"• Scheduled date: {due_date}",
+                f"• Gross amount: {_format_amount(amount)} RMB",
+                f"• Holiday policy: {holiday_policy}",
+                f"• {status_line}",
+                "",
+                "The bot assumes the configured deduction executes; "
+                "it does not verify it.",
+                (
+                    f"If deduction failed, use /dca_skip {rule_id} {due_date}."
+                    if occurrence_status != "skipped"
+                    else "No action is required for this configured holiday skip."
+                ),
+                "Remember to run /sync_position after any visible platform mismatch.",
+                "Reminder only. No trade has been placed.",
+            )
+        )
+    else:
+        message = "\n".join(
             (
                 "💰 DCA reminder",
                 "",
@@ -86,14 +124,28 @@ def build_dca_reminder_alert(
                 "",
                 "提醒：这是纪律提醒，不会自动交易。",
             )
-        ),
-        "payload": {
-            "rule_id": rule_id,
-            "name": name,
-            "weekday": weekday,
-            "amount": amount,
-            "due_date": due_date,
-        },
+        )
+    payload = {
+        "rule_id": rule_id,
+        "name": name,
+        "weekday": weekday,
+        "amount": amount,
+        "due_date": due_date,
+    }
+    if enhanced:
+        payload.update(
+            {
+                "fund_symbol": fund_symbol,
+                "holiday_policy": holiday_policy,
+                "occurrence_status": occurrence_status,
+                "effective_date": effective_date,
+            }
+        )
+    return {
+        "alert_key": alert_key,
+        "title": "DCA reminder",
+        "message": message,
+        "payload": payload,
     }
 
 

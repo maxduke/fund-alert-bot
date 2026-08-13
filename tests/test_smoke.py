@@ -17,13 +17,16 @@ from fund_alert_bot.config import (
     DEFAULT_AKSHARE_LATEST_LOOKBACK_DAYS,
     DEFAULT_AKSHARE_RETRIES,
     DEFAULT_AKSHARE_RETRY_DELAY_SECONDS,
+    DEFAULT_BOT_LANGUAGE,
     DEFAULT_DCA_REMINDER_TIME,
+    DEFAULT_FUND_NAV_PROCESS_TIME,
     DEFAULT_SQLITE_PATH,
     DEFAULT_TIMEZONE,
     NotificationSettings,
     load_settings,
     parse_allowed_user_ids,
     parse_bool_env,
+    parse_bot_language,
     parse_non_negative_float_env,
     parse_positive_int_env,
 )
@@ -55,24 +58,60 @@ def test_scheduler_defaults_from_environment(monkeypatch) -> None:
     monkeypatch.delenv("TZ", raising=False)
     monkeypatch.delenv("AFTER_CLOSE_CHECK_TIME", raising=False)
     monkeypatch.delenv("DCA_REMINDER_TIME", raising=False)
+    monkeypatch.delenv("FUND_NAV_PROCESS_TIME", raising=False)
 
     settings = load_settings(load_env_file=False)
 
     assert settings.timezone == DEFAULT_TIMEZONE
     assert settings.after_close_check_time == DEFAULT_AFTER_CLOSE_CHECK_TIME
     assert settings.dca_reminder_time == DEFAULT_DCA_REMINDER_TIME
+    assert settings.fund_nav_process_time == DEFAULT_FUND_NAV_PROCESS_TIME
 
 
 def test_scheduler_settings_from_environment(monkeypatch) -> None:
     monkeypatch.setenv("TZ", "Asia/Shanghai")
     monkeypatch.setenv("AFTER_CLOSE_CHECK_TIME", "17:10")
     monkeypatch.setenv("DCA_REMINDER_TIME", "09:30")
+    monkeypatch.setenv("FUND_NAV_PROCESS_TIME", "08:45")
 
     settings = load_settings(load_env_file=False)
 
     assert settings.timezone == "Asia/Shanghai"
     assert settings.after_close_check_time == "17:10"
     assert settings.dca_reminder_time == "09:30"
+    assert settings.fund_nav_process_time == "08:45"
+
+
+def test_bot_language_defaults_to_chinese_and_accepts_english(monkeypatch) -> None:
+    monkeypatch.delenv("BOT_LANGUAGE", raising=False)
+    assert load_settings(load_env_file=False).bot_language == DEFAULT_BOT_LANGUAGE
+
+    monkeypatch.setenv("BOT_LANGUAGE", "en")
+    assert load_settings(load_env_file=False).bot_language == "en"
+
+
+def test_bot_language_rejects_unknown_values() -> None:
+    with pytest.raises(ValueError, match="BOT_LANGUAGE must be one of"):
+        parse_bot_language("fr")
+
+
+def test_compose_preserves_schedule_environment_overrides() -> None:
+    compose = (Path(__file__).parents[1] / "docker-compose.yml").read_text()
+
+    for name, default in (
+        ("AFTER_CLOSE_CHECK_TIME", "17:10"),
+        ("BEFORE_CLOSE_CHECK_TIME", "14:50"),
+        ("DCA_REMINDER_TIME", "09:30"),
+        ("FUND_NAV_PROCESS_TIME", "08:30"),
+    ):
+        assert f"${{{name}:-{default}}}" in compose
+
+
+def test_startup_processes_fund_nav_with_configured_timezone_date() -> None:
+    source = (Path(__file__).parents[1] / "src/fund_alert_bot/main.py").read_text()
+
+    assert "await run_scheduled_fund_nav_process(" in source
+    assert "run_date=datetime.now(ZoneInfo(settings.timezone)).date()" in source
 
 
 def test_akshare_settings_from_environment(monkeypatch) -> None:

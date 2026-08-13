@@ -103,7 +103,11 @@ def _finalize_frame(frame: pd.DataFrame) -> pd.DataFrame:
             continue
         normalized[column] = pd.to_numeric(normalized[column], errors="coerce")
 
-    normalized = normalized.sort_values("date", ascending=True).reset_index(drop=True)
+    normalized = (
+        normalized.sort_values("date", ascending=True, kind="stable")
+        .drop_duplicates("date", keep="last")
+        .reset_index(drop=True)
+    )
     if normalized.empty:
         raise EmptyMarketDataError("Market data normalization produced no rows.")
     return normalized[NORMALIZED_COLUMNS]
