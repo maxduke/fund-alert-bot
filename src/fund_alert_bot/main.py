@@ -7,7 +7,7 @@ import sys
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from fund_alert_bot.commands import create_application
+from fund_alert_bot.commands import create_application, publish_bot_command_menu
 from fund_alert_bot.config import load_settings
 from fund_alert_bot.db import initialize_database, open_connection
 from fund_alert_bot.i18n import set_language
@@ -53,6 +53,7 @@ def run() -> None:
     scheduler = create_scheduler(timezone=settings.timezone)
 
     async def start_scheduler(application) -> None:
+        await publish_bot_command_menu(application)
         register_jobs(
             scheduler,
             application=application,

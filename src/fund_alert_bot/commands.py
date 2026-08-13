@@ -170,6 +170,44 @@ TEST_NOTIFICATION_MESSAGE = "\n".join(
     )
 )
 UNAUTHORIZED_MESSAGE = "You are not allowed to use this bot."
+BOT_COMMAND_MENU = (
+    ("start", "Start the bot"),
+    ("help", "Show available commands"),
+    ("add_drawdown", "Add a drawdown reminder"),
+    ("add_profit", "Add a price-gain reminder"),
+    ("add_dca", "Add a recurring DCA reminder"),
+    ("set_dca_amount", "Change future DCA amounts"),
+    ("dca_skip", "Mark a DCA deduction as skipped"),
+    ("set_fund_fee", "Change a fund subscription fee"),
+    ("set_fund_cutoff", "Change a fund subscription cutoff"),
+    ("sync_position", "Sync a feeder-fund position"),
+    ("add_drawdown_plan", "Add a drawdown buy plan"),
+    ("mark_added", "Record a completed addition"),
+    ("plans", "Show investment-plan status"),
+    ("list", "List configured rules"),
+    ("del", "Remove a configured rule"),
+    ("check", "Run a manual check"),
+    ("test_notify", "Test enabled notification channels"),
+)
+
+
+async def publish_bot_command_menu(application: Any) -> None:
+    """Publish slash-command suggestions without blocking startup on failure."""
+
+    from telegram.error import TelegramError
+
+    try:
+        await application.bot.set_my_commands(
+            tuple(
+                (command, localize_text(description))
+                for command, description in BOT_COMMAND_MENU
+            )
+        )
+    except TelegramError as exc:
+        LOGGER.warning(
+            "Telegram command menu registration failed error=%s",
+            type(exc).__name__,
+        )
 
 
 class CommandParseError(ValueError):

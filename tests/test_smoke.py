@@ -112,6 +112,7 @@ def test_startup_processes_fund_nav_with_configured_timezone_date() -> None:
 
     assert "await run_scheduled_fund_nav_process(" in source
     assert "run_date=datetime.now(ZoneInfo(settings.timezone)).date()" in source
+    assert "await publish_bot_command_menu(application)" in source
 
 
 def test_akshare_settings_from_environment(monkeypatch) -> None:

@@ -15,6 +15,7 @@ from fund_alert_bot.checks import (
     evaluate_position_profit_rules,
 )
 from fund_alert_bot.commands import (
+    BOT_COMMAND_MENU,
     DCA_RULE_TYPE,
     DRAW_DOWN_RULE_TYPE,
     PROFIT_RULE_TYPE,
@@ -42,6 +43,7 @@ from fund_alert_bot.commands import (
     parse_sync_position_args,
     parse_thresholds,
     profit_params,
+    publish_bot_command_menu,
 )
 from fund_alert_bot.config import NotificationSettings
 from fund_alert_bot.db import (
@@ -60,6 +62,7 @@ from fund_alert_bot.db import (
     upsert_fund_fee,
     upsert_position_snapshot,
 )
+from fund_alert_bot.i18n import get_language, set_language
 from fund_alert_bot.market_data import (
     AssetType,
     FundNav,
@@ -115,6 +118,29 @@ EXPECTED_PROFIT_MESSAGE = "\n".join(
         "No trade has been placed.",
     )
 )
+
+
+def test_publish_bot_command_menu_matches_handlers_and_localizes(caplog) -> None:
+    command_names = {
+        command
+        for handler in build_command_handlers({123})
+        for command in getattr(handler, "commands", ())
+    }
+    assert {command for command, _description in BOT_COMMAND_MENU} == command_names
+
+    original_language = get_language()
+    bot = FakeCommandMenuBot()
+    try:
+        set_language("zh-CN")
+        asyncio.run(publish_bot_command_menu(SimpleNamespace(bot=bot)))
+    finally:
+        set_language(original_language)
+
+    assert bot.commands[0] == ("start", "启动 Bot")
+
+    bot.fail = True
+    asyncio.run(publish_bot_command_menu(SimpleNamespace(bot=bot)))
+    assert "command menu registration failed" in caplog.text
 
 
 def test_parse_valid_drawdown_command() -> None:
@@ -2216,6 +2242,19 @@ class FakeBot:
 
     async def send_message(self, *, chat_id: int, text: str) -> None:
         self.messages.append({"chat_id": chat_id, "text": text})
+
+
+class FakeCommandMenuBot:
+    def __init__(self) -> None:
+        self.commands: tuple[tuple[str, str], ...] = ()
+        self.fail = False
+
+    async def set_my_commands(self, commands: tuple[tuple[str, str], ...]) -> None:
+        if self.fail:
+            from telegram.error import TelegramError
+
+            raise TelegramError("unavailable")
+        self.commands = commands
 
 
 class FakeFailingBot:
