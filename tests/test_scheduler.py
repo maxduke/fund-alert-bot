@@ -289,6 +289,8 @@ def test_scheduled_dca_check_merges_same_day_fixed_reminders(
     assert "Fund: 000003 / STAR 50" in message["text"]
     assert "Total planned amount: 123456.79 RMB" in message["text"]
     assert "Holiday policy skipped this occurrence" in message["text"]
+    assert f"/dca_skip {first_id} 2024-01-04" in message["text"]
+    assert f"/dca_skip {second_id} 2024-01-04" in message["text"]
     buttons = message["reply_markup"].inline_keyboard
     assert [row[0].callback_data for row in buttons] == [
         f"dca_skip:{first_id}:2024-01-04",
@@ -316,7 +318,9 @@ def test_failed_same_day_dca_batch_retries_as_one_message(tmp_path: Path) -> Non
     first_id = _add_fixed_dca_rule(
         sqlite_path, symbol="000001", name="A500", amount=2000
     )
-    _add_fixed_dca_rule(sqlite_path, symbol="000002", name="ChiNext", amount=800)
+    second_id = _add_fixed_dca_rule(
+        sqlite_path, symbol="000002", name="ChiNext", amount=800
+    )
 
     asyncio.run(
         scheduler.run_scheduled_dca_check(
@@ -352,6 +356,8 @@ def test_failed_same_day_dca_batch_retries_as_one_message(tmp_path: Path) -> Non
     assert "Fixed DCA reminders" in text
     assert "Deduction failed/not executed; this occurrence is skipped." in text
     assert "Total planned amount: 800 RMB" in text
+    assert f"/dca_skip {first_id} 2024-01-04" not in text
+    assert f"/dca_skip {second_id} 2024-01-04" in text
     with open_connection(sqlite_path) as connection:
         statuses = connection.execute(
             "SELECT notification_status FROM alert_events ORDER BY id"

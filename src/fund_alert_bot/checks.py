@@ -139,11 +139,14 @@ def build_dca_notification_summary(
     elif current_status == "pending" and current_effective_date is not None:
         status_line = f"• Estimated subscription NAV date: {current_effective_date}."
     lines[6] = status_line
-    if current_status in {"skipped", "applied", "reconciled_by_sync"}:
+    resolved = current_status in {"skipped", "applied", "reconciled_by_sync"}
+    action_line = None if skipped or resolved else lines[9]
+    if resolved:
         lines.pop(9)
     return DcaNotificationSummary(
         due_date=due_date,
-        lines=(lines[2], *lines[4:6], status_line),
+        lines=(lines[2], *lines[4:6], status_line)
+        + ((action_line,) if action_line else ()),
         amount=amount,
         skipped=skipped,
         rebuilt_text="\n".join(lines) if current_status is not None else None,
