@@ -4,12 +4,19 @@ from fund_alert_bot.market_data.akshare_provider import AkshareMarketDataProvide
 from fund_alert_bot.market_data.calendar import CNMarketCalendar, MarketCalendar
 from fund_alert_bot.market_data.exceptions import (
     EmptyMarketDataError,
+    MarketCalendarUnavailableError,
     MarketDataFetchError,
     MarketDataNormalizeError,
     MarketDataProviderError,
     UnsupportedAssetTypeError,
 )
-from fund_alert_bot.market_data.models import AssetType, Instrument
+from fund_alert_bot.market_data.models import (
+    AssetType,
+    FundNav,
+    Instrument,
+    PriceBasis,
+    RealtimeQuote,
+)
 from fund_alert_bot.market_data.provider import MarketDataProvider
 
 __all__ = [
@@ -17,11 +24,15 @@ __all__ = [
     "AssetType",
     "CNMarketCalendar",
     "EmptyMarketDataError",
+    "FundNav",
     "Instrument",
     "MarketCalendar",
+    "MarketCalendarUnavailableError",
     "MarketDataFetchError",
     "MarketDataNormalizeError",
     "MarketDataProvider",
     "MarketDataProviderError",
+    "PriceBasis",
+    "RealtimeQuote",
     "UnsupportedAssetTypeError",
 ]

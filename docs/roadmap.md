@@ -1,6 +1,9 @@
 # Roadmap
 
-Implementation should proceed in small PRs. Each PR should keep the hard scope boundaries from `AGENTS.md` intact.
+This file records the original implementation sequence. These phases are
+complete and are retained as historical context, not as an active backlog.
+Future work should still use small PRs and keep the hard scope boundaries from
+`AGENTS.md` intact.
 
 ## PR 0: Documentation Scaffold
 
