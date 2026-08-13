@@ -219,6 +219,7 @@ Telegram 是命令通道和默认通知通道。Bark、ntfy、Webhook 可通过�
 Telegram 回复、按钮以及所有通知渠道共用一个全局语言。默认
 `BOT_LANGUAGE=zh-CN`；如需英文，改为 `BOT_LANGUAGE=en` 并重启服务。
 `/check` 等 Telegram 命令名称始终保持英文。
+Bot 启动时会注册命令菜单；在 Telegram 输入 `/` 即可看到可用命令及本地化说明。
 
 默认调度配置：
 

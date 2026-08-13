@@ -209,6 +209,8 @@ Bark, ntfy, and webhook channels can be enabled with environment variables.
 User-facing Telegram replies, buttons, and every notification channel use one
 global language. Set `BOT_LANGUAGE=zh-CN` (default) or `BOT_LANGUAGE=en`, then
 restart the service. Commands such as `/check` keep their English Telegram names.
+The bot publishes this command menu at startup, so typing `/` shows the available
+commands with localized descriptions.
 
 Default scheduler configuration:
 
