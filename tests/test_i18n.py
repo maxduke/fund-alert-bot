@@ -162,6 +162,49 @@ def test_chinese_localizes_known_label_suffixes_and_active_decorations() -> None
         set_language("en")
 
 
+def test_chinese_localizes_complete_drawdown_and_profit_alerts() -> None:
+    set_language("zh-CN")
+    try:
+        drawdown = localize_text(
+            "\n".join(
+                (
+                    "📉 Drawdown reminder",
+                    "• Symbol: 399006",
+                    "• Name: 创业板指",
+                    "• Asset type: cn_index",
+                    "• Lookback: 365 days",
+                    "• Drawdown: 10.0%",
+                    "• Triggered threshold: 10.0%",
+                    "• Peak: 100 on 2024-01-01",
+                    "• Latest: 90 on 2024-01-02",
+                    "Reminder: this is not automatic trading and no orders will "
+                    "be placed.",
+                )
+            )
+        )
+        assert drawdown == "\n".join(
+            (
+                "📉 回撤提醒",
+                "• 代码： 399006",
+                "• 名称： 创业板指",
+                "• 资产类型： cn_index",
+                "• 回看周期： 365 天",
+                "• 回撤： 10.0%",
+                "• 触发阈值： 10.0%",
+                "• 高点： 100，日期：2024-01-01",
+                "• 最新价： 90，日期：2024-01-02",
+                "提醒：这不是自动交易，不会执行任何订单。",
+            )
+        )
+
+        profit = localize_text(
+            "💰 Price-Gain reminder\n• Latest price: 2.4\n• Profit rate: 29.7%"
+        )
+        assert profit == "💰 涨幅提醒\n• 最新价： 2.4\n• 涨幅： 29.7%"
+    finally:
+        set_language("en")
+
+
 def test_chinese_translates_every_dca_skip_outcome() -> None:
     set_language("zh-CN")
     try:
