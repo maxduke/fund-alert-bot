@@ -69,6 +69,7 @@ _EN_TO_ZH = {
     "Display name:": "显示名称：",
     "Lookback:": "回看周期：",
     "calendar days": "个日历日",
+    "days": "天",
     "Tiers (incremental):": "档位（增量金额）：",
     "Maximum one-cycle total:": "单周期最大总额：",
     "MA250 / 20-session slope: context only": "MA250 / 20 个交易日斜率：仅作背景信息",
@@ -275,6 +276,8 @@ _EN_TO_ZH.update(
         "Market data has no prices in the lookback window.": "回看窗口内没有价格数据。",
         "Reminder: this is not automatic trading and no orders will be placed.": "提醒：这不是自动交易，不会执行任何订单。",
         "Latest:": "最新价：",
+        "Latest price:": "最新价：",
+        "Latest NAV:": "最新净值：",
         "Before-close estimate": "收盘前估算",
         "After-close confirmation": "收盘后确认",
         "Feeder-fund NAV settlement": "联接基金净值结算",
@@ -443,9 +446,10 @@ _DYNAMIC_PREFIXES = (
     "仅记录 ",
 )
 _LABEL_VALUE_SUFFIXES = {
-    "Lookback:": ("calendar days",),
+    "Lookback:": ("calendar days", "days"),
     "Position value:": ("unavailable (unit NAV could not be fetched)",),
 }
+_DATED_LABELS = {"Peak:", "Latest:"}
 
 
 def set_language(language: str) -> None:
@@ -465,6 +469,15 @@ def _localize_label_value(label: str, value: str, replacements: dict[str, str]) 
     if _language == "en" and label == "• 计划金额：":
         value = value.removesuffix(" 元") + " RMB"
     elif _language == "zh-CN":
+        dated_value, separator, dated_on = value.rpartition(" on ")
+        if (
+            label in _DATED_LABELS
+            and separator
+            and len(dated_on) == 10
+            and dated_on[4:5] == dated_on[7:8] == "-"
+            and dated_on.replace("-", "").isdigit()
+        ):
+            value = f"{dated_value}，日期：{dated_on}"
         suffix = next(
             (
                 item
