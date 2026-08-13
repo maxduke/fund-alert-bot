@@ -87,6 +87,10 @@ scheduled deduction, tap the Telegram failure button or run
 `/dca_skip <rule_id> <YYYY-MM-DD>` before NAV processing. The bot assumes a
 configured deduction occurred, but cannot verify the platform. Check `/plans`
 and periodically run `/sync_position` after any mismatch. No order is placed.
+When several enhanced fixed-DCA rules are due on the same date, their delivery
+is combined into one notification. Each occurrence, estimate, and failure
+button remains independent; `holiday:skip` items are shown but excluded from
+the displayed total. Failed delivery retries use the same grouping.
 At rule creation the default AKShare provider makes one per-symbol Xueqiu
 metadata request to verify the declared fund type; QDII/overseas funds are
 rejected, and an unavailable metadata response creates no rule. This avoids a

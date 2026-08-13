@@ -654,6 +654,12 @@ Bot 将按计划等待净值并估算份额，无需操作。
 [⚠️ 本次扣款失败／未执行]
 ```
 
+Enhanced fixed-DCA occurrences due on the same date are delivered as one
+summary across Telegram, Bark, ntfy, and webhook. The summary total excludes
+configured `holiday:skip` occurrences. Persistence stays per occurrence, and
+Telegram keeps one named failure button per pending fund, so one failed
+deduction never changes another fund's estimate.
+
 There is no success button. The scheduled occurrence exists independently of
 notification delivery, so a delayed or failed message does not create a second
 occurrence or change the fixed schedule. Bark, ntfy, webhook, and Telegram

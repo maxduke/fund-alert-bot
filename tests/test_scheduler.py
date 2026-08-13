@@ -19,6 +19,7 @@ from fund_alert_bot.checks import (
 )
 from fund_alert_bot.config import NotificationSettings
 from fund_alert_bot.db import (
+    add_enhanced_dca_rule,
     add_rule,
     delete_rule,
     get_position_snapshot,
@@ -233,6 +234,142 @@ def test_scheduled_check_prevents_duplicate_alerts_by_alert_key(
             "timeout": 10,
         }
     ]
+
+
+def test_scheduled_dca_check_merges_same_day_fixed_reminders(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    first_id = _add_fixed_dca_rule(
+        sqlite_path, symbol="000001", name="A500", amount=2000
+    )
+    second_id = _add_fixed_dca_rule(
+        sqlite_path, symbol="000002", name="ChiNext", amount=800
+    )
+    _add_fixed_dca_rule(
+        sqlite_path,
+        symbol="000003",
+        name="STAR 50",
+        amount=300,
+        holiday_policy="skip",
+    )
+    application = FakeApplication()
+    webhook_calls: list[dict[str, object]] = []
+
+    def fake_post(url: str, **kwargs: object) -> object:
+        webhook_calls.append({"url": url, **kwargs})
+        return FakeResponse(status_code=200)
+
+    monkeypatch.setattr(
+        "fund_alert_bot.notifications.webhook.requests.post",
+        fake_post,
+    )
+    asyncio.run(
+        scheduler.run_scheduled_dca_check(
+            application=application,
+            sqlite_path=sqlite_path,
+            allowed_user_ids={123},
+            timezone="Asia/Shanghai",
+            market_calendar=FakeMarketCalendar(is_trading_day=False),
+            run_date=date(2024, 1, 4),
+            notification_settings=NotificationSettings(
+                webhook_enabled=True,
+                webhook_url="https://hooks.example.test/secret",
+            ),
+        )
+    )
+
+    assert len(application.bot.messages) == 1
+    message = application.bot.messages[0]
+    assert "Fixed DCA reminders" in message["text"]
+    assert "Fund: 000001 / A500" in message["text"]
+    assert "Fund: 000002 / ChiNext" in message["text"]
+    assert "Fund: 000003 / STAR 50" in message["text"]
+    assert "Total planned amount: 2800 RMB" in message["text"]
+    assert "Holiday policy skipped this occurrence" in message["text"]
+    buttons = message["reply_markup"].inline_keyboard
+    assert [row[0].callback_data for row in buttons] == [
+        f"dca_skip:{first_id}:2024-01-04",
+        f"dca_skip:{second_id}:2024-01-04",
+    ]
+    assert [row[0].text for row in buttons] == [
+        "⚠️ Deduction failed — 000001",
+        "⚠️ Deduction failed — 000002",
+    ]
+    assert len(webhook_calls) == 1
+    assert webhook_calls[0]["json"]["body"] == message["text"]
+    with open_connection(sqlite_path) as connection:
+        statuses = connection.execute(
+            "SELECT notification_status FROM alert_events ORDER BY id"
+        ).fetchall()
+    assert [row["notification_status"] for row in statuses] == [
+        "sent",
+        "sent",
+        "sent",
+    ]
+
+
+def test_failed_same_day_dca_batch_retries_as_one_message(tmp_path: Path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    _add_fixed_dca_rule(sqlite_path, symbol="000001", name="A500", amount=2000)
+    _add_fixed_dca_rule(sqlite_path, symbol="000002", name="ChiNext", amount=800)
+
+    asyncio.run(
+        scheduler.run_scheduled_dca_check(
+            application=SimpleNamespace(bot=FakeFailingBot()),
+            sqlite_path=sqlite_path,
+            allowed_user_ids={123},
+            timezone="Asia/Shanghai",
+            market_calendar=FakeMarketCalendar(is_trading_day=True),
+            run_date=date(2024, 1, 4),
+        )
+    )
+    application = FakeApplication()
+    assert (
+        asyncio.run(
+            scheduler.retry_pending_standard_notifications(
+                application=application,
+                sqlite_path=sqlite_path,
+                allowed_user_ids={123},
+            )
+        )
+        == 2
+    )
+
+    assert len(application.bot.messages) == 1
+    assert "Fixed DCA reminders" in application.bot.messages[0]["text"]
+    with open_connection(sqlite_path) as connection:
+        statuses = connection.execute(
+            "SELECT notification_status FROM alert_events ORDER BY id"
+        ).fetchall()
+    assert [row["notification_status"] for row in statuses] == ["sent", "sent"]
+
+
+def test_large_fixed_dca_batch_splits_before_telegram_limit(tmp_path: Path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    for index in range(20):
+        _add_fixed_dca_rule(
+            sqlite_path,
+            symbol=f"{index:06d}",
+            name="x" * 200,
+            amount=100,
+        )
+    application = FakeApplication()
+
+    asyncio.run(
+        scheduler.run_scheduled_dca_check(
+            application=application,
+            sqlite_path=sqlite_path,
+            allowed_user_ids={123},
+            timezone="Asia/Shanghai",
+            market_calendar=FakeMarketCalendar(is_trading_day=True),
+            run_date=date(2024, 1, 4),
+        )
+    )
+
+    assert len(application.bot.messages) == 2
+    assert all(len(message["text"]) <= 4096 for message in application.bot.messages)
 
 
 def test_scheduled_check_logs_and_skips_when_no_new_data(
@@ -1394,6 +1531,28 @@ def _add_dca_rule(sqlite_path: Path) -> None:
                 "weekday": "THU",
                 "amount": 1000,
             },
+        )
+
+
+def _add_fixed_dca_rule(
+    sqlite_path: Path,
+    *,
+    symbol: str,
+    name: str,
+    amount: float,
+    holiday_policy: str = "next",
+) -> int:
+    with open_connection(sqlite_path) as connection:
+        initialize_database(connection)
+        return add_enhanced_dca_rule(
+            connection,
+            fund_symbol=symbol,
+            name=name,
+            weekday="THU",
+            amount=amount,
+            fee_mode="rate",
+            fee_value=0,
+            holiday_policy=holiday_policy,
         )
 
 

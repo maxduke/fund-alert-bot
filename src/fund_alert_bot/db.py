@@ -2629,6 +2629,8 @@ def list_retryable_standard_alert_events(
                     WHEN 'Price-Gain reminder' THEN 'profit_reminder'
                 END AS rule_type,
                 json_extract(e.payload_json, '$.due_date') AS due_date,
+                json_extract(e.payload_json, '$.amount') AS dca_amount,
+                json_extract(e.payload_json, '$.fund_symbol') AS fund_symbol,
                 o.status AS occurrence_status
             FROM alert_events AS e
             LEFT JOIN scheduled_dca_occurrences AS o

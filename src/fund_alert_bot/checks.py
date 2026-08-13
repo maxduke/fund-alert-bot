@@ -107,6 +107,30 @@ class DrawdownRuleContext:
 
 
 @dataclass(frozen=True, slots=True)
+class DcaNotificationSummary:
+    """Fields used to merge same-day fixed-DCA notification presentation."""
+
+    due_date: str
+    lines: tuple[str, ...]
+    amount: float
+    skipped: bool
+
+
+def build_dca_notification_summary(
+    *, message: str, due_date: str, amount: float, skipped: bool
+) -> DcaNotificationSummary:
+    """Build the concise portion of a persisted fixed-DCA reminder."""
+
+    lines = message.splitlines()
+    return DcaNotificationSummary(
+        due_date=due_date,
+        lines=(lines[2], *lines[4:7]),
+        amount=amount,
+        skipped=skipped,
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class AlertNotification:
     """Alert text ready to send after the event has been reserved."""
 
@@ -114,6 +138,7 @@ class AlertNotification:
     title: str
     text: str
     telegram_actions: tuple[tuple[tuple[str, str], ...], ...] = ()
+    dca_summary: DcaNotificationSummary | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1697,13 +1722,23 @@ def evaluate_dca_rules(
                 telegram_actions=(
                     (
                         (
-                            "⚠️ Deduction failed / not executed",
+                            f"⚠️ Deduction failed — {row['symbol']}",
                             f"dca_skip:{row['id']}:{check_date.isoformat()}",
                         ),
                     ),
                 )
                 if occurrence is not None and str(occurrence["status"]) == "pending"
                 else (),
+                dca_summary=(
+                    build_dca_notification_summary(
+                        message=str(alert["message"]),
+                        due_date=check_date.isoformat(),
+                        amount=float(alert["payload"]["amount"]),
+                        skipped=str(occurrence["status"]) == "skipped",
+                    )
+                    if occurrence is not None
+                    else None
+                ),
             )
         )
 
