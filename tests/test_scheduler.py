@@ -426,6 +426,45 @@ def test_single_dca_retry_uses_current_effective_date(tmp_path: Path) -> None:
     )
 
 
+def test_single_dca_retry_removes_resolved_action(tmp_path: Path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    rule_id = _add_fixed_dca_rule(
+        sqlite_path, symbol="000001", name="A500", amount=2000
+    )
+    asyncio.run(
+        scheduler.run_scheduled_dca_check(
+            application=SimpleNamespace(bot=FakeFailingBot()),
+            sqlite_path=sqlite_path,
+            allowed_user_ids={123},
+            timezone="Asia/Shanghai",
+            market_calendar=FakeMarketCalendar(is_trading_day=True),
+            run_date=date(2024, 1, 4),
+        )
+    )
+    with open_connection(sqlite_path) as connection:
+        assert (
+            skip_scheduled_dca_occurrence(
+                connection, rule_id=rule_id, due_date="2024-01-04"
+            )
+            == "skipped"
+        )
+    application = FakeApplication()
+
+    assert (
+        asyncio.run(
+            scheduler.retry_pending_standard_notifications(
+                application=application,
+                sqlite_path=sqlite_path,
+                allowed_user_ids={123},
+            )
+        )
+        == 1
+    )
+    text = application.bot.messages[0]["text"]
+    assert "Deduction failed/not executed; this occurrence is skipped." in text
+    assert "If deduction failed, use /dca_skip" not in text
+
+
 def test_scheduled_check_logs_and_skips_when_no_new_data(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
