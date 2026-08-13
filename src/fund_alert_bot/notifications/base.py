@@ -12,6 +12,7 @@ class NotificationMessage:
 
     title: str
     body: str
+    telegram_actions: tuple[tuple[tuple[str, str], ...], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
