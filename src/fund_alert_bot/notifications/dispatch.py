@@ -96,8 +96,18 @@ def _notification_batches(
 
 
 def _merge_dca_batch(batch: list[AlertNotification]) -> AlertNotification:
-    if len(batch) == 1 or batch[0].dca_summary is None:
+    summary = batch[0].dca_summary
+    if summary is None:
         return batch[0]
+    if len(batch) == 1:
+        if summary.rebuilt_text is None:
+            return batch[0]
+        return AlertNotification(
+            event_id=batch[0].event_id,
+            title=batch[0].title,
+            text=summary.rebuilt_text,
+            telegram_actions=batch[0].telegram_actions,
+        )
 
     summaries = [item.dca_summary for item in batch]
     due_date = summaries[0].due_date

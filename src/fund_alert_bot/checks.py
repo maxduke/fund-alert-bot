@@ -114,6 +114,7 @@ class DcaNotificationSummary:
     lines: tuple[str, ...]
     amount: float
     skipped: bool
+    rebuilt_text: str | None = None
 
 
 def build_dca_notification_summary(
@@ -123,6 +124,7 @@ def build_dca_notification_summary(
     amount: float,
     skipped: bool,
     current_status: str | None = None,
+    current_effective_date: str | None = None,
 ) -> DcaNotificationSummary:
     """Build the concise portion of a persisted fixed-DCA reminder."""
 
@@ -134,11 +136,15 @@ def build_dca_notification_summary(
         status_line = "• This estimate was already applied."
     elif current_status == "reconciled_by_sync":
         status_line = "• This occurrence was already reconciled by Position Sync."
+    elif current_status == "pending" and current_effective_date is not None:
+        status_line = f"• Estimated subscription NAV date: {current_effective_date}."
+    lines[6] = status_line
     return DcaNotificationSummary(
         due_date=due_date,
         lines=(lines[2], *lines[4:6], status_line),
         amount=amount,
         skipped=skipped,
+        rebuilt_text="\n".join(lines) if current_status is not None else None,
     )
 
 

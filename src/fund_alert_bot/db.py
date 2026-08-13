@@ -2631,7 +2631,8 @@ def list_retryable_standard_alert_events(
                 json_extract(e.payload_json, '$.due_date') AS due_date,
                 json_extract(e.payload_json, '$.amount') AS dca_amount,
                 json_extract(e.payload_json, '$.fund_symbol') AS fund_symbol,
-                o.status AS occurrence_status
+                o.status AS occurrence_status,
+                o.effective_date AS occurrence_effective_date
             FROM alert_events AS e
             LEFT JOIN scheduled_dca_occurrences AS o
                 ON o.rule_id = e.rule_id

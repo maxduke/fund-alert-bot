@@ -385,6 +385,47 @@ def test_large_fixed_dca_batch_splits_before_telegram_limit(tmp_path: Path) -> N
     assert all(len(message["text"]) <= 4096 for message in application.bot.messages)
 
 
+def test_single_dca_retry_uses_current_effective_date(tmp_path: Path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    _add_fixed_dca_rule(sqlite_path, symbol="000001", name="A500", amount=2000)
+    asyncio.run(
+        scheduler.run_scheduled_dca_check(
+            application=SimpleNamespace(bot=FakeFailingBot()),
+            sqlite_path=sqlite_path,
+            allowed_user_ids={123},
+            timezone="Asia/Shanghai",
+            market_calendar=FakeMarketCalendar(is_trading_day=False),
+            run_date=date(2024, 1, 4),
+        )
+    )
+    with open_connection(sqlite_path) as connection:
+        connection.execute(
+            "UPDATE scheduled_dca_occurrences SET effective_date = '2024-01-05'"
+        )
+        connection.commit()
+    application = FakeApplication()
+
+    assert (
+        asyncio.run(
+            scheduler.retry_pending_standard_notifications(
+                application=application,
+                sqlite_path=sqlite_path,
+                allowed_user_ids={123},
+            )
+        )
+        == 1
+    )
+    assert len(application.bot.messages) == 1
+    assert (
+        "Estimated subscription NAV date: 2024-01-05."
+        in (application.bot.messages[0]["text"])
+    )
+    assert (
+        "Waiting for the next confirmed open day"
+        not in (application.bot.messages[0]["text"])
+    )
+
+
 def test_scheduled_check_logs_and_skips_when_no_new_data(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
