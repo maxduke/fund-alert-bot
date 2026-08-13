@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import UTC, date, datetime
+from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
@@ -2187,8 +2188,9 @@ class FakeMessage:
 
 
 class FakeCallbackQuery:
-    def __init__(self, data: str) -> None:
+    def __init__(self, data: str, *, reply_markup: object | None = None) -> None:
         self.data = data
+        self.message = SimpleNamespace(reply_markup=reply_markup)
         self.answer_count = 0
         self.edits: list[str] = []
         self.reply_markups: list[object] = []
@@ -2203,6 +2205,7 @@ class FakeCallbackQuery:
         reply_markup: object | None = None,
     ) -> None:
         self.edits.append(text)
+        self.message.reply_markup = reply_markup
         if reply_markup is not None:
             self.reply_markups.append(reply_markup)
 
@@ -2280,6 +2283,46 @@ def _handler_by_command(handlers: list[object], command: str) -> object:
         if command in getattr(handler, "commands", ()):
             return handler
     raise AssertionError(f"handler not found: {command}")
+
+
+def test_merged_dca_skip_callback_preserves_other_buttons(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    monkeypatch.setattr(
+        "fund_alert_bot.commands.skip_scheduled_dca_occurrence",
+        lambda *_args, **_kwargs: "skipped",
+    )
+    handlers = build_command_handlers({123}, sqlite_path=sqlite_path)
+    first_data = "dca_skip:1:2024-01-04"
+    second_data = "dca_skip:2:2024-01-04"
+    markup = InlineKeyboardMarkup(
+        (
+            (InlineKeyboardButton("First", callback_data=first_data),),
+            (InlineKeyboardButton("Second", callback_data=second_data),),
+        )
+    )
+    query = FakeCallbackQuery(first_data, reply_markup=markup)
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        callback_query=query,
+    )
+
+    asyncio.run(
+        _callback_by_name(handlers, "dca_skip_callback").callback(
+            update, SimpleNamespace()
+        )
+    )
+
+    assert query.edits == ["Skipped fixed DCA occurrence 1 / 2024-01-04."]
+    assert [
+        button.callback_data
+        for row in query.message.reply_markup.inline_keyboard
+        for button in row
+    ] == [second_data]
 
 
 def _drawdown_plan_callback(handlers: list[object]) -> object:

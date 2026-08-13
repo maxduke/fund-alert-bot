@@ -205,6 +205,38 @@ def test_chinese_localizes_complete_drawdown_and_profit_alerts() -> None:
         set_language("en")
 
 
+def test_chinese_localizes_merged_fixed_dca_reminder() -> None:
+    set_language("zh-CN")
+    try:
+        assert localize_text(
+            "\n".join(
+                (
+                    "💰 Fixed DCA reminders",
+                    "Scheduled date: 2026-08-13",
+                    "• Fund: 000001 / A500",
+                    "• Gross amount: 2000 RMB",
+                    "• Holiday policy: next",
+                    "• Waiting for the next confirmed open day before "
+                    "estimating units.",
+                    "Total planned amount: 2000 RMB",
+                )
+            )
+        ) == "\n".join(
+            (
+                "💰 固定定投提醒",
+                "计划日期： 2026-08-13",
+                "• 基金： 000001 / A500",
+                "• 计划总额： 2000 元",
+                "• 节假日策略：顺延至下一开放日",
+                "• 等待下一个确认开市日后再估算份额。",
+                "本次计划合计： 2000 元",
+            )
+        )
+        assert localize_text("⚠️ Deduction failed — A500") == ("⚠️ 扣款失败 — A500")
+    finally:
+        set_language("en")
+
+
 def test_chinese_translates_every_dca_skip_outcome() -> None:
     set_language("zh-CN")
     try:

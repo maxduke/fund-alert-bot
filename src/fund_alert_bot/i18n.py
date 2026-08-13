@@ -16,6 +16,7 @@ _EN_TO_ZH = {
     "Reminder only": "仅提醒",
     "Fixed fund DCA estimate": "固定基金定投估算",
     "Deduction failed/not executed": "扣款失败或未执行",
+    "Deduction failed/not executed; this occurrence is skipped.": "扣款失败或未执行；本期已跳过。",
     "Future occurrences only": "仅影响未来新建的期次",
     "Record an addition you made": "记录你已实际提交的加仓",
     "Show investment-plan status": "显示投资计划状态",
@@ -70,6 +71,7 @@ _EN_TO_ZH = {
     "Lookback:": "回看周期：",
     "calendar days": "个日历日",
     "days": "天",
+    "RMB": "元",
     "Tiers (incremental):": "档位（增量金额）：",
     "Maximum one-cycle total:": "单周期最大总额：",
     "MA250 / 20-session slope: context only": "MA250 / 20 个交易日斜率：仅作背景信息",
@@ -162,9 +164,12 @@ _EN_TO_ZH = {
     "Profit rate:": "涨幅：",
     "Cost:": "配置成本：",
     "Fixed DCA reminder": "固定定投提醒",
+    "Fixed DCA reminders": "固定定投提醒",
+    "DCA reminders": "定投提醒",
     "DCA reminder": "定投提醒",
     "Scheduled date:": "计划日期：",
     "Gross amount:": "计划总额：",
+    "Total planned amount:": "本次计划合计：",
     "Estimated subscription NAV date:": "预计申购净值日期：",
     "Waiting for the next confirmed open day before estimating units.": "等待下一个确认开市日后再估算份额。",
     "Holiday policy skipped this occurrence; no position estimate will apply.": "节假日策略已跳过本期，不会应用持仓估算。",
@@ -178,6 +183,7 @@ _EN_TO_ZH = {
     "Skipped fixed DCA occurrence": "已跳过固定定投期次",
     "The occurrence is still pending; try again.": "该期次仍在处理中，请稍后重试。",
     "This estimate was already applied. Use /sync_position to correct the platform position; no units were subtracted.": "该估算已经应用。请使用 /sync_position 按平台数据修正持仓；Bot 没有扣减份额。",
+    "This estimate was already applied.": "该估算已经应用。",
     "This occurrence was already reconciled by Position Sync.": "该期次已经通过持仓同步完成对账。",
     "Fixed DCA occurrence not found.": "未找到固定定投期次。",
     "Confirm zero position": "确认持仓为零",
@@ -359,6 +365,7 @@ _EN_TO_ZH.update(
         "No rule was created by this button.": "此按钮未创建规则。",
         "Notification delivery failures:": "通知投递失败：",
         "Set gain thresholds —": "设置涨幅阈值 —",
+        "Deduction failed —": "扣款失败 —",
         "Reference ETF data: unavailable": "参考 ETF 数据：不可用",
         "Feeder-fund NAV: unavailable": "联接基金净值：不可用",
         "Position value: unavailable": "持仓市值：不可用",
@@ -438,6 +445,7 @@ _DYNAMIC_PREFIXES = (
     "Rule id=",
     "Skipped fixed DCA occurrence",
     "Set gain thresholds —",
+    "Deduction failed —",
     "Buy-plan pre-alert —",
     "Buy-plan reminder —",
     "Checked ",
@@ -446,8 +454,16 @@ _DYNAMIC_PREFIXES = (
     "仅记录 ",
 )
 _LABEL_VALUE_SUFFIXES = {
+    "Gross amount:": ("RMB",),
     "Lookback:": ("calendar days", "days"),
     "Position value:": ("unavailable (unit NAV could not be fetched)",),
+    "Total planned amount:": ("RMB",),
+}
+_LABEL_VALUE_TRANSLATIONS = {
+    "Holiday policy:": {
+        "next": "顺延至下一开放日",
+        "skip": "跳过",
+    }
 }
 _DATED_LABELS = {"Peak:", "Latest:"}
 
@@ -469,6 +485,7 @@ def _localize_label_value(label: str, value: str, replacements: dict[str, str]) 
     if _language == "en" and label == "• 计划金额：":
         value = value.removesuffix(" 元") + " RMB"
     elif _language == "zh-CN":
+        value = _LABEL_VALUE_TRANSLATIONS.get(label, {}).get(value.strip(), value)
         dated_value, separator, dated_on = value.rpartition(" on ")
         if (
             label in _DATED_LABELS

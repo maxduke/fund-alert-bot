@@ -1575,6 +1575,25 @@ async def _edit_message_text(
     )
 
 
+def _remaining_callback_markup(query: object, consumed_data: str) -> object | None:
+    """Keep unconsumed buttons when one action edits a merged notification."""
+
+    from telegram import InlineKeyboardMarkup
+
+    reply_markup = getattr(getattr(query, "message", None), "reply_markup", None)
+    keyboard = getattr(reply_markup, "inline_keyboard", ())
+    remaining = tuple(
+        tuple(
+            button
+            for button in row
+            if getattr(button, "callback_data", None) != consumed_data
+        )
+        for row in keyboard
+    )
+    remaining = tuple(row for row in remaining if row)
+    return InlineKeyboardMarkup(remaining) if remaining else None
+
+
 def _split_telegram_text(text: str) -> tuple[str, ...]:
     chunks: list[str] = []
     while len(text) > _TELEGRAM_TEXT_LIMIT:
@@ -2372,7 +2391,11 @@ def build_command_handlers(
                 rule_id=rule_id,
                 due_date=due_date,
             )
-        await _edit_message_text(query, _dca_skip_response(status, rule_id, due_date))
+        await _edit_message_text(
+            query,
+            _dca_skip_response(status, rule_id, due_date),
+            reply_markup=_remaining_callback_markup(query, str(query.data)),
+        )
 
     async def manual_add_confirm_callback(
         update: Update,

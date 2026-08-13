@@ -107,6 +107,53 @@ class DrawdownRuleContext:
 
 
 @dataclass(frozen=True, slots=True)
+class DcaNotificationSummary:
+    """Fields used to merge same-day fixed-DCA notification presentation."""
+
+    due_date: str
+    lines: tuple[str, ...]
+    amount: float
+    skipped: bool
+    rebuilt_text: str | None = None
+
+
+def build_dca_notification_summary(
+    *,
+    message: str,
+    due_date: str,
+    amount: float,
+    skipped: bool,
+    current_status: str | None = None,
+    current_effective_date: str | None = None,
+) -> DcaNotificationSummary:
+    """Build the concise portion of a persisted fixed-DCA reminder."""
+
+    lines = message.splitlines()
+    status_line = lines[6]
+    if current_status == "skipped" and "Holiday policy skipped" not in status_line:
+        status_line = "• Deduction failed/not executed; this occurrence is skipped."
+    elif current_status == "applied":
+        status_line = "• This estimate was already applied."
+    elif current_status == "reconciled_by_sync":
+        status_line = "• This occurrence was already reconciled by Position Sync."
+    elif current_status == "pending" and current_effective_date is not None:
+        status_line = f"• Estimated subscription NAV date: {current_effective_date}."
+    lines[6] = status_line
+    resolved = current_status in {"skipped", "applied", "reconciled_by_sync"}
+    action_line = None if skipped or resolved else lines[9]
+    if resolved:
+        lines.pop(9)
+    return DcaNotificationSummary(
+        due_date=due_date,
+        lines=(lines[2], *lines[4:6], status_line)
+        + ((action_line,) if action_line else ()),
+        amount=amount,
+        skipped=skipped,
+        rebuilt_text="\n".join(lines) if current_status is not None else None,
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class AlertNotification:
     """Alert text ready to send after the event has been reserved."""
 
@@ -114,6 +161,7 @@ class AlertNotification:
     title: str
     text: str
     telegram_actions: tuple[tuple[tuple[str, str], ...], ...] = ()
+    dca_summary: DcaNotificationSummary | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1697,13 +1745,23 @@ def evaluate_dca_rules(
                 telegram_actions=(
                     (
                         (
-                            "⚠️ Deduction failed / not executed",
+                            f"⚠️ Deduction failed — {row['symbol']}",
                             f"dca_skip:{row['id']}:{check_date.isoformat()}",
                         ),
                     ),
                 )
                 if occurrence is not None and str(occurrence["status"]) == "pending"
                 else (),
+                dca_summary=(
+                    build_dca_notification_summary(
+                        message=str(alert["message"]),
+                        due_date=check_date.isoformat(),
+                        amount=float(alert["payload"]["amount"]),
+                        skipped=str(occurrence["status"]) == "skipped",
+                    )
+                    if occurrence is not None
+                    else None
+                ),
             )
         )
 
