@@ -103,7 +103,9 @@ class AkshareMarketDataProvider(MarketDataProvider):
         self._etf_quote_cache: dict[tuple[str, str], tuple[float, RealtimeQuote]] = {}
         self._fund_nav_cache: dict[str, tuple[float, pd.DataFrame | None]] = {}
         self._eastmoney_failed_at: float | None = None
-        self._sina_failed_at: float | None = None
+        # Keep Sina cooldowns isolated per symbol. A transient failure for one
+        # ETF must not suppress fallback quotes for every other plan.
+        self._sina_failed_at: dict[str, float] = {}
 
     def get_history(
         self,
@@ -214,10 +216,24 @@ class AkshareMarketDataProvider(MarketDataProvider):
         if self._resolve_asset_type(instrument.asset_type) is not AssetType.CN_ETF:
             raise UnsupportedAssetTypeError("Realtime plan quotes require cn_etf.")
 
+        symbol = _strip_exchange_prefix(instrument.symbol)
         try:
             return self._get_eastmoney_etf_quote(instrument)
-        except MarketDataFetchError:
-            return self.get_sina_etf_realtime_quote(instrument)
+        except MarketDataFetchError as eastmoney_error:
+            LOGGER.warning(
+                "Eastmoney realtime ETF quote unavailable; trying Sina fallback "
+                "symbol=%s reason=%s",
+                symbol,
+                eastmoney_error,
+            )
+            try:
+                return self.get_sina_etf_realtime_quote(instrument)
+            except MarketDataFetchError as sina_error:
+                raise MarketDataFetchError(
+                    "Eastmoney realtime ETF quote unavailable "
+                    f"({eastmoney_error}); Sina fallback unavailable "
+                    f"({sina_error})."
+                ) from sina_error
 
     def get_sina_etf_realtime_quote(self, instrument: Instrument) -> RealtimeQuote:
         """Return the Sina fallback separately after Eastmoney validation fails."""
@@ -228,7 +244,8 @@ class AkshareMarketDataProvider(MarketDataProvider):
         cached = self._read_etf_quote_cache("sina", symbol)
         if cached is not None:
             return cached
-        self._raise_if_source_cooling_down("Sina", self._sina_failed_at)
+        failed_at = self._sina_failed_at.get(symbol)
+        self._raise_if_source_cooling_down("Sina", failed_at)
         try:
             response = self._http_get(
                 _SINA_QUOTE_URL.format(symbol=_format_sina_etf_symbol(symbol)),
@@ -238,9 +255,9 @@ class AkshareMarketDataProvider(MarketDataProvider):
             response.raise_for_status()
             quote = _parse_sina_etf_quote(response, symbol)
         except Exception as exc:  # noqa: BLE001
-            self._sina_failed_at = time.monotonic()
+            self._sina_failed_at[symbol] = time.monotonic()
             raise MarketDataFetchError("Sina realtime ETF quote failed.") from exc
-        self._sina_failed_at = None
+        self._sina_failed_at.pop(symbol, None)
         self._write_etf_quote_cache("sina", symbol, quote)
         return quote
 

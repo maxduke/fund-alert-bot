@@ -286,12 +286,15 @@ CN index and stock latest lookups also use one bounded, per-symbol request rathe
 than AKShare's full-market paginated spot endpoints, which avoids their internal
 three-attempt page retry loop.
 For ETF quotes, Sina is the bounded per-symbol fallback, and both sources must
-supply their own quote timestamp. Confirmed `qfq` history still fails closed if Eastmoney is
-unavailable. Exact feeder-fund NAV has no independent Sina equivalent, so it
-stays pending rather than guessing. RSI and RSI6 alerts are not implemented
-here. The bot does not poll realtime endpoints: it performs one scheduled
-before-close pass, skips already completed plan/date work, and requests fund NAV
-only for pending dated estimates or eligible `auto` Price-Gain evaluations.
+supply their own quote timestamp. A Sina failure cooldown is isolated per ETF,
+so one temporary outage cannot suppress fallback attempts for the other plans;
+the notification includes both primary and fallback failures when neither is
+usable. Confirmed `qfq` history still fails closed if Eastmoney is unavailable.
+Exact feeder-fund NAV has no independent Sina equivalent, so it stays pending
+rather than guessing. RSI and RSI6 alerts are not implemented here. The bot does
+not poll realtime endpoints: it performs one scheduled before-close pass, skips
+already completed plan/date work, and requests fund NAV only for pending dated
+estimates or eligible `auto` Price-Gain evaluations.
 
 ## Technology Stack
 

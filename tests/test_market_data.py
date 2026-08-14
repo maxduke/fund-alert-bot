@@ -655,13 +655,50 @@ def test_etf_quotes_cache_failures_from_both_realtime_sources() -> None:
         http_get=http_get,
     )
 
-    for symbol in ("510300", "159915"):
+    for _attempt in range(2):
         with pytest.raises(MarketDataFetchError):
             provider.get_etf_realtime_quote(
-                Instrument(symbol, symbol, AssetType.CN_ETF)
+                Instrument("510300", "510300", AssetType.CN_ETF)
             )
 
     assert len(calls) == 2
+
+
+def test_sina_failure_cooldown_is_isolated_per_etf_symbol() -> None:
+    calls: list[str] = []
+
+    def http_get(url: str, **kwargs: Any) -> FakeResponse:
+        calls.append(url)
+        if "eastmoney" in url:
+            raise TimeoutError("Eastmoney rate limited")
+        symbol = url.rsplit("=", 1)[1][2:]
+        if symbol == "510300":
+            raise TimeoutError("Sina temporarily unavailable for one symbol")
+        return FakeResponse(content=_sina_quote_content(symbol))
+
+    provider = AkshareMarketDataProvider(
+        ak_module=FakeAkshare(),
+        retries=1,
+        retry_delay_seconds=0,
+        http_get=http_get,
+    )
+
+    with pytest.raises(
+        MarketDataFetchError,
+        match="Sina realtime ETF quote failed",
+    ) as error_info:
+        provider.get_etf_realtime_quote(
+            Instrument("510300", "CSI 300 ETF", AssetType.CN_ETF)
+        )
+    assert "Eastmoney realtime ETF quote unavailable" in str(error_info.value)
+    assert "Sina fallback unavailable" in str(error_info.value)
+    quote = provider.get_etf_realtime_quote(
+        Instrument("159915", "ChiNext ETF", AssetType.CN_ETF)
+    )
+
+    assert quote.source == "sina_fallback"
+    assert sum("eastmoney" in url for url in calls) == 1
+    assert sum("sinajs" in url for url in calls) == 2
 
 
 def test_get_latest_returns_last_normalized_row() -> None:
