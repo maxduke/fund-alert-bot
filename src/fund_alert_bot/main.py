@@ -58,11 +58,9 @@ def run() -> None:
         retry_delay_seconds=settings.akshare_retry_delay_seconds,
         latest_lookback_days=settings.akshare_latest_lookback_days,
         history_cache_ttl_seconds=settings.akshare_history_cache_ttl_seconds,
-        eastmoney_retries=(
-            min(settings.akshare_retries, settings.akshare_proxy_retry)
-            if settings.akshare_proxy_enabled
-            else None
-        ),
+        # The proxy patch owns retries for paid Eastmoney requests. Keeping
+        # this provider budget at one avoids multiplying proxy attempts.
+        eastmoney_retries=1 if settings.akshare_proxy_enabled else None,
     )
     market_calendar = CNMarketCalendar()
     scheduler = create_scheduler(timezone=settings.timezone)
@@ -132,11 +130,7 @@ def run() -> None:
         settings.timezone,
         settings.bot_language,
         settings.akshare_proxy_enabled,
-        (
-            min(settings.akshare_retries, settings.akshare_proxy_retry)
-            if settings.akshare_proxy_enabled
-            else settings.akshare_retries
-        ),
+        1 if settings.akshare_proxy_enabled else settings.akshare_retries,
         settings.akshare_history_cache_ttl_seconds,
     )
 

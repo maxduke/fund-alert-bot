@@ -139,8 +139,8 @@ The container already includes the pinned
 no runtime `pip install` is needed. The bot hooks only its Eastmoney domains and
 keeps the patch's concurrent `fast` mode off. A low retry count and the bot's
 short in-process caches are intentional cost controls. With the proxy enabled,
-the provider caps Eastmoney retries at the lower of `AKSHARE_RETRIES` and
-`AKSHARE_PROXY_RETRY`; other data sources keep their normal retry budget. Do not
+the patch owns retries for paid Eastmoney requests and the provider calls each
+Eastmoney operation once; other data sources keep their normal retry budget. Do not
 put the token in Compose files, shell history, logs, or Git. If the proxy and fallback sources
 are unavailable, the bot sends a data-unavailable notice and does not consume a
 drawdown tier or fabricate a price.

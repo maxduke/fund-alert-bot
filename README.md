@@ -253,13 +253,19 @@ The patch is installed at process startup, before the first lazy AKShare import.
 It hooks only the Eastmoney domains used by this bot; Sina fallback and Xueqiu
 metadata remain direct requests. Concurrent `fast` pagination is deliberately
 disabled because it can multiply paid requests. Keep the retry value low and
-never commit or log the token. When enabled, the provider caps Eastmoney
-retries at `min(AKSHARE_RETRIES, AKSHARE_PROXY_RETRY)`; other data sources keep
-the normal `AKSHARE_RETRIES` budget. History, realtime quotes, and feeder-NAV data
+never commit or log the token. When enabled, the proxy patch is the only retry
+layer for paid Eastmoney requests; the provider invokes each Eastmoney AKShare
+operation once. `AKSHARE_RETRIES` remains the retry budget for other data
+sources. History, realtime quotes, and feeder-NAV data
 also use short in-process caches, so repeated checks reuse an identical or
 narrower request without creating a persistent stale-data store. Restart after
 changing these variables and verify the startup log; a proxy failure still fails closed rather
 than inventing market data.
+
+The patch's optional `fast` mode is intentionally disabled. It parallelizes
+generic paginated fund-flow/rank endpoints, while this bot uses bounded ETF,
+index, stock, and feeder-NAV calls that do not need that pagination. Enabling it
+could create concurrent paid requests without improving this bot's reminder jobs.
 
 Realtime ETF quotes are used only for before-close drawdown estimates. Each
 Reference ETF uses one bounded, per-symbol Eastmoney request; a failure opens a
