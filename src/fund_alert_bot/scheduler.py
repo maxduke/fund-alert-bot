@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 from fund_alert_bot.checks import (
     AlertNotification,
+    DrawdownCheckResult,
     DrawdownPlanCheckResult,
     ManualAddSettlementResult,
     RuleNoDataSkip,
@@ -330,14 +331,17 @@ async def run_scheduled_before_close_check(
 
         with open_connection(sqlite_path) as connection:
             initialize_database(connection)
-            drawdown_result = evaluate_drawdown_rules(
-                connection,
-                market_data_provider,
-                today=check_date,
-                require_new_data_date=check_date,
-                include_latest=confirmed_end_date is not None,
-                confirmed_end_date=confirmed_end_date,
-            )
+            if confirmed_end_date is None:
+                drawdown_result = DrawdownCheckResult(0, [], 0, [], [])
+            else:
+                drawdown_result = evaluate_drawdown_rules(
+                    connection,
+                    market_data_provider,
+                    today=check_date,
+                    require_new_data_date=check_date,
+                    include_latest=True,
+                    confirmed_end_date=confirmed_end_date,
+                )
             plan_rules = [
                 row
                 for row in list_enabled_rules(connection)

@@ -3154,12 +3154,15 @@ def build_command_handlers(
 
         with open_connection(sqlite_path) as connection:
             initialize_database(connection)
-            result = evaluate_drawdown_rules(
-                connection,
-                market_data_provider,
-                include_latest=confirmed_end_date is not None,
-                confirmed_end_date=confirmed_end_date,
-            )
+            if confirmed_end_date is None:
+                result = DrawdownCheckResult(0, [], 0, [], [])
+            else:
+                result = evaluate_drawdown_rules(
+                    connection,
+                    market_data_provider,
+                    include_latest=True,
+                    confirmed_end_date=confirmed_end_date,
+                )
             profit_result = evaluate_profit_rules(connection, market_data_provider)
             dca_result = evaluate_dca_rules(
                 connection,

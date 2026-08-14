@@ -615,6 +615,7 @@ def test_check_retries_alert_after_delivery_failure(tmp_path) -> None:
         {123},
         sqlite_path=sqlite_path,
         market_data_provider=provider,
+        market_calendar=FakeMarketCalendar(),
     )
     failing_message = FakeMessage()
     failing_update = SimpleNamespace(
