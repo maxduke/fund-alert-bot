@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import date
+
 import pytest
 
 from fund_alert_bot.checks import PROFIT_RULE_TYPE, evaluate_profit_rules
@@ -137,6 +139,58 @@ def test_evaluate_profit_rules_sends_threshold_once_per_cost_basis() -> None:
     ]
 
 
+def test_evaluate_profit_rules_skips_stale_latest_data() -> None:
+    connection = connect(":memory:")
+    try:
+        init_db(connection)
+        add_rule(
+            connection,
+            type=PROFIT_RULE_TYPE,
+            symbol="159915",
+            name="ChiNext ETF",
+            asset_type=AssetType.CN_ETF.value,
+            params={"cost": 1.85, "thresholds": [0.25]},
+        )
+        result = evaluate_profit_rules(
+            connection,
+            FakeLatestProvider({"date": "2024-01-02", "close": 2.4, "source": "test"}),
+            evaluation_date=date(2024, 1, 3),
+        )
+    finally:
+        connection.close()
+
+    assert result.notifications == []
+    assert result.no_data_skips[0].message == (
+        "Latest market data for 159915 is stale: "
+        "data date=2024-01-02, expected=2024-01-03."
+    )
+
+
+def test_evaluate_profit_rules_accepts_latest_completed_market_date() -> None:
+    connection = connect(":memory:")
+    try:
+        init_db(connection)
+        add_rule(
+            connection,
+            type=PROFIT_RULE_TYPE,
+            symbol="159915",
+            name="ChiNext ETF",
+            asset_type=AssetType.CN_ETF.value,
+            params={"cost": 1.85, "thresholds": [0.25]},
+        )
+        result = evaluate_profit_rules(
+            connection,
+            FakeLatestProvider({"date": "2024-01-05", "close": 2.4, "source": "test"}),
+            evaluation_date=date(2024, 1, 7),
+            market_calendar=FakeMarketCalendar({date(2024, 1, 5)}),
+        )
+    finally:
+        connection.close()
+
+    assert len(result.notifications) == 1
+    assert result.no_data_skips == []
+
+
 class FakeLatestProvider:
     def __init__(self, latest: dict[str, object] | None) -> None:
         self.latest = latest
@@ -153,6 +207,14 @@ class FakeLatestProvider:
     def get_latest(self, instrument: Instrument) -> dict[str, object] | None:
         self.latest_calls.append(instrument)
         return self.latest
+
+
+class FakeMarketCalendar:
+    def __init__(self, open_dates: set[date]) -> None:
+        self.open_dates = open_dates
+
+    def confirmed_status(self, check_date: date) -> bool:
+        return check_date in self.open_dates
 
 
 def _rule(

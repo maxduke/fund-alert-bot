@@ -97,6 +97,8 @@ EXPECTED_PROFIT_MESSAGE = "\n".join(
         "• Asset type: cn_etf",
         "• Cost: 1.85",
         "• Latest price: 2.4",
+        "• Data date: 2024-01-02",
+        "• Source: test",
         "• Profit rate: 29.7%",
         "• Triggered threshold: 25.0%",
         "",

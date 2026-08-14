@@ -50,6 +50,9 @@ def build_profit_alerts(
         symbol=symbol,
         asset_type=asset_type,
     )
+    latest_date = _format_optional_date(latest.get("date")) or "unknown"
+    latest_source = _read_optional_latest_value(latest, "source")
+    source = "unknown" if latest_source is None else str(latest_source)
     profit_rate = calculate_profit_rate(current_price=current_price, cost=cost)
 
     alerts: list[dict[str, object]] = []
@@ -79,6 +82,8 @@ def build_profit_alerts(
                     current_price=current_price,
                     profit_rate=profit_rate,
                     threshold=threshold,
+                    data_date=latest_date,
+                    source=source,
                 ),
                 "payload": {
                     "symbol": symbol,
@@ -355,6 +360,8 @@ def _build_message(
     current_price: float,
     profit_rate: float,
     threshold: float,
+    data_date: str,
+    source: str,
 ) -> str:
     return "\n".join(
         (
@@ -365,6 +372,8 @@ def _build_message(
             f"• Asset type: {asset_type}",
             f"• Cost: {_format_number(cost)}",
             f"• {_price_label(asset_type)}: {_format_number(current_price)}",
+            f"• Data date: {data_date}",
+            f"• Source: {source}",
             f"• Profit rate: {profit_rate:.1%}",
             f"• Triggered threshold: {threshold:.1%}",
             "",

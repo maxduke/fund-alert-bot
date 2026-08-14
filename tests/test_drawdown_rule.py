@@ -126,6 +126,16 @@ def test_calculate_drawdown_uses_calendar_lookback_window() -> None:
     assert result["drawdown"] == pytest.approx(0.10)
 
 
+@pytest.mark.parametrize("latest_price", [0.0, -1.0])
+def test_calculate_drawdown_rejects_non_positive_latest_price(
+    latest_price: float,
+) -> None:
+    df = _history(["2024-01-01", "2024-01-02"], [100.0, latest_price])
+
+    with pytest.raises(ValueError, match="latest price must be positive"):
+        calculate_drawdown_from_high(df, lookback_days=365)
+
+
 def _history(
     dates: list[str],
     closes: list[float],
