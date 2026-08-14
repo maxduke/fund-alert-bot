@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from email.header import Header
 
 import requests
 
@@ -65,6 +66,33 @@ def test_ntfy_channel_posts_with_timeout(monkeypatch) -> None:
             "timeout": 10,
         }
     ]
+
+
+def test_ntfy_channel_rfc2047_encodes_utf8_title(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_post(url: str, **kwargs: object) -> object:
+        calls.append({"url": url, **kwargs})
+        return FakeResponse(status_code=200)
+
+    monkeypatch.setattr("fund_alert_bot.notifications.ntfy.requests.post", fake_post)
+    title = "📉 " + "中证A500 " * 30
+    channel = NtfyNotificationChannel(
+        server_url="https://ntfy.example.test",
+        topic="secret-topic",
+    )
+
+    result = asyncio.run(channel.send(NotificationMessage(title=title, body="请关注")))
+
+    assert result.success is True
+    encoded_title = Header(title, "utf-8").encode(maxlinelen=0)
+    assert calls[0]["headers"] == {"Title": encoded_title}
+    requests.Request(
+        "POST",
+        "https://ntfy.example.test/secret-topic",
+        headers=calls[0]["headers"],
+        data="请关注".encode(),
+    ).prepare()
 
 
 def test_webhook_channel_posts_with_timeout(monkeypatch) -> None:
