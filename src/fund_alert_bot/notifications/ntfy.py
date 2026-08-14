@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from email.header import Header
 
 import requests
 
@@ -35,7 +36,7 @@ class NtfyNotificationChannel:
             response = requests.post(
                 f"{self._server_url}/{self._topic}",
                 data=message.body.encode("utf-8"),
-                headers={"Title": message.title},
+                headers={"Title": _encode_header_value(message.title)},
                 timeout=self._timeout,
             )
         except requests.RequestException as exc:
@@ -53,3 +54,13 @@ class NtfyNotificationChannel:
             )
 
         return NotificationResult(channel=self.name, success=True, detail="sent")
+
+
+def _encode_header_value(value: str) -> str:
+    """Encode non-ASCII ntfy header values using RFC 2047."""
+
+    try:
+        value.encode("ascii")
+    except UnicodeEncodeError:
+        return Header(value, "utf-8").encode()
+    return value
