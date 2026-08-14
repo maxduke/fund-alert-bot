@@ -179,7 +179,7 @@ def test_drawdown_tier_reminder_keys_are_canonical_and_unique(
         snooze_drawdown_tiers_for_date(
             connection,
             cycle_id=cycle_id,
-            tier_keys=("0.20",),
+            tier_keys=("0.20000000000000001",),
             market_date="2026-08-14",
         )
         assert (

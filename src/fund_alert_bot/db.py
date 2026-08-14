@@ -8,7 +8,7 @@ import sqlite3
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, date, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -3272,12 +3272,12 @@ def _normalize_drawdown_tier_keys(tier_keys: Sequence[str]) -> tuple[str, ...]:
         if not key:
             raise ValueError("Drawdown tier keys must not be empty.")
         try:
-            number = Decimal(key)
-        except InvalidOperation as exc:
+            number = float(key)
+        except (TypeError, ValueError) as exc:
             raise ValueError("Drawdown tier keys must be finite numbers.") from exc
-        if not number.is_finite():
+        if not math.isfinite(number):
             raise ValueError("Drawdown tier keys must be finite numbers.")
-        keys.append(format(number.normalize(), "f"))
+        keys.append(format(Decimal(str(number)).normalize(), "f"))
     keys = tuple(keys)
     if len(set(keys)) != len(keys):
         raise ValueError("Drawdown tier keys must be unique.")
