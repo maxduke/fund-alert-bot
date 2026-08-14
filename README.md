@@ -270,8 +270,11 @@ could create concurrent paid requests without improving this bot's reminder jobs
 Realtime ETF quotes are used only for before-close drawdown estimates. Each
 Reference ETF uses one bounded, per-symbol Eastmoney request; a failure opens a
 brief global Eastmoney cooldown so the remaining plans do not repeat requests.
-Sina is the bounded per-symbol fallback, and both sources must supply their own
-quote timestamp. Confirmed `qfq` history still fails closed if Eastmoney is
+CN index and stock latest lookups also use one bounded, per-symbol request rather
+than AKShare's full-market paginated spot endpoints, which avoids their internal
+three-attempt page retry loop.
+For ETF quotes, Sina is the bounded per-symbol fallback, and both sources must
+supply their own quote timestamp. Confirmed `qfq` history still fails closed if Eastmoney is
 unavailable. Exact feeder-fund NAV has no independent Sina equivalent, so it
 stays pending rather than guessing. RSI and RSI6 alerts are not implemented
 here. The bot does not poll realtime endpoints: it performs one scheduled

@@ -141,7 +141,9 @@ keeps the patch's concurrent `fast` mode off. A low retry count and the bot's
 short in-process caches are intentional cost controls. With the proxy enabled,
 the patch owns retries for paid Eastmoney requests and the provider calls each
 Eastmoney operation once; other data sources keep their normal retry budget. Do not
-put the token in Compose files, shell history, logs, or Git. If the proxy and fallback sources
+put the token in Compose files, shell history, logs, or Git. ETF, index, and
+stock realtime lookups use one bounded per-symbol request; the bot does not call
+AKShare's full-market paginated spot endpoints. If the proxy and fallback sources
 are unavailable, the bot sends a data-unavailable notice and does not consume a
 drawdown tier or fabricate a price.
 

@@ -96,9 +96,6 @@ class AkshareMarketDataProvider(MarketDataProvider):
         self._today_factory = today_factory
         self._now_factory = now_factory or (lambda: datetime.now(UTC))
         self._http_get = http_get or requests.get
-        self._realtime_spot_cache: dict[
-            AssetType, tuple[float, datetime, pd.DataFrame]
-        ] = {}
         self._history_cache: dict[
             tuple[str, str, str, str, str], tuple[float, pd.DataFrame]
         ] = {}
@@ -345,38 +342,45 @@ class AkshareMarketDataProvider(MarketDataProvider):
                 "source": f"{quote.source}_realtime",
             }
 
-        snapshot = self._fetch_raw_realtime(asset_type)
-        if snapshot is None:
+        try:
+            quote = self._get_eastmoney_symbol_quote(instrument)
+        except MarketDataFetchError:
             return None
-        raw_data, _fetched_at = snapshot
-        if raw_data.empty or "代码" not in raw_data.columns:
-            return None
-
-        symbol = _strip_exchange_prefix(instrument.symbol)
-        matched = raw_data.loc[raw_data["代码"].astype(str) == symbol]
-        if matched.empty:
-            return None
-
-        row = matched.iloc[0]
-        close = _read_realtime_float(row, "最新价")
-        data_date = _read_realtime_date(row)
-        if close is None or data_date is None:
-            return None
-
         return {
-            "date": pd.Timestamp(data_date),
-            "open": _read_first_realtime_float(row, "开盘价", "今开"),
-            "high": _read_first_realtime_float(row, "最高价", "最高"),
-            "low": _read_first_realtime_float(row, "最低价", "最低"),
-            "close": close,
-            "volume": _read_realtime_float(row, "成交量"),
-            "amount": _read_realtime_float(row, "成交额"),
+            "date": pd.Timestamp(quote.fetched_at.astimezone(_CN_TIMEZONE).date()),
+            "open": None,
+            "high": None,
+            "low": None,
+            "close": quote.price,
+            "volume": quote.volume,
+            "amount": quote.amount,
             "source": "akshare_realtime",
         }
 
     def _get_eastmoney_etf_quote(self, instrument: Instrument) -> RealtimeQuote:
         symbol = _strip_exchange_prefix(instrument.symbol)
-        cached = self._read_etf_quote_cache("eastmoney", symbol)
+        return self._get_eastmoney_quote(
+            instrument,
+            market_id=_eastmoney_etf_market_id(symbol),
+        )
+
+    def _get_eastmoney_symbol_quote(self, instrument: Instrument) -> RealtimeQuote:
+        """Fetch one index/stock quote without AKShare full-market pagination."""
+        return self._get_eastmoney_quote(
+            instrument,
+            market_id=_eastmoney_market_id(instrument.asset_type, instrument.symbol),
+        )
+
+    def _get_eastmoney_quote(
+        self,
+        instrument: Instrument,
+        *,
+        market_id: int,
+    ) -> RealtimeQuote:
+        symbol = _strip_exchange_prefix(instrument.symbol)
+        asset_type = AssetType(instrument.asset_type)
+        cache_source = f"eastmoney_{asset_type.value}"
+        cached = self._read_etf_quote_cache(cache_source, symbol)
         if cached is not None:
             return cached
         self._raise_if_source_cooling_down("Eastmoney", self._eastmoney_failed_at)
@@ -387,17 +391,17 @@ class AkshareMarketDataProvider(MarketDataProvider):
                     "fltt": "2",
                     "invt": "2",
                     "fields": "f43,f44,f45,f46,f47,f48,f57,f58,f60,f86",
-                    "secid": f"{_eastmoney_etf_market_id(symbol)}.{symbol}",
+                    "secid": f"{market_id}.{symbol}",
                 },
                 timeout=_REALTIME_HTTP_TIMEOUT_SECONDS,
             )
             response.raise_for_status()
-            quote = _parse_eastmoney_etf_quote(response.json(), symbol)
+            quote = _parse_eastmoney_quote(response.json(), symbol)
         except Exception as exc:  # noqa: BLE001
             self._eastmoney_failed_at = time.monotonic()
-            raise MarketDataFetchError("Eastmoney realtime ETF quote failed.") from exc
+            raise MarketDataFetchError("Eastmoney realtime quote failed.") from exc
         self._eastmoney_failed_at = None
-        self._write_etf_quote_cache("eastmoney", symbol, quote)
+        self._write_etf_quote_cache(cache_source, symbol, quote)
         return quote
 
     def _read_etf_quote_cache(
@@ -434,63 +438,6 @@ class AkshareMarketDataProvider(MarketDataProvider):
             raise MarketDataFetchError(
                 f"Recent {source} request failed; retry suppressed."
             )
-
-    def _fetch_raw_realtime(
-        self,
-        asset_type: AssetType,
-    ) -> tuple[pd.DataFrame, datetime] | None:
-        cached = self._read_realtime_spot_cache(asset_type)
-        if cached is not None:
-            return cached
-
-        ak_module = self._akshare
-        try:
-            if asset_type is AssetType.CN_INDEX:
-                raw_data = self._call_eastmoney_with_retry(
-                    ak_module.stock_zh_index_spot_em
-                )
-            elif asset_type is AssetType.CN_STOCK:
-                raw_data = self._call_eastmoney_with_retry(ak_module.stock_zh_a_spot_em)
-            else:
-                return None
-        except (AttributeError, MarketDataFetchError):
-            raw_data = pd.DataFrame()
-
-        fetched_at = self._now_factory()
-        self._write_realtime_spot_cache(asset_type, raw_data, fetched_at)
-        return raw_data, fetched_at
-
-    def _read_realtime_spot_cache(
-        self,
-        asset_type: AssetType,
-    ) -> tuple[pd.DataFrame, datetime] | None:
-        if self._realtime_spot_ttl_seconds <= 0:
-            return None
-
-        cached = self._realtime_spot_cache.get(asset_type)
-        if cached is None:
-            return None
-
-        cached_at, fetched_at, raw_data = cached
-        if time.monotonic() - cached_at <= self._realtime_spot_ttl_seconds:
-            return raw_data, fetched_at
-
-        self._realtime_spot_cache.pop(asset_type, None)
-        return None
-
-    def _write_realtime_spot_cache(
-        self,
-        asset_type: AssetType,
-        raw_data: pd.DataFrame,
-        fetched_at: datetime,
-    ) -> None:
-        if self._realtime_spot_ttl_seconds <= 0:
-            return
-        self._realtime_spot_cache[asset_type] = (
-            time.monotonic(),
-            fetched_at,
-            raw_data,
-        )
 
     def _fetch_raw_history(
         self,
@@ -729,44 +676,6 @@ def _strip_exchange_prefix(symbol: str) -> str:
     return symbol
 
 
-def _read_realtime_float(row: pd.Series, column: str) -> float | None:
-    if column not in row:
-        return None
-    value = pd.to_numeric(row[column], errors="coerce")
-    if pd.isna(value):
-        return None
-    return float(value)
-
-
-def _read_first_realtime_float(row: pd.Series, *columns: str) -> float | None:
-    for column in columns:
-        value = _read_realtime_float(row, column)
-        if value is not None:
-            return value
-    return None
-
-
-def _read_realtime_date(row: pd.Series) -> date | None:
-    for column in ("数据日期", "更新时间", "时间戳"):
-        if column not in row or pd.isna(row[column]):
-            continue
-        value = pd.to_datetime(row[column], errors="coerce")
-        if not pd.isna(value):
-            return value.date()
-    return None
-
-
-def _find_realtime_row(raw_data: pd.DataFrame | None, symbol: str) -> pd.Series | None:
-    if raw_data is None or raw_data.empty or "\u4ee3\u7801" not in raw_data.columns:
-        return None
-    normalized = symbol.lower()
-    symbols = raw_data["\u4ee3\u7801"].astype(str).str.lower()
-    matched = raw_data.loc[symbols == normalized]
-    if matched.empty:
-        return None
-    return matched.iloc[0]
-
-
 def _eastmoney_etf_market_id(symbol: str) -> int:
     if symbol.startswith("5"):
         return 1
@@ -775,7 +684,22 @@ def _eastmoney_etf_market_id(symbol: str) -> int:
     raise ValueError(f"Unsupported CN ETF exchange for symbol {symbol}.")
 
 
-def _parse_eastmoney_etf_quote(
+def _eastmoney_market_id(asset_type: AssetType | str, symbol: str) -> int:
+    normalized = str(symbol).lower()
+    if normalized.startswith("sh"):
+        return 1
+    if normalized.startswith("sz"):
+        return 0
+    normalized = _strip_exchange_prefix(normalized)
+    resolved = AssetType(asset_type)
+    if resolved is AssetType.CN_INDEX:
+        return 0 if normalized.startswith("399") else 1
+    if resolved is AssetType.CN_STOCK:
+        return 1 if normalized.startswith(("6", "9")) else 0
+    return _eastmoney_etf_market_id(normalized)
+
+
+def _parse_eastmoney_quote(
     payload: object,
     symbol: str,
 ) -> RealtimeQuote:

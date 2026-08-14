@@ -389,6 +389,43 @@ def test_get_latest_uses_the_quote_data_date_instead_of_local_today() -> None:
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize(
+    ("asset_type", "symbol", "expected_secid"),
+    [
+        (AssetType.CN_INDEX, "000300", "1.000300"),
+        (AssetType.CN_INDEX, "399006", "0.399006"),
+        (AssetType.CN_STOCK, "600000", "1.600000"),
+        (AssetType.CN_STOCK, "300750", "0.300750"),
+    ],
+)
+def test_latest_uses_one_bounded_quote_for_index_and_stock(
+    asset_type: AssetType,
+    symbol: str,
+    expected_secid: str,
+) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def http_get(url: str, **kwargs: Any) -> FakeResponse:
+        calls.append((url, kwargs))
+        assert kwargs["params"]["secid"] == expected_secid
+        return _eastmoney_quote_response(symbol)
+
+    fake_ak = FakeAkshare()
+    provider = AkshareMarketDataProvider(
+        ak_module=fake_ak,
+        retry_delay_seconds=0,
+        http_get=http_get,
+    )
+
+    latest = provider.get_latest(Instrument(symbol, symbol, asset_type))
+
+    assert latest is not None
+    assert latest["close"] == 1.25
+    assert latest["source"] == "akshare_realtime"
+    assert len(calls) == 1
+    assert fake_ak.calls == []
+
+
 def test_get_etf_realtime_quote_uses_eastmoney_contract() -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
 
