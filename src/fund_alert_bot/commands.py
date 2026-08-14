@@ -1145,7 +1145,8 @@ def build_drawdown_plan_preview(
                 "",
                 "Reference ETF data: verified as qfq daily history",
                 f"Data date: {evaluation.latest_date}",
-                f"Current drawdown preview: -{evaluation.drawdown:.1%}",
+                "Current drawdown preview: "
+                f"{_format_plan_drawdown(evaluation.drawdown)}",
                 "Currently reached tiers: " + (", ".join(reached) or "none"),
             )
         )
@@ -1289,7 +1290,7 @@ def format_plan_overview(
             f"{status.name} (plan {status.rule_id}) — {status.readiness}",
             f"ETF {status.reference_symbol} → fund "
             f"{status.config.investment_fund_symbol}",
-            f"Drawdown: -{status.evaluation.drawdown:.1%} "
+            f"Drawdown: {_format_plan_drawdown(status.evaluation.drawdown)} "
             f"({status.evaluation.latest_date}, {status.evaluation.source})",
         ]
         if pending_tiers:
@@ -1368,7 +1369,7 @@ def format_plan_details(result: DrawdownPlanStatusResult) -> str:
                 f"Data: {evaluation.latest_date} / {evaluation.source} qfq close",
                 f"Current: {evaluation.latest_price:.6g}",
                 f"Peak: {evaluation.peak_price:.6g} on {evaluation.peak_date}",
-                f"Drawdown: -{evaluation.drawdown:.1%}",
+                f"Drawdown: {_format_plan_drawdown(evaluation.drawdown)}",
                 *_format_plan_trend(status),
                 f"Readiness: {status.readiness}",
             )
@@ -1410,6 +1411,12 @@ def _history_latest_date(history: Any) -> date:
     if parsed.empty:
         raise ValueError("Confirmed ETF history has no dated rows.")
     return date.fromisoformat(str(parsed.max())[:10])
+
+
+def _format_plan_drawdown(drawdown: float) -> str:
+    """Format a non-negative drawdown without displaying negative zero."""
+
+    return f"{-drawdown if drawdown > 0 else 0.0:.1%}"
 
 
 def _next_open_tier(status: DrawdownPlanStatus) -> Any | None:
@@ -3170,9 +3177,15 @@ def build_command_handlers(
                     include_latest=True,
                     confirmed_end_date=confirmed_end_date,
                 )
-            profit_result = evaluate_profit_rules(connection, market_data_provider)
+            profit_result = evaluate_profit_rules(
+                connection,
+                market_data_provider,
+                evaluation_date=check_date,
+                market_calendar=market_calendar,
+            )
             dca_result = evaluate_dca_rules(
                 connection,
+                today=check_date,
                 market_calendar=market_calendar,
             )
             plan_status_result = read_drawdown_plan_statuses(

@@ -40,6 +40,8 @@ def calculate_drawdown_from_high(
 
     latest_row = frame.iloc[-1]
     latest_price = _to_float(latest_row[price_field], "latest price")
+    if latest_price <= 0:
+        raise ValueError("latest price must be positive.")
     latest_date = latest_row["date"]
     window_start = latest_date - pd.Timedelta(days=lookback_days)
     window = frame.loc[frame["date"].between(window_start, latest_date)].copy()

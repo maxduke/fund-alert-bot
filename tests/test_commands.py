@@ -112,6 +112,8 @@ EXPECTED_PROFIT_MESSAGE = "\n".join(
         "• Asset type: cn_etf",
         "• Cost: 1.85",
         "• Latest price: 2.4",
+        "• Data date: 2024-01-02",
+        "• Source: test",
         "• Profit rate: 29.7%",
         "• Triggered threshold: 25.0%",
         "",
@@ -1702,16 +1704,13 @@ def test_plans_and_check_show_plan_state_without_mutation(tmp_path) -> None:
             for table in ("drawdown_cycles", "drawdown_tier_records", "alert_events")
         ]
 
-    assert "Drawdown: -20.0%" in message.replies[0]
+    assert "Drawdown: 0.0%" in message.replies[0]
     assert "Template: /add_profit cn_open_fund 000001 A500 auto" in message.replies[0]
     assert setup_data == "profit_setup:000001"
     assert "/add_profit cn_open_fund 000001 A500 auto" in setup_query.edits[0]
     assert "No rule was created by this button." in setup_query.edits[0]
     assert "Next open tier: -15% / ¥5,000" in message.replies[0]
-    assert (
-        "Reached, awaiting official close confirmation: -15% / ¥5,000"
-        in (message.replies[0])
-    )
+    assert "awaiting official close confirmation" not in message.replies[0]
     assert "Drawdown Add Plan status (read-only)" in message.replies[1]
     assert "Read-only Drawdown Add Plans checked: 1" in message.replies[1]
     assert "No enabled drawdown_from_high" not in message.replies[1]
@@ -2138,6 +2137,7 @@ def test_check_evaluates_profit_rules_with_latest_data(tmp_path) -> None:
         {123},
         sqlite_path=sqlite_path,
         market_data_provider=provider,
+        now_factory=lambda: datetime(2024, 1, 2, 6, 0, tzinfo=UTC),
     )
     message = FakeMessage()
     update = SimpleNamespace(

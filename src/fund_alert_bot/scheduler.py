@@ -538,7 +538,12 @@ async def run_scheduled_market_check(
                     if confirmed_plan_day
                     else DrawdownPlanCheckResult(len(plan_rules), [], [], [])
                 )
-            profit_result = evaluate_profit_rules(connection, market_data_provider)
+            profit_result = evaluate_profit_rules(
+                connection,
+                market_data_provider,
+                evaluation_date=check_date,
+                market_calendar=market_calendar,
+            )
             data_notice = reserve_drawdown_plan_data_unavailable_notice(
                 connection,
                 evaluation_date=check_date,

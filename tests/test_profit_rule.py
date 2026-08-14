@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import date
+
 import pytest
 
 from fund_alert_bot.checks import PROFIT_RULE_TYPE, evaluate_profit_rules
@@ -135,6 +137,33 @@ def test_evaluate_profit_rules_sends_threshold_once_per_cost_basis() -> None:
     assert [row["alert_key"] for row in event_rows] == [
         "159915:profit:cost:1.85:threshold:0.25"
     ]
+
+
+def test_evaluate_profit_rules_skips_stale_latest_data() -> None:
+    connection = connect(":memory:")
+    try:
+        init_db(connection)
+        add_rule(
+            connection,
+            type=PROFIT_RULE_TYPE,
+            symbol="159915",
+            name="ChiNext ETF",
+            asset_type=AssetType.CN_ETF.value,
+            params={"cost": 1.85, "thresholds": [0.25]},
+        )
+        result = evaluate_profit_rules(
+            connection,
+            FakeLatestProvider({"date": "2024-01-02", "close": 2.4, "source": "test"}),
+            evaluation_date=date(2024, 1, 3),
+        )
+    finally:
+        connection.close()
+
+    assert result.notifications == []
+    assert result.no_data_skips[0].message == (
+        "Latest market data for 159915 is stale: "
+        "data date=2024-01-02, expected=2024-01-03."
+    )
 
 
 class FakeLatestProvider:

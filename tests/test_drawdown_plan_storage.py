@@ -119,7 +119,7 @@ def test_batch_confirmed_close_rejects_stale_history_without_state(
     assert counts == [0, 0, 0]
 
 
-def test_read_plan_status_is_pure_and_reports_open_tiers(tmp_path: Path) -> None:
+def test_read_plan_status_is_pure_and_uses_confirmed_history(tmp_path: Path) -> None:
     sqlite_path = tmp_path / "bot.sqlite3"
     _add_plan(sqlite_path)
     provider = FakePlanProvider(_history([100, 80]))
@@ -137,7 +137,7 @@ def test_read_plan_status_is_pure_and_reports_open_tiers(tmp_path: Path) -> None
 
     assert len(result.statuses) == 1
     status = result.statuses[0]
-    assert status.evaluation.drawdown == pytest.approx(0.20)
+    assert status.evaluation.drawdown == pytest.approx(0.0)
     assert status.recorded_tier_keys == frozenset()
     assert status.readiness == "SETUP_REQUIRED"
     assert status.missing_setup == ("fund fee", "position snapshot")
@@ -177,7 +177,7 @@ def test_read_plan_status_reuses_persisted_history_until_refresh(
     assert len(provider.calls) == 3
 
 
-def test_read_plan_status_accepts_nontrading_history_start_without_refetch(
+def test_read_plan_status_uses_confirmed_history_for_nontrading_end_date(
     tmp_path: Path,
 ) -> None:
     sqlite_path = tmp_path / "bot.sqlite3"
@@ -196,7 +196,7 @@ def test_read_plan_status_accepts_nontrading_history_start_without_refetch(
             end_date=date(2024, 1, 7),
         )
 
-    assert first.statuses[0].evaluation.latest_date == date(2024, 1, 7)
+    assert first.statuses[0].evaluation.latest_date == date(2024, 1, 6)
     assert second.statuses[0].evaluation.latest_date == date(2024, 1, 6)
     assert len(provider.calls) == 1
     assert provider.calls[0][1] == date(2022, 7, 3)
@@ -260,7 +260,9 @@ def test_read_plan_status_does_not_reuse_tiers_after_new_peak(tmp_path: Path) ->
     status = result.statuses[0]
     assert status.evaluation.cycle_changed is True
     assert status.recorded_tier_keys == frozenset()
-    assert [tier.key for tier in status.evaluation.newly_crossed_tiers] == ["0.15"]
+    assert status.evaluation.latest_date == date(2024, 1, 3)
+    assert status.evaluation.drawdown == pytest.approx(0.0)
+    assert status.evaluation.newly_crossed_tiers == ()
 
 
 def test_plan_readiness_is_derived_from_fee_and_even_closed_position(

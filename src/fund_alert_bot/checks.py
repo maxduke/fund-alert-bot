@@ -958,7 +958,6 @@ def read_drawdown_plan_statuses(
                 require_end_date=False,
                 force_refresh=force_refresh,
                 persist_end_date=check_date - timedelta(days=1),
-                return_fetched_if_persisted=True,
             )
             latest_date = _latest_history_date(history)
             if latest_date is None:
@@ -1546,6 +1545,9 @@ def evaluate_drawdown_rules(
 def evaluate_profit_rules(
     connection: Any,
     market_data_provider: MarketDataProvider,
+    *,
+    evaluation_date: date | None = None,
+    market_calendar: MarketCalendar | None = None,
 ) -> ProfitCheckResult:
     """Evaluate enabled profit reminder rules and store new alert events."""
 
@@ -1559,6 +1561,8 @@ def evaluate_profit_rules(
     skipped_duplicates = 0
     checked_rules = len(rules)
     latest_cache: dict[MarketDataCacheKey, dict[str, object] | None] = {}
+    expected_fund_data_date: date | None = None
+    fund_data_date_loaded = False
 
     for row in rules:
         try:
@@ -1591,12 +1595,37 @@ def evaluate_profit_rules(
                 )
                 continue
 
+            if evaluation_date is not None:
+                if asset_type is AssetType.CN_OPEN_FUND:
+                    if market_calendar is None:
+                        raise MarketCalendarUnavailableError(
+                            "CN trade calendar is required to validate fund data."
+                        )
+                    if not fund_data_date_loaded:
+                        expected_fund_data_date = latest_completed_open_date(
+                            market_calendar,
+                            evaluation_date,
+                        )
+                        fund_data_date_loaded = True
+                    _validate_profit_latest_date(
+                        latest,
+                        symbol=str(row["symbol"]),
+                        evaluation_date=evaluation_date,
+                        earliest_open_date=expected_fund_data_date,
+                    )
+                else:
+                    _validate_profit_latest_date(
+                        latest,
+                        symbol=str(row["symbol"]),
+                        evaluation_date=evaluation_date,
+                    )
+
             alerts = build_profit_alerts(
                 row,
                 latest,
                 lambda alert_key: alert_exists(connection, alert_key),
             )
-        except LatestDataUnavailableError as exc:
+        except (LatestDataUnavailableError, MarketCalendarUnavailableError) as exc:
             no_data_skips.append(
                 RuleNoDataSkip(
                     rule_id=int(row["id"]),
@@ -1644,6 +1673,38 @@ def evaluate_profit_rules(
         no_data_skips=no_data_skips,
         errors=errors,
     )
+
+
+def _validate_profit_latest_date(
+    latest: dict[str, object],
+    *,
+    symbol: str,
+    evaluation_date: date,
+    earliest_open_date: date | None = None,
+) -> None:
+    """Reject missing or stale latest rows before a fixed-cost alert is built."""
+
+    parsed_date = pd.to_datetime(latest.get("date"), errors="coerce")
+    if pd.isna(parsed_date):
+        raise LatestDataUnavailableError(
+            f"Latest market data date is unavailable for {symbol}."
+        )
+    actual_date = parsed_date.date()
+    valid = (
+        earliest_open_date <= actual_date <= evaluation_date
+        if earliest_open_date is not None
+        else actual_date == evaluation_date
+    )
+    if not valid:
+        expected = (
+            f"{earliest_open_date.isoformat()}..{evaluation_date.isoformat()}"
+            if earliest_open_date is not None
+            else evaluation_date.isoformat()
+        )
+        raise LatestDataUnavailableError(
+            f"Latest market data for {symbol} is stale: "
+            f"data date={actual_date.isoformat()}, expected={expected}."
+        )
 
 
 def latest_completed_open_date(
