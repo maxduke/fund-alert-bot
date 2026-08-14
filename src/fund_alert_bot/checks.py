@@ -1561,6 +1561,8 @@ def evaluate_profit_rules(
     skipped_duplicates = 0
     checked_rules = len(rules)
     latest_cache: dict[MarketDataCacheKey, dict[str, object] | None] = {}
+    expected_market_data_date: date | None = None
+    market_data_date_loaded = False
     expected_fund_data_date: date | None = None
     fund_data_date_loaded = False
 
@@ -1614,10 +1616,17 @@ def evaluate_profit_rules(
                         earliest_open_date=expected_fund_data_date,
                     )
                 else:
+                    if not market_data_date_loaded:
+                        expected_market_data_date = _latest_market_data_date(
+                            market_calendar,
+                            evaluation_date,
+                        )
+                        market_data_date_loaded = True
                     _validate_profit_latest_date(
                         latest,
                         symbol=str(row["symbol"]),
                         evaluation_date=evaluation_date,
+                        expected_date=expected_market_data_date,
                     )
 
             alerts = build_profit_alerts(
@@ -1680,6 +1689,7 @@ def _validate_profit_latest_date(
     *,
     symbol: str,
     evaluation_date: date,
+    expected_date: date | None = None,
     earliest_open_date: date | None = None,
 ) -> None:
     """Reject missing or stale latest rows before a fixed-cost alert is built."""
@@ -1690,21 +1700,35 @@ def _validate_profit_latest_date(
             f"Latest market data date is unavailable for {symbol}."
         )
     actual_date = parsed_date.date()
+    expected_date = expected_date or evaluation_date
     valid = (
         earliest_open_date <= actual_date <= evaluation_date
         if earliest_open_date is not None
-        else actual_date == evaluation_date
+        else actual_date == expected_date
     )
     if not valid:
         expected = (
             f"{earliest_open_date.isoformat()}..{evaluation_date.isoformat()}"
             if earliest_open_date is not None
-            else evaluation_date.isoformat()
+            else expected_date.isoformat()
         )
         raise LatestDataUnavailableError(
             f"Latest market data for {symbol} is stale: "
             f"data date={actual_date.isoformat()}, expected={expected}."
         )
+
+
+def _latest_market_data_date(
+    market_calendar: MarketCalendar | None,
+    processing_date: date,
+) -> date:
+    """Return the freshest valid close date for a market-data evaluation."""
+
+    if market_calendar is None:
+        return processing_date
+    if market_calendar.confirmed_status(processing_date):
+        return processing_date
+    return latest_completed_open_date(market_calendar, processing_date)
 
 
 def latest_completed_open_date(

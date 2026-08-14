@@ -2137,6 +2137,7 @@ def test_check_evaluates_profit_rules_with_latest_data(tmp_path) -> None:
         {123},
         sqlite_path=sqlite_path,
         market_data_provider=provider,
+        market_calendar=FakeMarketCalendar(),
         now_factory=lambda: datetime(2024, 1, 2, 6, 0, tzinfo=UTC),
     )
     message = FakeMessage()
