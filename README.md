@@ -36,7 +36,7 @@ Implemented Telegram commands:
 - `/sync_position <fund_symbol> <units> <average_unit_cost>`
 - `/add_drawdown_plan <reference_etf> <feeder_fund> <name> <tiers> [lookback:<days>]`
 - `/mark_added <plan_id> <tier_percentages>`
-- `/plans`
+- `/plans [refresh]`
 - `/list`
 - `/del <id>`
 - `/check`
@@ -176,7 +176,15 @@ its peak cycle. A reminder does not mean that a purchase happened.
 
 Use `/plans` for a concise overview and `/check` for detailed plan state. Both
 are read-only for Drawdown Add Plans: they do not consume a tier or create an
-alert.
+alert. `/plans` reads the latest confirmed ETF history and feeder-fund NAV
+stored in SQLite, so opening the overview normally does not create paid market
+data requests. Use `/plans refresh` only when you explicitly want to refresh
+the cached data; it may call the provider.
+
+When the cached confirmed close has already reached an unrecorded tier, the
+overview labels it **reached, awaiting official close confirmation**. A
+before-close realtime estimate never consumes that tier; the after-close job
+must confirm it from the ETF close.
 
 At `14:50`, a plan uses the Reference ETF's current realtime price for a
 provisional pre-alert. It does not consume a tier by itself. If you actually
@@ -256,11 +264,12 @@ disabled because it can multiply paid requests. Keep the retry value low and
 never commit or log the token. When enabled, the proxy patch is the only retry
 layer for paid Eastmoney requests; the provider invokes each Eastmoney AKShare
 operation once. `AKSHARE_RETRIES` remains the retry budget for other data
-sources. History, realtime quotes, and feeder-NAV data
-also use short in-process caches, so repeated checks reuse an identical or
-narrower request without creating a persistent stale-data store. Restart after
-changing these variables and verify the startup log; a proxy failure still fails closed rather
-than inventing market data.
+sources. History, realtime quotes, and feeder-NAV data also use short
+in-process caches. Confirmed normalized ETF history and exact feeder-fund NAVs
+are additionally stored in SQLite. After the first backfill, the after-close
+job requests only a small overlapping range, while `/plans` reads local rows.
+Restart after changing these variables and verify the startup log; a proxy
+failure still fails closed rather than inventing market data.
 
 The patch's optional `fast` mode is intentionally disabled. It parallelizes
 generic paginated fund-flow/rank endpoints, while this bot uses bounded ETF,

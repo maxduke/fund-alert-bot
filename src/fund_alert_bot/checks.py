@@ -20,6 +20,7 @@ from fund_alert_bot.db import (
     create_scheduled_dca_occurrence,
     get_active_drawdown_cycle,
     get_active_position_cycle,
+    get_cached_fund_nav,
     get_fund_settings,
     get_position_snapshot,
     has_position_profit_evaluation,
@@ -29,12 +30,15 @@ from fund_alert_bot.db import (
     list_pending_manual_add_estimates,
     list_pending_scheduled_dca_occurrences,
     list_position_profit_threshold_keys,
+    load_market_history,
     persist_drawdown_plan_evaluation,
     persist_position_profit_alert,
     record_position_profit_evaluation,
     reserve_alert_event,
     set_scheduled_dca_effective_date,
     skip_scheduled_dca_occurrence,
+    upsert_fund_nav,
+    upsert_market_history,
 )
 from fund_alert_bot.market_data import (
     AssetType,
@@ -47,6 +51,7 @@ from fund_alert_bot.market_data import (
     MarketDataProviderError,
     PriceBasis,
 )
+from fund_alert_bot.market_data.normalize import NORMALIZED_COLUMNS
 from fund_alert_bot.rules.dca import (
     build_dca_reminder_alert,
     normalize_weekday,
@@ -746,8 +751,10 @@ def process_manual_add_estimates(
                 raise cached_errors[nav_key]
             if nav_key not in navs:
                 try:
-                    navs[nav_key] = market_data_provider.get_fund_nav(
-                        Instrument(fund_symbol, fund_symbol, AssetType.CN_OPEN_FUND),
+                    navs[nav_key] = get_cached_or_fetch_fund_nav(
+                        connection,
+                        market_data_provider,
+                        fund_symbol,
                         nav_date=effective_date,
                     )
                 except MarketDataProviderError as exc:
@@ -879,8 +886,10 @@ def process_scheduled_dca_occurrences(
                 raise cached_errors[nav_key]
             if nav_key not in navs:
                 try:
-                    navs[nav_key] = market_data_provider.get_fund_nav(
-                        Instrument(fund_symbol, fund_symbol, AssetType.CN_OPEN_FUND),
+                    navs[nav_key] = get_cached_or_fetch_fund_nav(
+                        connection,
+                        market_data_provider,
+                        fund_symbol,
                         nav_date=effective_date,
                     )
                 except MarketDataProviderError as exc:
@@ -922,6 +931,7 @@ def read_drawdown_plan_statuses(
     market_data_provider: MarketDataProvider,
     *,
     end_date: date | None = None,
+    force_refresh: bool = False,
 ) -> DrawdownPlanStatusResult:
     """Calculate current plan state without reserving alerts or changing cycles."""
 
@@ -945,6 +955,8 @@ def read_drawdown_plan_statuses(
                 rule,
                 market_data_provider,
                 end_date=check_date,
+                require_end_date=False,
+                force_refresh=force_refresh,
             )
             latest_date = _latest_history_date(history)
             if latest_date is None:
@@ -983,12 +995,11 @@ def read_drawdown_plan_statuses(
             fund_nav = None
             if position is not None and float(position["units"]) > 0:
                 try:
-                    fund_nav = market_data_provider.get_fund_nav(
-                        Instrument(
-                            config.investment_fund_symbol,
-                            str(rule["name"]),
-                            AssetType.CN_OPEN_FUND,
-                        )
+                    fund_nav = get_cached_or_fetch_fund_nav(
+                        connection,
+                        market_data_provider,
+                        config.investment_fund_symbol,
+                        force_refresh=force_refresh,
                     )
                 except MarketDataProviderError as exc:
                     no_data_skips.append(
@@ -1105,12 +1116,201 @@ def _load_drawdown_plan_state(
     return config, active_cycle, recorded
 
 
+_HISTORY_OVERLAP_DAYS = 5
+
+
+def _history_frame_from_rows(
+    rows: list[Any],
+    *,
+    symbol: str,
+    asset_type: AssetType,
+    price_basis: PriceBasis,
+) -> pd.DataFrame | None:
+    if not rows:
+        return None
+    frame = pd.DataFrame([dict(row) for row in rows])
+    if frame.empty or "date" not in frame.columns or "close" not in frame.columns:
+        return None
+    frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+    frame["close"] = pd.to_numeric(frame["close"], errors="coerce")
+    frame = frame.dropna(subset=["date", "close"])
+    if frame.empty:
+        return None
+    for column in NORMALIZED_COLUMNS:
+        if column not in frame.columns:
+            frame[column] = None
+    frame = (
+        frame[NORMALIZED_COLUMNS]
+        .sort_values("date", ascending=True, kind="stable")
+        .drop_duplicates("date", keep="last")
+        .reset_index(drop=True)
+    )
+    sources = {
+        str(value).strip()
+        for value in frame["source"].dropna().tolist()
+        if str(value).strip()
+    }
+    frame.attrs.update(
+        {
+            "symbol": symbol,
+            "source": next(iter(sources), "") if len(sources) == 1 else "",
+            "price_basis": price_basis.value,
+            "frequency": "daily",
+        }
+    )
+    return frame
+
+
+def _persist_history(
+    connection: Any,
+    history: pd.DataFrame,
+    *,
+    symbol: str,
+    asset_type: AssetType,
+    price_basis: PriceBasis,
+) -> None:
+    if history is None or history.empty:
+        return
+    source = str(history.attrs.get("source", "")).strip()
+    rows = []
+    for row in history.to_dict("records"):
+        row.setdefault("source", source)
+        rows.append(row)
+    upsert_market_history(
+        connection,
+        symbol=symbol,
+        asset_type=asset_type.value,
+        price_basis=price_basis.value,
+        rows=rows,
+    )
+
+
+def _history_with_persistent_cache(
+    connection: Any,
+    market_data_provider: MarketDataProvider,
+    instrument: Instrument,
+    *,
+    start_date: date,
+    end_date: date,
+    price_basis: PriceBasis,
+    require_end_date: bool,
+    force_refresh: bool = False,
+    cache_end_date: date | None = None,
+    persist_end_date: date | None = None,
+) -> pd.DataFrame:
+    """Read confirmed history from SQLite and fetch only missing ranges."""
+
+    symbol = str(instrument.symbol)
+    asset_type = AssetType(instrument.asset_type)
+    storage_end_date = cache_end_date or end_date
+    cached = _history_frame_from_rows(
+        load_market_history(
+            connection,
+            symbol=symbol,
+            asset_type=asset_type.value,
+            price_basis=price_basis.value,
+            start_date=start_date,
+            end_date=storage_end_date,
+        ),
+        symbol=symbol,
+        asset_type=asset_type,
+        price_basis=price_basis,
+    )
+    latest = None if cached is None else _latest_history_date(cached)
+    covered = (
+        cached is not None
+        and not cached.empty
+        and (not require_end_date or (latest is not None and latest >= end_date))
+    )
+    if covered and not force_refresh:
+        return cached
+
+    fetch_start = start_date
+    if latest is not None and latest >= start_date:
+        fetch_start = max(
+            start_date,
+            latest - timedelta(days=_HISTORY_OVERLAP_DAYS),
+        )
+    fetched_history = market_data_provider.get_history(
+        instrument,
+        fetch_start,
+        end_date,
+        price_basis=price_basis,
+    )
+    history = fetched_history
+    if persist_end_date is not None:
+        history = history.loc[
+            pd.to_datetime(history["date"], errors="coerce")
+            <= pd.Timestamp(persist_end_date)
+        ].copy()
+    _persist_history(
+        connection,
+        history,
+        symbol=symbol,
+        asset_type=asset_type,
+        price_basis=price_basis,
+    )
+    merged = _history_frame_from_rows(
+        load_market_history(
+            connection,
+            symbol=symbol,
+            asset_type=asset_type.value,
+            price_basis=price_basis.value,
+            start_date=start_date,
+            end_date=storage_end_date,
+        ),
+        symbol=symbol,
+        asset_type=asset_type,
+        price_basis=price_basis,
+    )
+    if merged is None and persist_end_date is not None:
+        raise EmptyMarketDataError(
+            f"No confirmed history available for {instrument.symbol}."
+        )
+    return fetched_history if merged is None else merged
+
+
+def get_cached_or_fetch_fund_nav(
+    connection: Any,
+    market_data_provider: MarketDataProvider,
+    fund_symbol: str,
+    *,
+    nav_date: date | None = None,
+    force_refresh: bool = False,
+) -> FundNav:
+    """Return cached NAV first; fetch and persist only when it is missing."""
+
+    if not force_refresh:
+        cached = get_cached_fund_nav(connection, fund_symbol, nav_date)
+        if cached is not None:
+            return FundNav(
+                symbol=str(cached["fund_symbol"]),
+                date=date.fromisoformat(str(cached["nav_date"])),
+                value=float(cached["unit_nav"]),
+                source=str(cached["source"]),
+            )
+    nav = market_data_provider.get_fund_nav(
+        Instrument(fund_symbol, fund_symbol, AssetType.CN_OPEN_FUND),
+        nav_date=nav_date,
+    )
+    upsert_fund_nav(
+        connection,
+        fund_symbol=str(nav.symbol),
+        nav_date=nav.date,
+        unit_nav=nav.value,
+        source=nav.source,
+    )
+    return nav
+
+
 def _fetch_drawdown_plan_history(
     connection: Any,
     rule: Any,
     market_data_provider: MarketDataProvider,
     *,
     end_date: date,
+    require_end_date: bool = True,
+    force_refresh: bool = False,
 ) -> pd.DataFrame:
     config, active_cycle, _recorded = _load_drawdown_plan_state(connection, rule)
     instrument = Instrument(
@@ -1118,15 +1318,19 @@ def _fetch_drawdown_plan_history(
         name=str(rule["name"]),
         asset_type=AssetType.CN_ETF,
     )
-    return market_data_provider.get_history(
+    return _history_with_persistent_cache(
+        connection,
+        market_data_provider,
         instrument,
-        required_history_start(
+        start_date=required_history_start(
             evaluation_date=end_date,
             config=config,
             active_peak_date=None if active_cycle is None else active_cycle.peak_date,
         ),
-        end_date,
+        end_date=end_date,
         price_basis=PriceBasis.QFQ,
+        require_end_date=require_end_date,
+        force_refresh=force_refresh,
     )
 
 
@@ -1162,6 +1366,7 @@ def evaluate_drawdown_rules(
     statuses: list[DrawdownRuleStatus] = []
     contexts: list[DrawdownRuleContext] = []
     market_data_cache = DrawdownMarketDataCache(
+        connection=connection,
         market_data_provider=market_data_provider,
         end_date=end_date,
         include_latest=include_latest,
@@ -1598,8 +1803,10 @@ def evaluate_position_profit_rules(
                 raise cached_errors[nav_key]
             if nav_key not in navs:
                 try:
-                    navs[nav_key] = market_data_provider.get_fund_nav(
-                        Instrument(symbol, str(row["name"]), AssetType.CN_OPEN_FUND),
+                    navs[nav_key] = get_cached_or_fetch_fund_nav(
+                        connection,
+                        market_data_provider,
+                        symbol,
                         nav_date=expected_date,
                     )
                 except MarketDataProviderError as exc:
@@ -1779,10 +1986,12 @@ class DrawdownMarketDataCache:
     def __init__(
         self,
         *,
+        connection: Any | None = None,
         market_data_provider: MarketDataProvider,
         end_date: date,
         include_latest: bool,
     ) -> None:
+        self._connection = connection
         self._market_data_provider = market_data_provider
         self._end_date = end_date
         self._include_latest = include_latest
@@ -1802,6 +2011,10 @@ class DrawdownMarketDataCache:
     def history_for(self, context: DrawdownRuleContext) -> pd.DataFrame:
         """Return cached history, optionally merged with cached latest data."""
 
+        if self._include_latest and context.cache_key not in self._latest_cache:
+            self._latest_cache[context.cache_key] = (
+                self._market_data_provider.get_latest(context.instrument)
+            )
         history = self._history_for(context)
         if not self._include_latest:
             return history
@@ -1809,10 +2022,6 @@ class DrawdownMarketDataCache:
         if context.cache_key in self._combined_history_cache:
             return self._combined_history_cache[context.cache_key]
 
-        if context.cache_key not in self._latest_cache:
-            self._latest_cache[context.cache_key] = (
-                self._market_data_provider.get_latest(context.instrument)
-            )
         self._combined_history_cache[context.cache_key] = _append_latest_row(
             history,
             self._latest_cache[context.cache_key],
@@ -1827,7 +2036,29 @@ class DrawdownMarketDataCache:
 
         start_date = self._earliest_start_by_instrument[context.cache_key]
         try:
-            if context.cache_key.price_basis is PriceBasis.UNADJUSTED:
+            if self._connection is not None:
+                history = _history_with_persistent_cache(
+                    self._connection,
+                    self._market_data_provider,
+                    context.instrument,
+                    start_date=start_date,
+                    end_date=self._end_date,
+                    price_basis=context.cache_key.price_basis,
+                    require_end_date=not self._include_latest,
+                    cache_end_date=(
+                        self._end_date - timedelta(days=1)
+                        if self._include_latest
+                        and self._latest_cache.get(context.cache_key) is not None
+                        else None
+                    ),
+                    persist_end_date=(
+                        self._end_date - timedelta(days=1)
+                        if self._include_latest
+                        and self._latest_cache.get(context.cache_key) is not None
+                        else None
+                    ),
+                )
+            elif context.cache_key.price_basis is PriceBasis.UNADJUSTED:
                 history = self._market_data_provider.get_history(
                     context.instrument,
                     start_date,
