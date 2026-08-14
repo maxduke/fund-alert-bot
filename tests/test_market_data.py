@@ -459,6 +459,25 @@ def test_invalid_symbol_quote_does_not_cool_down_other_symbols() -> None:
     assert calls == ["1.000300", "0.399006"]
 
 
+def test_unsupported_etf_symbol_falls_back_to_history() -> None:
+    def http_get(*args: Any, **kwargs: Any) -> FakeResponse:
+        raise TimeoutError("realtime unavailable")
+
+    provider = AkshareMarketDataProvider(
+        ak_module=FakeAkshare(),
+        retry_delay_seconds=0,
+        today_factory=lambda: date(2024, 1, 4),
+        http_get=http_get,
+    )
+
+    latest = provider.get_latest(
+        Instrument("000001", "Unsupported ETF", AssetType.CN_ETF)
+    )
+
+    assert latest is not None
+    assert latest["source"] == "akshare"
+
+
 def test_get_etf_realtime_quote_uses_eastmoney_contract() -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
 

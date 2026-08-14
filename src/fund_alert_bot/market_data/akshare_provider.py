@@ -359,10 +359,13 @@ class AkshareMarketDataProvider(MarketDataProvider):
 
     def _get_eastmoney_etf_quote(self, instrument: Instrument) -> RealtimeQuote:
         symbol = _strip_exchange_prefix(instrument.symbol)
-        return self._get_eastmoney_quote(
-            instrument,
-            market_id=_eastmoney_etf_market_id(symbol),
-        )
+        try:
+            market_id = _eastmoney_etf_market_id(symbol)
+        except ValueError as exc:
+            raise MarketDataFetchError(
+                "Eastmoney realtime ETF quote has an unsupported symbol."
+            ) from exc
+        return self._get_eastmoney_quote(instrument, market_id=market_id)
 
     def _get_eastmoney_symbol_quote(self, instrument: Instrument) -> RealtimeQuote:
         """Fetch one index/stock quote without AKShare full-market pagination."""
