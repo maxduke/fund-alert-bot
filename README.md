@@ -268,8 +268,9 @@ sources. History, realtime quotes, and feeder-NAV data also use short
 in-process caches. Confirmed normalized ETF history and exact feeder-fund NAVs
 are additionally stored in SQLite. After the first backfill, the after-close
 job refreshes the full required QFQ history window (unadjusted history uses a
-small overlap), while `/plans` reads local rows. A status refresh never treats
-the current session as a confirmed close.
+small overlap) plus a small calendar buffer, while `/plans` reads local rows.
+Before-close checks refresh a stale confirmed range before appending realtime
+quotes; a status refresh never treats the current session as a confirmed close.
 Restart after changing these variables and verify the startup log; a proxy
 failure still fails closed rather than inventing market data.
 

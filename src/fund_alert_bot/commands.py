@@ -78,6 +78,7 @@ from fund_alert_bot.market_data import (
     FundNav,
     Instrument,
     MarketCalendar,
+    MarketCalendarUnavailableError,
     MarketDataProvider,
     MarketDataProviderError,
     PriceBasis,
@@ -3137,13 +3138,38 @@ def build_command_handlers(
         if await reject_if_unauthorized(update, allowed_user_ids):
             return
 
+        check_date = _clock_now(clock).astimezone(timezone_info).date()
+        try:
+            confirmed_end_date = latest_completed_open_date(
+                market_calendar,
+                check_date,
+            )
+        except MarketCalendarUnavailableError as exc:
+            LOGGER.warning(
+                "Skipping realtime drawdown row for /check because the "
+                "confirmed market date is unavailable: %s",
+                exc,
+            )
+            confirmed_end_date = None
+
         with open_connection(sqlite_path) as connection:
             initialize_database(connection)
-            result = evaluate_drawdown_rules(
-                connection,
-                market_data_provider,
-                include_latest=True,
-            )
+            if confirmed_end_date is None:
+                result = DrawdownCheckResult(
+                    checked_rules=0,
+                    notifications=[],
+                    skipped_duplicates=0,
+                    no_data_skips=[],
+                    errors=[],
+                    statuses=[],
+                )
+            else:
+                result = evaluate_drawdown_rules(
+                    connection,
+                    market_data_provider,
+                    include_latest=True,
+                    confirmed_end_date=confirmed_end_date,
+                )
             profit_result = evaluate_profit_rules(connection, market_data_provider)
             dca_result = evaluate_dca_rules(
                 connection,
@@ -3152,7 +3178,7 @@ def build_command_handlers(
             plan_status_result = read_drawdown_plan_statuses(
                 connection,
                 market_data_provider,
-                end_date=_clock_now(clock).astimezone(timezone_info).date(),
+                end_date=check_date,
             )
 
         notifications = [

@@ -60,6 +60,7 @@ from fund_alert_bot.db import (
     record_manual_addition,
     upsert_fund_cutoff,
     upsert_fund_fee,
+    upsert_market_history,
     upsert_position_snapshot,
 )
 from fund_alert_bot.i18n import get_language, set_language
@@ -457,6 +458,7 @@ def test_before_close_latest_quote_is_not_persisted_as_a_close() -> None:
             provider,
             today=date(2024, 1, 2),
             include_latest=True,
+            confirmed_end_date=date(2024, 1, 1),
         )
         dates = [
             row["date"]
@@ -468,6 +470,48 @@ def test_before_close_latest_quote_is_not_persisted_as_a_close() -> None:
         connection.close()
 
     assert dates == ["2024-01-01"]
+
+
+def test_before_close_refreshes_stale_confirmed_history_before_appending_quote() -> (
+    None
+):
+    connection = connect(":memory:")
+    try:
+        init_db(connection)
+        add_rule(
+            connection,
+            type=DRAW_DOWN_RULE_TYPE,
+            symbol="399006",
+            name="创业板指",
+            asset_type=AssetType.CN_INDEX.value,
+            params={"lookback_days": 365, "thresholds": [0.10]},
+        )
+        stale = _history(["2024-01-01"], [100.0])
+        upsert_market_history(
+            connection,
+            symbol="399006",
+            asset_type=AssetType.CN_INDEX.value,
+            price_basis=PriceBasis.UNADJUSTED.value,
+            rows=stale.to_dict("records"),
+        )
+        provider = FakeProvider(
+            _history(["2024-01-01", "2024-01-02"], [100.0, 110.0]),
+            latest={"date": "2024-01-03", "close": 100.0, "source": "test"},
+        )
+
+        result = evaluate_drawdown_rules(
+            connection,
+            provider,
+            today=date(2024, 1, 3),
+            include_latest=True,
+            confirmed_end_date=date(2024, 1, 2),
+        )
+    finally:
+        connection.close()
+
+    assert len(provider.calls) == 1
+    assert result.statuses[0].peak_price == pytest.approx(110.0)
+    assert result.statuses[0].drawdown == pytest.approx(1 - 100 / 110)
 
 
 def test_manual_check_summary_shows_current_drawdown_percent() -> None:
@@ -544,7 +588,7 @@ def test_drawdown_check_reuses_history_for_same_code_ranges() -> None:
         connection.close()
 
     assert len(provider.calls) == 1
-    assert provider.calls[0][1] == date(2023, 1, 2)
+    assert provider.calls[0][1] == date(2022, 12, 19)
     assert provider.calls[0][2] == date(2024, 1, 2)
     assert len(provider.latest_calls) == 1
 
@@ -571,6 +615,7 @@ def test_check_retries_alert_after_delivery_failure(tmp_path) -> None:
         {123},
         sqlite_path=sqlite_path,
         market_data_provider=provider,
+        market_calendar=FakeMarketCalendar(),
     )
     failing_message = FakeMessage()
     failing_update = SimpleNamespace(

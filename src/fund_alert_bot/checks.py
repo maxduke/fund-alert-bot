@@ -1164,17 +1164,6 @@ def _history_frame_from_rows(
     return frame
 
 
-def _history_from_start(
-    history: pd.DataFrame | None,
-    start_date: date,
-) -> pd.DataFrame | None:
-    if history is None:
-        return None
-    filtered = history.loc[history["date"] >= pd.Timestamp(start_date)].copy()
-    filtered.attrs = history.attrs.copy()
-    return None if filtered.empty else filtered.reset_index(drop=True)
-
-
 def _earliest_history_date(history: pd.DataFrame | None) -> date | None:
     if history is None or history.empty or "date" not in history.columns:
         return None
@@ -1219,6 +1208,7 @@ def _history_with_persistent_cache(
     cache_end_date: date | None = None,
     persist_end_date: date | None = None,
     return_fetched_if_persisted: bool = False,
+    required_end_date: date | None = None,
 ) -> pd.DataFrame:
     """Read confirmed history from SQLite and fetch only missing ranges."""
 
@@ -1239,28 +1229,33 @@ def _history_with_persistent_cache(
         asset_type=asset_type,
         price_basis=price_basis,
     )
-    cached = _history_from_start(cached_coverage, start_date)
     earliest = _earliest_history_date(cached_coverage)
+    cached = cached_coverage
     latest = None if cached is None else _latest_history_date(cached)
+    coverage_end_date = required_end_date or end_date
     covered = (
         cached_coverage is not None
         and cached is not None
         and not cached.empty
         and earliest is not None
         and earliest <= start_date
-        and (not require_end_date or (latest is not None and latest >= end_date))
+        and (
+            not require_end_date or (latest is not None and latest >= coverage_end_date)
+        )
     )
     if covered and not force_refresh:
         return cached
 
-    fetch_start = start_date
+    fetch_start = storage_start_date
     if (
         price_basis is not PriceBasis.QFQ
+        and earliest is not None
+        and earliest <= start_date
         and latest is not None
         and latest >= start_date
     ):
         fetch_start = max(
-            start_date,
+            storage_start_date,
             latest - timedelta(days=_HISTORY_OVERLAP_DAYS),
         )
     fetched_history = market_data_provider.get_history(
@@ -1295,7 +1290,14 @@ def _history_with_persistent_cache(
         asset_type=asset_type,
         price_basis=price_basis,
     )
-    merged = _history_from_start(merged, start_date)
+    merged_latest = None if merged is None else _latest_history_date(merged)
+    if required_end_date is not None and (
+        merged_latest is None or merged_latest < required_end_date
+    ):
+        raise EmptyMarketDataError(
+            f"No confirmed history available through {required_end_date} "
+            f"for {instrument.symbol}."
+        )
     if merged is None and persist_end_date is not None:
         if not return_fetched_if_persisted:
             raise EmptyMarketDataError(
@@ -1389,6 +1391,7 @@ def evaluate_drawdown_rules(
     today: date | None = None,
     require_new_data_date: date | None = None,
     include_latest: bool = False,
+    confirmed_end_date: date | None = None,
 ) -> DrawdownCheckResult:
     """Evaluate all enabled drawdown rules and store new alert events."""
 
@@ -1410,6 +1413,7 @@ def evaluate_drawdown_rules(
         market_data_provider=market_data_provider,
         end_date=end_date,
         include_latest=include_latest,
+        confirmed_end_date=confirmed_end_date,
     )
 
     for row in rules:
@@ -2030,11 +2034,13 @@ class DrawdownMarketDataCache:
         market_data_provider: MarketDataProvider,
         end_date: date,
         include_latest: bool,
+        confirmed_end_date: date | None = None,
     ) -> None:
         self._connection = connection
         self._market_data_provider = market_data_provider
         self._end_date = end_date
         self._include_latest = include_latest
+        self._confirmed_end_date = confirmed_end_date
         self._earliest_start_by_instrument: dict[MarketDataCacheKey, date] = {}
         self._history_cache: dict[MarketDataCacheKey, pd.DataFrame] = {}
         self._history_errors: dict[MarketDataCacheKey, EmptyMarketDataError] = {}
@@ -2077,25 +2083,42 @@ class DrawdownMarketDataCache:
         start_date = self._earliest_start_by_instrument[context.cache_key]
         try:
             if self._connection is not None:
+                has_latest = self._latest_cache.get(context.cache_key) is not None
+                history_end_date = self._end_date
+                if (
+                    self._include_latest
+                    and self._confirmed_end_date is not None
+                    and not has_latest
+                ):
+                    history_end_date = self._confirmed_end_date
                 history = _history_with_persistent_cache(
                     self._connection,
                     self._market_data_provider,
                     context.instrument,
                     start_date=start_date,
-                    end_date=self._end_date,
+                    end_date=history_end_date,
                     price_basis=context.cache_key.price_basis,
-                    require_end_date=not self._include_latest,
+                    require_end_date=(
+                        not self._include_latest
+                        or (self._confirmed_end_date is not None and has_latest)
+                    ),
                     cache_end_date=(
-                        self._end_date - timedelta(days=1)
-                        if self._include_latest
-                        and self._latest_cache.get(context.cache_key) is not None
+                        self._confirmed_end_date
+                        if self._include_latest and self._confirmed_end_date is not None
                         else None
                     ),
                     persist_end_date=(
-                        self._end_date - timedelta(days=1)
-                        if self._include_latest
-                        and self._latest_cache.get(context.cache_key) is not None
+                        self._confirmed_end_date
+                        if self._include_latest and self._confirmed_end_date is not None
                         else None
+                    ),
+                    required_end_date=(
+                        self._confirmed_end_date if has_latest else None
+                    ),
+                    return_fetched_if_persisted=(
+                        self._include_latest
+                        and self._confirmed_end_date is not None
+                        and not has_latest
                     ),
                 )
             elif context.cache_key.price_basis is PriceBasis.UNADJUSTED:

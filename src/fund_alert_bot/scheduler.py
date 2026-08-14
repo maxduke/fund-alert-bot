@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Collection
-from datetime import date, datetime, time, timedelta, tzinfo
+from datetime import date, datetime, time, tzinfo
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 from fund_alert_bot.checks import (
     AlertNotification,
+    DrawdownCheckResult,
     DrawdownPlanCheckResult,
     ManualAddSettlementResult,
     RuleNoDataSkip,
@@ -22,6 +23,7 @@ from fund_alert_bot.checks import (
     evaluate_position_profit_rules,
     evaluate_profit_rules,
     format_delayed_drawdown_plan_message,
+    latest_completed_open_date,
     position_profit_action_rows,
     process_manual_add_estimates,
     process_scheduled_dca_occurrences,
@@ -314,15 +316,39 @@ async def run_scheduled_before_close_check(
             )
             return
 
+        try:
+            confirmed_end_date = latest_completed_open_date(
+                market_calendar,
+                check_date,
+            )
+        except MarketCalendarUnavailableError as exc:
+            LOGGER.warning(
+                "Skipping realtime drawdown row because the confirmed market "
+                "date is unavailable: %s",
+                exc,
+            )
+            confirmed_end_date = None
+
         with open_connection(sqlite_path) as connection:
             initialize_database(connection)
-            drawdown_result = evaluate_drawdown_rules(
-                connection,
-                market_data_provider,
-                today=check_date,
-                require_new_data_date=check_date,
-                include_latest=True,
-            )
+            if confirmed_end_date is None:
+                drawdown_result = DrawdownCheckResult(
+                    checked_rules=0,
+                    notifications=[],
+                    skipped_duplicates=0,
+                    no_data_skips=[],
+                    errors=[],
+                    statuses=[],
+                )
+            else:
+                drawdown_result = evaluate_drawdown_rules(
+                    connection,
+                    market_data_provider,
+                    today=check_date,
+                    require_new_data_date=check_date,
+                    include_latest=True,
+                    confirmed_end_date=confirmed_end_date,
+                )
             plan_rules = [
                 row
                 for row in list_enabled_rules(connection)
@@ -332,11 +358,7 @@ async def run_scheduled_before_close_check(
                 confirmed_plan_day = bool(
                     plan_rules
                 ) and market_calendar.confirmed_status(check_date)
-                confirmed_date = (
-                    _previous_confirmed_trading_day(market_calendar, check_date)
-                    if confirmed_plan_day
-                    else None
-                )
+                confirmed_date = confirmed_end_date if confirmed_plan_day else None
             except MarketCalendarUnavailableError as exc:
                 plan_result = DrawdownPlanCheckResult(
                     checked_rules=len(plan_rules),
@@ -950,19 +972,6 @@ async def retry_pending_position_profit_notifications(
         notification_settings=notification_settings,
     )
     return len(notifications)
-
-
-def _previous_confirmed_trading_day(
-    market_calendar: MarketCalendar,
-    check_date: date,
-) -> date:
-    for days_back in range(1, 367):
-        candidate = check_date - timedelta(days=days_back)
-        if market_calendar.confirmed_status(candidate):
-            return candidate
-    raise MarketCalendarUnavailableError(
-        f"No prior confirmed CN trading day found before {check_date.isoformat()}."
-    )
 
 
 def _current_date(timezone: str | tzinfo) -> date:
