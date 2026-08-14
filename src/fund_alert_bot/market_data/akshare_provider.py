@@ -129,14 +129,19 @@ class AkshareMarketDataProvider(MarketDataProvider):
             LOGGER.debug("AKShare history cache hit key=%s", cache_key)
             return cached
 
-        raw_data, source = self._fetch_raw_history(
+        raw_data, source, eastmoney_request_executed = self._fetch_raw_history(
             instrument,
             asset_type,
             start_date,
             end_date,
             basis,
         )
-        history = self._normalize_history(raw_data, asset_type, source=source)
+        history = self._normalize_history(
+            raw_data,
+            asset_type,
+            source=source,
+            eastmoney_request_executed=eastmoney_request_executed,
+        )
         history = self._filter_by_date(history, start_date, end_date)
 
         if history.empty:
@@ -272,10 +277,12 @@ class AkshareMarketDataProvider(MarketDataProvider):
             raise UnsupportedAssetTypeError("Unit NAV requires cn_open_fund.")
 
         symbol = _strip_exchange_prefix(instrument.symbol)
+        raw_data, eastmoney_request_executed = self._fetch_open_fund_history(symbol)
         history = self._normalize_history(
-            self._fetch_open_fund_history(symbol),
+            raw_data,
             AssetType.CN_OPEN_FUND,
             source="akshare_eastmoney",
+            eastmoney_request_executed=eastmoney_request_executed,
         )
         history = history.loc[history["date"] <= _to_timestamp(self._today_factory())]
         if nav_date is not None:
@@ -292,7 +299,8 @@ class AkshareMarketDataProvider(MarketDataProvider):
         row = history.iloc[-1]
         value = pd.to_numeric(row["close"], errors="coerce")
         if pd.isna(value) or not math.isfinite(float(value)) or float(value) <= 0:
-            self._mark_eastmoney_failure()
+            if eastmoney_request_executed:
+                self._mark_eastmoney_failure()
             raise EmptyMarketDataError(
                 f"Unit NAV for {symbol} on {row['date'].date()} is invalid."
             )
@@ -460,11 +468,12 @@ class AkshareMarketDataProvider(MarketDataProvider):
         asset_type: AssetType,
         *,
         source: str,
+        eastmoney_request_executed: bool,
     ) -> pd.DataFrame:
         try:
             return normalize_history(raw_data, asset_type, source=source)
         except (EmptyMarketDataError, MarketDataNormalizeError):
-            if source in {"akshare", "akshare_eastmoney"}:
+            if eastmoney_request_executed:
                 self._mark_eastmoney_failure()
             raise
 
@@ -475,7 +484,7 @@ class AkshareMarketDataProvider(MarketDataProvider):
         start_date: DateLike,
         end_date: DateLike,
         price_basis: PriceBasis,
-    ) -> tuple[pd.DataFrame, str]:
+    ) -> tuple[pd.DataFrame, str, bool]:
         start = _format_akshare_date(start_date)
         end = _format_akshare_date(end_date)
         ak_module = self._akshare
@@ -495,6 +504,7 @@ class AkshareMarketDataProvider(MarketDataProvider):
                     symbol=_format_cn_index_symbol(instrument.symbol),
                 ),
                 "akshare",
+                True,
             )
         if asset_type is AssetType.CN_ETF:
             return self._fetch_cn_etf_history(
@@ -514,13 +524,17 @@ class AkshareMarketDataProvider(MarketDataProvider):
                     adjust="",
                 ),
                 "akshare",
+                True,
             )
         if asset_type is AssetType.CN_OPEN_FUND:
-            return self._fetch_open_fund_history(instrument.symbol), "akshare_eastmoney"
+            raw_data, eastmoney_request_executed = self._fetch_open_fund_history(
+                instrument.symbol
+            )
+            return raw_data, "akshare_eastmoney", eastmoney_request_executed
 
         raise UnsupportedAssetTypeError(f"Unsupported asset type: {asset_type!r}")
 
-    def _fetch_open_fund_history(self, symbol: str) -> pd.DataFrame:
+    def _fetch_open_fund_history(self, symbol: str) -> tuple[pd.DataFrame, bool]:
         symbol = _strip_exchange_prefix(symbol)
         cached = self._fund_nav_cache.get(symbol)
         if cached is not None:
@@ -531,7 +545,7 @@ class AkshareMarketDataProvider(MarketDataProvider):
                         f"Recent unit NAV request for {symbol} failed; "
                         "retry suppressed."
                     )
-                return raw_data
+                return raw_data, False
             self._fund_nav_cache.pop(symbol, None)
 
         try:
@@ -546,7 +560,7 @@ class AkshareMarketDataProvider(MarketDataProvider):
             raise
         if self._fund_nav_cache_ttl_seconds > 0:
             self._fund_nav_cache[symbol] = (time.monotonic(), raw_data)
-        return raw_data
+        return raw_data, True
 
     def _fetch_cn_etf_history(
         self,
@@ -555,7 +569,7 @@ class AkshareMarketDataProvider(MarketDataProvider):
         end_date: str,
         *,
         price_basis: PriceBasis,
-    ) -> tuple[pd.DataFrame, str]:
+    ) -> tuple[pd.DataFrame, str, bool]:
         ak_module = self._akshare
         adjust = "qfq" if price_basis is PriceBasis.QFQ else ""
         if price_basis is PriceBasis.QFQ:
@@ -569,6 +583,7 @@ class AkshareMarketDataProvider(MarketDataProvider):
                     adjust=adjust,
                 ),
                 "akshare_eastmoney",
+                True,
             )
 
         try:
@@ -584,7 +599,7 @@ class AkshareMarketDataProvider(MarketDataProvider):
             raw_data = pd.DataFrame()
 
         if raw_data is not None and not raw_data.empty:
-            return raw_data, "akshare"
+            return raw_data, "akshare", True
 
         return (
             self._call_with_retry(
@@ -592,6 +607,7 @@ class AkshareMarketDataProvider(MarketDataProvider):
                 symbol=_format_sina_etf_symbol(instrument.symbol),
             ),
             "akshare",
+            False,
         )
 
     def _call_with_retry(
