@@ -25,6 +25,11 @@ _SYMBOL_PATTERN = re.compile(r"[0-9]{6}")
 _REALTIME_SOURCES = frozenset({"eastmoney", "sina_fallback"})
 _CONFIRMED_HISTORY_SOURCES = frozenset({"akshare_eastmoney"})
 
+TIER_STATE_UNTRIGGERED = "UNTRIGGERED"
+TIER_STATE_PENDING = "TRIGGERED_PENDING"
+TIER_STATE_ADDED = "ADDED"
+TIER_STATE_SKIPPED = "SKIPPED"
+
 
 @dataclass(frozen=True, slots=True)
 class DrawdownTier:
@@ -75,6 +80,54 @@ class DrawdownPlanEvaluation:
     cycle_changed: bool
     newly_crossed_tiers: tuple[DrawdownTier, ...]
     total_amount: int | float
+
+
+def derive_tier_action_state(
+    *,
+    tier_key: str,
+    triggered_tier_keys: Collection[str],
+    added_tier_keys: Collection[str],
+    skipped_tier_keys: Collection[str],
+) -> str:
+    """Derive the user-facing state without duplicating it in storage."""
+
+    if tier_key in added_tier_keys:
+        return TIER_STATE_ADDED
+    if tier_key in skipped_tier_keys:
+        return TIER_STATE_SKIPPED
+    if tier_key in triggered_tier_keys:
+        return TIER_STATE_PENDING
+    return TIER_STATE_UNTRIGGERED
+
+
+def select_actionable_tiers(
+    *,
+    config: DrawdownPlanConfig,
+    current_drawdown: float,
+    added_tier_keys: Collection[str] = (),
+    skipped_tier_keys: Collection[str] = (),
+    snoozed_tier_keys: Collection[str] = (),
+) -> tuple[DrawdownTier, ...]:
+    """Return tiers currently eligible for one user reminder.
+
+    Trigger records are intentionally absent from this function's inputs: a
+    confirmed market fact does not make an unresolved tier ineligible.
+    """
+
+    drawdown = float(current_drawdown)
+    if not math.isfinite(drawdown) or drawdown < 0:
+        raise ValueError("current_drawdown must be a finite non-negative number.")
+    added = set(added_tier_keys)
+    skipped = set(skipped_tier_keys)
+    snoozed = set(snoozed_tier_keys)
+    return tuple(
+        tier
+        for tier in config.tiers
+        if drawdown + _THRESHOLD_TOLERANCE >= tier.drawdown
+        and tier.key not in added
+        and tier.key not in skipped
+        and tier.key not in snoozed
+    )
 
 
 def required_history_start(

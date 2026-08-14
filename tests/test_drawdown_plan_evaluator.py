@@ -8,6 +8,10 @@ import pytest
 
 from fund_alert_bot.market_data import AssetType, RealtimeQuote
 from fund_alert_bot.rules.drawdown_plan import (
+    TIER_STATE_ADDED,
+    TIER_STATE_PENDING,
+    TIER_STATE_SKIPPED,
+    TIER_STATE_UNTRIGGERED,
     ActiveDrawdownCycle,
     DrawdownPlanConfig,
     DrawdownPlanEvaluation,
@@ -15,10 +19,12 @@ from fund_alert_bot.rules.drawdown_plan import (
     _tier_command_text,
     build_drawdown_plan_alert,
     build_drawdown_plan_pre_alert,
+    derive_tier_action_state,
     evaluate_drawdown_plan,
     evaluate_drawdown_plan_realtime,
     parse_drawdown_plan_config,
     required_history_start,
+    select_actionable_tiers,
     validate_realtime_quote,
 )
 
@@ -54,6 +60,108 @@ def test_mark_added_fallback_keeps_canonical_tier_precision() -> None:
     tier = DrawdownTier(0.123456789, 100.25, "0.123456789")
 
     assert _tier_command_text((tier,)) == "12.3456789"
+
+
+def test_actionable_tier_exact_threshold_and_float_tolerance() -> None:
+    config = _config([(0.15, 2000), (0.20, 3000)])
+
+    assert [
+        tier.key
+        for tier in select_actionable_tiers(
+            config=config,
+            current_drawdown=0.15,
+        )
+    ] == ["0.15"]
+    assert select_actionable_tiers(config=config, current_drawdown=0.14999) == ()
+    assert [
+        tier.key
+        for tier in select_actionable_tiers(
+            config=config,
+            current_drawdown=0.15 - 5e-13,
+        )
+    ] == ["0.15"]
+
+
+def test_actionable_tiers_include_pending_and_new_but_respect_actions() -> None:
+    config = _config([(0.15, 2000), (0.20, 3000), (0.25, 5000)])
+
+    actionable = select_actionable_tiers(
+        config=config,
+        current_drawdown=0.22,
+        added_tier_keys=(),
+        skipped_tier_keys=(),
+    )
+    assert [tier.key for tier in actionable] == ["0.15", "0.2"]
+    assert (
+        select_actionable_tiers(
+            config=config,
+            current_drawdown=0.22,
+            added_tier_keys=("0.2",),
+            skipped_tier_keys=("0.15",),
+        )
+        == ()
+    )
+
+
+def test_actionable_tier_snooze_is_date_scoped_by_caller() -> None:
+    config = _config([(0.15, 2000)])
+
+    assert (
+        select_actionable_tiers(
+            config=config,
+            current_drawdown=0.18,
+            snoozed_tier_keys=("0.15",),
+        )
+        == ()
+    )
+    assert [
+        tier.key
+        for tier in select_actionable_tiers(
+            config=config,
+            current_drawdown=0.18,
+            snoozed_tier_keys=(),
+        )
+    ] == ["0.15"]
+
+
+def test_derived_tier_state_priority_and_cycle_reset() -> None:
+    base = {
+        "tier_key": "0.15",
+        "triggered_tier_keys": ("0.15",),
+    }
+    assert (
+        derive_tier_action_state(
+            **base,
+            added_tier_keys=(),
+            skipped_tier_keys=(),
+        )
+        == TIER_STATE_PENDING
+    )
+    assert (
+        derive_tier_action_state(
+            **base,
+            added_tier_keys=("0.15",),
+            skipped_tier_keys=(),
+        )
+        == TIER_STATE_ADDED
+    )
+    assert (
+        derive_tier_action_state(
+            **base,
+            added_tier_keys=(),
+            skipped_tier_keys=("0.15",),
+        )
+        == TIER_STATE_SKIPPED
+    )
+    assert (
+        derive_tier_action_state(
+            tier_key="0.15",
+            triggered_tier_keys=(),
+            added_tier_keys=(),
+            skipped_tier_keys=(),
+        )
+        == TIER_STATE_UNTRIGGERED
+    )
 
 
 def test_scientific_tiers_keep_confirmed_alert_within_telegram_limit() -> None:
