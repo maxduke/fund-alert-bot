@@ -21,6 +21,7 @@ from fund_alert_bot.db import (
     get_active_drawdown_cycle,
     get_active_position_cycle,
     get_cached_fund_nav,
+    get_drawdown_tier_reminder_states,
     get_fund_settings,
     get_position_snapshot,
     has_position_profit_evaluation,
@@ -75,6 +76,7 @@ from fund_alert_bot.rules.drawdown_plan import (
     format_plan_percent,
     parse_drawdown_plan_config,
     required_history_start,
+    select_actionable_tiers,
     validate_drawdown_plan_notification_size,
 )
 from fund_alert_bot.rules.profit import (
@@ -386,8 +388,7 @@ def evaluate_drawdown_plan_rule(
     if not name:
         raise ValueError("drawdown_plan name must not be empty.")
     config, active_cycle, recorded_tier_keys = _load_drawdown_plan_state(
-        connection,
-        rule,
+        connection, rule
     )
 
     evaluation = evaluate_drawdown_plan(
@@ -398,18 +399,56 @@ def evaluate_drawdown_plan_rule(
         active_cycle=active_cycle,
         recorded_tier_keys=recorded_tier_keys,
     )
-    alert = None
-    if not initialize_only:
-        alert = build_drawdown_plan_alert(
+    cycle_changed = active_cycle is None or evaluation.cycle_changed
+    added_tier_keys, skipped_tier_keys, snoozed_tier_keys = (
+        (frozenset(), frozenset(), frozenset())
+        if cycle_changed or active_cycle is None
+        else _drawdown_reminder_key_sets(
+            connection,
+            active_cycle.cycle_id,
+            market_date=evaluation.latest_date,
+        )
+    )
+    actionable_tiers = (
+        ()
+        if initialize_only
+        else select_actionable_tiers(
+            config=config,
+            current_drawdown=evaluation.drawdown,
+            added_tier_keys=added_tier_keys,
+            skipped_tier_keys=skipped_tier_keys,
+            snoozed_tier_keys=snoozed_tier_keys,
+        )
+    )
+    actionable_keys = {tier.key for tier in actionable_tiers}
+    newly_crossed_tiers = tuple(
+        tier for tier in evaluation.newly_crossed_tiers if tier.key in actionable_keys
+    )
+    newly_keys = {tier.key for tier in newly_crossed_tiers}
+    pending_tiers = tuple(
+        tier for tier in actionable_tiers if tier.key not in newly_keys
+    )
+    tiers_to_record = () if initialize_only else evaluation.newly_crossed_tiers
+    resolved_alert: dict[str, object] | None = None
+
+    def build_alert(cycle_id: int) -> dict[str, object] | None:
+        nonlocal resolved_alert
+        resolved_alert = build_drawdown_plan_alert(
             rule_id=rule_id,
             reference_symbol=reference_symbol,
             name=name,
             config=config,
             evaluation=evaluation,
+            cycle_id=cycle_id,
+            actionable_tiers=actionable_tiers,
+            pending_tiers=pending_tiers,
         )
-    if alert is not None and not same_day_actions:
-        alert["message"] = format_delayed_drawdown_plan_message(str(alert["message"]))
-    tiers = () if initialize_only else evaluation.newly_crossed_tiers
+        if resolved_alert is not None and not same_day_actions:
+            resolved_alert["message"] = format_delayed_drawdown_plan_message(
+                str(resolved_alert["message"])
+            )
+        return resolved_alert
+
     cycle_id, event_id = persist_drawdown_plan_evaluation(
         connection,
         rule_id=rule_id,
@@ -425,13 +464,14 @@ def evaluate_drawdown_plan_rule(
         peak_date=evaluation.peak_date.isoformat(),
         peak_price=evaluation.peak_price,
         evaluation_date=evaluation.latest_date.isoformat(),
-        tiers=tiers,
-        alert=alert,
+        tiers_to_record=tiers_to_record,
+        alert_factory=(None if not actionable_tiers else build_alert),
     )
     LOGGER.info(
         "Drawdown plan evaluation rule_id=%s cycle_id=%s symbol=%s evaluation_date=%s "
         "latest_price=%s peak_price=%s drawdown=%s newly_crossed_tiers=%s "
-        "sma=%s distance_to_sma=%s sma_slope=%s alert_reserved=%s",
+        "actionable_tiers=%s sma=%s distance_to_sma=%s sma_slope=%s "
+        "alert_reserved=%s",
         rule_id,
         cycle_id,
         reference_symbol,
@@ -439,20 +479,21 @@ def evaluate_drawdown_plan_rule(
         evaluation.latest_price,
         evaluation.peak_price,
         evaluation.drawdown,
-        [tier.key for tier in tiers],
+        [tier.key for tier in tiers_to_record],
+        [tier.key for tier in actionable_tiers],
         evaluation.sma,
         evaluation.distance_to_sma,
         evaluation.sma_slope,
         event_id is not None,
     )
     notification = None
-    if event_id is not None and alert is not None:
+    if event_id is not None and resolved_alert is not None:
         notification = AlertNotification(
             event_id=event_id,
-            title=str(alert["title"]),
-            text=str(alert["message"]),
+            title=str(resolved_alert["title"]),
+            text=str(resolved_alert["message"]),
             telegram_actions=(
-                _drawdown_plan_action_rows(rule_id, event_id, tiers)
+                _drawdown_plan_action_rows(rule_id, event_id, actionable_tiers)
                 if same_day_actions
                 else ()
             ),
@@ -1130,6 +1171,29 @@ def _load_drawdown_plan_state(
         for row in list_drawdown_tier_records(connection, active_cycle.cycle_id)
     }
     return config, active_cycle, recorded
+
+
+def _drawdown_reminder_key_sets(
+    connection: Any,
+    cycle_id: int,
+    *,
+    market_date: date,
+) -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
+    """Load added, cycle-skipped, and current-date snoozed tier keys."""
+
+    added = frozenset(
+        str(row["tier_key"]) for row in list_manual_add_actions(connection, cycle_id)
+    )
+    states = get_drawdown_tier_reminder_states(connection, cycle_id)
+    skipped = frozenset(
+        key for key, row in states.items() if bool(row["skipped_for_cycle"])
+    )
+    snoozed = frozenset(
+        key
+        for key, row in states.items()
+        if row["snoozed_market_date"] == market_date.isoformat()
+    )
+    return added, skipped, snoozed
 
 
 _HISTORY_OVERLAP_DAYS = 5

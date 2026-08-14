@@ -1366,14 +1366,39 @@ def get_drawdown_plan_action_event(
     for tier_key in required_tier_keys:
         filters.append(
             """
-            EXISTS (
-                SELECT 1
-                FROM json_each(e.payload_json, '$.crossed_tiers') AS tier
-                WHERE json_extract(tier.value, '$.key') = ?
+            (
+                (
+                    json_type(e.payload_json, '$.actionable_tiers') = 'array'
+                    AND EXISTS (
+                        SELECT 1
+                        FROM json_each(e.payload_json, '$.actionable_tiers') AS tier
+                        WHERE json_extract(tier.value, '$.key') = ?
+                    )
+                    AND (
+                        COALESCE(
+                            json_type(e.payload_json, '$.crossed_tiers'), ''
+                        ) != 'array'
+                        OR EXISTS (
+                            SELECT 1
+                            FROM json_each(e.payload_json, '$.crossed_tiers') AS tier
+                            WHERE json_extract(tier.value, '$.key') = ?
+                        )
+                    )
+                )
+                OR (
+                    COALESCE(
+                        json_type(e.payload_json, '$.actionable_tiers'), ''
+                    ) != 'array'
+                    AND EXISTS (
+                        SELECT 1
+                        FROM json_each(e.payload_json, '$.crossed_tiers') AS tier
+                        WHERE json_extract(tier.value, '$.key') = ?
+                    )
+                )
             )
             """
         )
-        values.append(tier_key)
+        values.extend((tier_key, tier_key, tier_key))
     return connection.execute(
         f"""
         SELECT
@@ -1387,7 +1412,10 @@ def get_drawdown_plan_action_event(
         FROM alert_events AS e
         JOIN rules AS r ON r.id = e.rule_id
         WHERE {" AND ".join(filters)}
-            AND json_type(e.payload_json, '$.crossed_tiers') = 'array'
+            AND (
+                json_type(e.payload_json, '$.actionable_tiers') = 'array'
+                OR json_type(e.payload_json, '$.crossed_tiers') = 'array'
+            )
         ORDER BY e.id DESC
         LIMIT 1
         """,
@@ -1466,9 +1494,10 @@ def record_manual_addition(
         if event is None or int(event["rule_id"]) != rule_id:
             raise sqlite3.IntegrityError("Manual-add event does not match the plan.")
         payload = json.loads(str(event["payload_json"]))
-        eligible_tiers = {
-            str(item["key"]): item for item in payload.get("crossed_tiers", ())
-        }
+        eligible_payload = payload.get(
+            "actionable_tiers", payload.get("crossed_tiers", ())
+        )
+        eligible_tiers = {str(item["key"]): item for item in eligible_payload}
         selected_keys = tuple(str(tier.key) for tier in tiers)
         if (
             int(payload.get("cycle_id", -1)) != cycle_id
@@ -1614,6 +1643,14 @@ def record_manual_addition(
                 )
                 for tier in new_tiers
             ],
+        )
+        connection.executemany(
+            """
+            UPDATE drawdown_tier_reminder_states
+            SET skipped_for_cycle = 0, updated_at = ?
+            WHERE cycle_id = ? AND tier_key = ?
+            """,
+            [(now, cycle_id, str(tier.key)) for tier in new_tiers],
         )
         connection.executemany(
             """
@@ -2760,17 +2797,20 @@ def persist_drawdown_plan_evaluation(
     peak_price: float,
     evaluation_date: str,
     tiers: Sequence[Any] = (),
+    tiers_to_record: Sequence[Any] | None = None,
     tier_source: str = "close_confirmed",
     alert: Any | None = None,
+    alert_factory: Any | None = None,
 ) -> tuple[int, int | None]:
-    """Atomically persist cycle state, tier records, and one aggregate event."""
+    """Atomically persist cycle state, tier facts, and an optional event."""
 
     if tier_source not in {"close_confirmed", "user_marked_added"}:
         raise ValueError("Unsupported drawdown tier record source.")
-    if bool(tiers) != (alert is not None):
-        raise ValueError(
-            "An aggregate alert is required exactly when tiers are stored."
-        )
+    if tiers_to_record is not None and tiers:
+        raise ValueError("Pass tiers or tiers_to_record, not both.")
+    records = tuple(tiers if tiers_to_record is None else tiers_to_record)
+    if alert is not None and alert_factory is not None:
+        raise ValueError("Pass alert or alert_factory, not both.")
 
     connection.execute("BEGIN IMMEDIATE")
     try:
@@ -2840,9 +2880,10 @@ def persist_drawdown_plan_evaluation(
             )
             cycle_id = active_id
 
+        resolved_alert = alert_factory(cycle_id) if alert_factory is not None else alert
         event_id: int | None = None
-        if alert is not None:
-            payload = dict(alert.get("payload") or {})
+        if resolved_alert is not None:
+            payload = dict(resolved_alert.get("payload") or {})
             payload["cycle_id"] = cycle_id
             cursor = connection.execute(
                 """
@@ -2858,14 +2899,15 @@ def persist_drawdown_plan_evaluation(
                 """,
                 (
                     rule_id,
-                    str(alert["alert_key"]),
-                    str(alert["title"]),
-                    str(alert["message"]),
+                    str(resolved_alert["alert_key"]),
+                    str(resolved_alert["title"]),
+                    str(resolved_alert["message"]),
                     _json_text(payload),
                     now,
                 ),
             )
             event_id = int(cursor.lastrowid)
+        if records:
             connection.executemany(
                 """
                 INSERT INTO drawdown_tier_records (
@@ -2891,7 +2933,7 @@ def persist_drawdown_plan_evaluation(
                         event_id,
                         now,
                     )
-                    for tier in tiers
+                    for tier in records
                 ],
             )
         connection.commit()

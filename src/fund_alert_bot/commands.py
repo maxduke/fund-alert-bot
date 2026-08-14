@@ -648,9 +648,10 @@ def load_manual_add_selection(
         raise CommandParseError(
             "This reminder expired or its peak cycle changed. Use /sync_position."
         )
+    eligible_payload = payload.get("actionable_tiers", payload.get("crossed_tiers", ()))
     eligible_keys = {
         str(item["key"])
-        for item in payload.get("crossed_tiers", ())
+        for item in eligible_payload
         if isinstance(item, dict) and "key" in item
     }
     eligible = tuple(tier for tier in config.tiers if tier.key in eligible_keys)
