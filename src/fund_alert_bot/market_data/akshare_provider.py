@@ -17,6 +17,7 @@ import requests
 from fund_alert_bot.market_data.exceptions import (
     EmptyMarketDataError,
     MarketDataFetchError,
+    MarketDataNormalizeError,
     UnsupportedAssetTypeError,
 )
 from fund_alert_bot.market_data.models import (
@@ -135,7 +136,7 @@ class AkshareMarketDataProvider(MarketDataProvider):
             end_date,
             basis,
         )
-        history = normalize_history(raw_data, asset_type, source=source)
+        history = self._normalize_history(raw_data, asset_type, source=source)
         history = self._filter_by_date(history, start_date, end_date)
 
         if history.empty:
@@ -271,7 +272,7 @@ class AkshareMarketDataProvider(MarketDataProvider):
             raise UnsupportedAssetTypeError("Unit NAV requires cn_open_fund.")
 
         symbol = _strip_exchange_prefix(instrument.symbol)
-        history = normalize_history(
+        history = self._normalize_history(
             self._fetch_open_fund_history(symbol),
             AssetType.CN_OPEN_FUND,
             source="akshare_eastmoney",
@@ -291,6 +292,7 @@ class AkshareMarketDataProvider(MarketDataProvider):
         row = history.iloc[-1]
         value = pd.to_numeric(row["close"], errors="coerce")
         if pd.isna(value) or not math.isfinite(float(value)) or float(value) <= 0:
+            self._mark_eastmoney_failure()
             raise EmptyMarketDataError(
                 f"Unit NAV for {symbol} on {row['date'].date()} is invalid."
             )
@@ -447,6 +449,24 @@ class AkshareMarketDataProvider(MarketDataProvider):
             raise MarketDataFetchError(
                 f"Recent {source} request failed; retry suppressed."
             )
+
+    def _mark_eastmoney_failure(self) -> None:
+        if self._eastmoney_failure_ttl_seconds > 0:
+            self._eastmoney_failed_at = time.monotonic()
+
+    def _normalize_history(
+        self,
+        raw_data: pd.DataFrame,
+        asset_type: AssetType,
+        *,
+        source: str,
+    ) -> pd.DataFrame:
+        try:
+            return normalize_history(raw_data, asset_type, source=source)
+        except (EmptyMarketDataError, MarketDataNormalizeError):
+            if source in {"akshare", "akshare_eastmoney"}:
+                self._mark_eastmoney_failure()
+            raise
 
     def _fetch_raw_history(
         self,
@@ -610,9 +630,11 @@ class AkshareMarketDataProvider(MarketDataProvider):
                 **kwargs,
             )
         except MarketDataFetchError:
-            if self._eastmoney_failure_ttl_seconds > 0:
-                self._eastmoney_failed_at = time.monotonic()
+            self._mark_eastmoney_failure()
             raise
+        if result is None or result.empty:
+            self._mark_eastmoney_failure()
+            raise MarketDataFetchError("Eastmoney returned no market data.")
         self._eastmoney_failed_at = None
         return result
 

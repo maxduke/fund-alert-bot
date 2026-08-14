@@ -934,6 +934,65 @@ def test_empty_akshare_response_raises_clear_exception() -> None:
         provider.get_history(instrument, "2024-01-01", "2024-01-03")
 
 
+def test_empty_eastmoney_history_cools_down_before_sina_fallback() -> None:
+    class EmptyEastmoneyAkshare(FakeAkshare):
+        def fund_etf_hist_em(self, **kwargs: Any) -> pd.DataFrame:
+            self.calls.append(("fund_etf_hist_em", kwargs))
+            return pd.DataFrame()
+
+    fake_ak = EmptyEastmoneyAkshare()
+    provider = AkshareMarketDataProvider(
+        ak_module=fake_ak,
+        retries=1,
+        retry_delay_seconds=0,
+    )
+
+    for symbol in ("510300", "159915"):
+        history = provider.get_history(
+            Instrument(symbol, symbol, AssetType.CN_ETF),
+            "2024-01-01",
+            "2024-01-03",
+        )
+        assert history.attrs["source"] == "akshare"
+
+    assert [name for name, _kwargs in fake_ak.calls] == [
+        "fund_etf_hist_em",
+        "fund_etf_hist_sina",
+        "fund_etf_hist_sina",
+    ]
+
+
+def test_malformed_eastmoney_history_cools_down_other_requests() -> None:
+    class MalformedEastmoneyAkshare(FakeAkshare):
+        def fund_etf_hist_em(self, **kwargs: Any) -> pd.DataFrame:
+            self.calls.append(("fund_etf_hist_em", kwargs))
+            return pd.DataFrame({"日期": ["2024-01-01"], "收盘": ["1.2"]})
+
+    fake_ak = MalformedEastmoneyAkshare()
+    provider = AkshareMarketDataProvider(
+        ak_module=fake_ak,
+        retries=1,
+        retry_delay_seconds=0,
+    )
+
+    with pytest.raises(MarketDataNormalizeError):
+        provider.get_history(
+            Instrument("510300", "ETF", AssetType.CN_ETF),
+            "2024-01-01",
+            "2024-01-03",
+            price_basis=PriceBasis.QFQ,
+        )
+    with pytest.raises(MarketDataFetchError, match="retry suppressed"):
+        provider.get_history(
+            Instrument("159915", "ETF", AssetType.CN_ETF),
+            "2024-01-01",
+            "2024-01-03",
+            price_basis=PriceBasis.QFQ,
+        )
+
+    assert [name for name, _kwargs in fake_ak.calls] == ["fund_etf_hist_em"]
+
+
 def test_missing_required_columns_raise_normalize_error() -> None:
     class MissingColumnAkshare(FakeAkshare):
         def fund_etf_hist_em(self, **kwargs: Any) -> pd.DataFrame:
