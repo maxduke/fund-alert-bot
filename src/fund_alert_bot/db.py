@@ -8,6 +8,7 @@ import sqlite3
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, date, datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -3265,9 +3266,19 @@ def _json_text(value: Any) -> str:
 def _normalize_drawdown_tier_keys(tier_keys: Sequence[str]) -> tuple[str, ...]:
     """Validate and de-duplicate tier keys while preserving caller order."""
 
-    keys = tuple(str(key).strip() for key in tier_keys)
-    if any(not key for key in keys):
-        raise ValueError("Drawdown tier keys must not be empty.")
+    keys: list[str] = []
+    for raw_key in tier_keys:
+        key = str(raw_key).strip()
+        if not key:
+            raise ValueError("Drawdown tier keys must not be empty.")
+        try:
+            number = Decimal(key)
+        except InvalidOperation as exc:
+            raise ValueError("Drawdown tier keys must be finite numbers.") from exc
+        if not number.is_finite():
+            raise ValueError("Drawdown tier keys must be finite numbers.")
+        keys.append(format(number.normalize(), "f"))
+    keys = tuple(keys)
     if len(set(keys)) != len(keys):
         raise ValueError("Drawdown tier keys must be unique.")
     return keys
