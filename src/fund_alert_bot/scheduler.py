@@ -332,7 +332,14 @@ async def run_scheduled_before_close_check(
         with open_connection(sqlite_path) as connection:
             initialize_database(connection)
             if confirmed_end_date is None:
-                drawdown_result = DrawdownCheckResult(0, [], 0, [], [])
+                drawdown_result = DrawdownCheckResult(
+                    checked_rules=0,
+                    notifications=[],
+                    skipped_duplicates=0,
+                    no_data_skips=[],
+                    errors=[],
+                    statuses=[],
+                )
             else:
                 drawdown_result = evaluate_drawdown_rules(
                     connection,
