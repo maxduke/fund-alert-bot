@@ -427,6 +427,38 @@ def test_latest_uses_one_bounded_quote_for_index_and_stock(
     assert fake_ak.calls == []
 
 
+def test_invalid_symbol_quote_does_not_cool_down_other_symbols() -> None:
+    calls: list[str] = []
+
+    def http_get(url: str, **kwargs: Any) -> FakeResponse:
+        secid = str(kwargs["params"]["secid"])
+        calls.append(secid)
+        symbol = secid.split(".", 1)[1]
+        if symbol == "000300":
+            return _eastmoney_quote_response(symbol, price=0)
+        return _eastmoney_quote_response(symbol)
+
+    provider = AkshareMarketDataProvider(
+        ak_module=FakeAkshare(),
+        retry_delay_seconds=0,
+        today_factory=lambda: date(2024, 1, 4),
+        http_get=http_get,
+    )
+
+    fallback = provider.get_latest(
+        Instrument("000300", "CSI 300 Index", AssetType.CN_INDEX)
+    )
+    realtime = provider.get_latest(
+        Instrument("399006", "ChiNext Index", AssetType.CN_INDEX)
+    )
+
+    assert fallback is not None
+    assert fallback["source"] == "akshare"
+    assert realtime is not None
+    assert realtime["source"] == "eastmoney_realtime"
+    assert calls == ["1.000300", "0.399006"]
+
+
 def test_get_etf_realtime_quote_uses_eastmoney_contract() -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
 

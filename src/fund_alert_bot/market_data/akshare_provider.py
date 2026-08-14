@@ -396,10 +396,16 @@ class AkshareMarketDataProvider(MarketDataProvider):
                 timeout=_REALTIME_HTTP_TIMEOUT_SECONDS,
             )
             response.raise_for_status()
-            quote = _parse_eastmoney_quote(response.json(), symbol)
+            payload = response.json()
         except Exception as exc:  # noqa: BLE001
             self._eastmoney_failed_at = time.monotonic()
             raise MarketDataFetchError("Eastmoney realtime quote failed.") from exc
+        try:
+            quote = _parse_eastmoney_quote(payload, symbol)
+        except (TypeError, ValueError, OverflowError, OSError) as exc:
+            raise MarketDataFetchError(
+                "Eastmoney realtime quote has no usable data."
+            ) from exc
         self._eastmoney_failed_at = None
         self._write_etf_quote_cache(cache_source, symbol, quote)
         return quote
