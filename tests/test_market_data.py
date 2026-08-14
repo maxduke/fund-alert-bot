@@ -6,6 +6,7 @@ from typing import Any, cast
 import pandas as pd
 import pytest
 
+import fund_alert_bot.market_data.akshare_provider as akshare_provider
 from fund_alert_bot.market_data import (
     AkshareMarketDataProvider,
     AssetType,
@@ -932,6 +933,156 @@ def test_empty_akshare_response_raises_clear_exception() -> None:
 
     with pytest.raises(EmptyMarketDataError):
         provider.get_history(instrument, "2024-01-01", "2024-01-03")
+
+
+def test_empty_eastmoney_history_cools_down_before_sina_fallback() -> None:
+    class EmptyEastmoneyAkshare(FakeAkshare):
+        def fund_etf_hist_em(self, **kwargs: Any) -> pd.DataFrame:
+            self.calls.append(("fund_etf_hist_em", kwargs))
+            return pd.DataFrame()
+
+    fake_ak = EmptyEastmoneyAkshare()
+    provider = AkshareMarketDataProvider(
+        ak_module=fake_ak,
+        retries=1,
+        retry_delay_seconds=0,
+    )
+
+    for symbol in ("510300", "159915"):
+        history = provider.get_history(
+            Instrument(symbol, symbol, AssetType.CN_ETF),
+            "2024-01-01",
+            "2024-01-03",
+        )
+        assert history.attrs["source"] == "akshare"
+
+    assert [name for name, _kwargs in fake_ak.calls] == [
+        "fund_etf_hist_em",
+        "fund_etf_hist_sina",
+        "fund_etf_hist_sina",
+    ]
+
+
+def test_malformed_eastmoney_history_cools_down_other_requests() -> None:
+    class MalformedEastmoneyAkshare(FakeAkshare):
+        def fund_etf_hist_em(self, **kwargs: Any) -> pd.DataFrame:
+            self.calls.append(("fund_etf_hist_em", kwargs))
+            return pd.DataFrame({"日期": ["2024-01-01"], "收盘": ["1.2"]})
+
+    fake_ak = MalformedEastmoneyAkshare()
+    provider = AkshareMarketDataProvider(
+        ak_module=fake_ak,
+        retries=1,
+        retry_delay_seconds=0,
+    )
+
+    with pytest.raises(MarketDataNormalizeError):
+        provider.get_history(
+            Instrument("510300", "ETF", AssetType.CN_ETF),
+            "2024-01-01",
+            "2024-01-03",
+            price_basis=PriceBasis.QFQ,
+        )
+    with pytest.raises(MarketDataFetchError, match="retry suppressed"):
+        provider.get_history(
+            Instrument("159915", "ETF", AssetType.CN_ETF),
+            "2024-01-01",
+            "2024-01-03",
+            price_basis=PriceBasis.QFQ,
+        )
+
+    assert [name for name, _kwargs in fake_ak.calls] == ["fund_etf_hist_em"]
+
+
+def test_cached_invalid_nav_does_not_extend_eastmoney_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = [0.0]
+    monkeypatch.setattr(akshare_provider.time, "monotonic", lambda: now[0])
+
+    class InvalidNavAkshare(FakeAkshare):
+        def fund_open_fund_info_em(self, **kwargs: Any) -> pd.DataFrame:
+            self.calls.append(("fund_open_fund_info_em", kwargs))
+            return pd.DataFrame(
+                {
+                    "净值日期": ["2024-01-02"],
+                    "单位净值": ["not-a-number"],
+                }
+            )
+
+    fake_ak = InvalidNavAkshare()
+    provider = AkshareMarketDataProvider(
+        ak_module=fake_ak,
+        retries=1,
+        retry_delay_seconds=0,
+        eastmoney_failure_ttl_seconds=30,
+    )
+    instrument = Instrument("000001", "Fund", AssetType.CN_OPEN_FUND)
+
+    with pytest.raises(EmptyMarketDataError):
+        provider.get_fund_nav(instrument)
+    now[0] = 29
+    with pytest.raises(EmptyMarketDataError):
+        provider.get_fund_nav(instrument)
+    now[0] = 31
+
+    provider.get_history(
+        Instrument("399006", "Index", AssetType.CN_INDEX),
+        "2024-01-01",
+        "2024-01-03",
+    )
+
+    assert [name for name, _kwargs in fake_ak.calls] == [
+        "fund_open_fund_info_em",
+        "stock_zh_index_daily_em",
+    ]
+
+
+def test_sina_fallback_normalization_does_not_extend_eastmoney_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = [0.0]
+    monkeypatch.setattr(akshare_provider.time, "monotonic", lambda: now[0])
+
+    class MalformedSinaAkshare(FakeAkshare):
+        def fund_etf_hist_em(self, **kwargs: Any) -> pd.DataFrame:
+            self.calls.append(("fund_etf_hist_em", kwargs))
+            return pd.DataFrame()
+
+        def fund_etf_hist_sina(self, **kwargs: Any) -> pd.DataFrame:
+            self.calls.append(("fund_etf_hist_sina", kwargs))
+            return pd.DataFrame({"date": ["2024-01-01"], "close": ["1.2"]})
+
+    fake_ak = MalformedSinaAkshare()
+    provider = AkshareMarketDataProvider(
+        ak_module=fake_ak,
+        retries=1,
+        retry_delay_seconds=0,
+        eastmoney_failure_ttl_seconds=30,
+    )
+
+    for symbol in ("510300", "159915"):
+        with pytest.raises(MarketDataNormalizeError):
+            provider.get_history(
+                Instrument(symbol, symbol, AssetType.CN_ETF),
+                "2024-01-01",
+                "2024-01-03",
+            )
+        now[0] = 29
+
+    now[0] = 31
+    provider.get_history(
+        Instrument("399006", "Index", AssetType.CN_INDEX),
+        "2024-01-01",
+        "2024-01-03",
+    )
+
+    assert [name for name, _kwargs in fake_ak.calls] == [
+        "fund_etf_hist_em",
+        "fund_etf_hist_sina",
+        "fund_etf_hist_sina",
+        "stock_zh_index_daily_em",
+    ]
 
 
 def test_missing_required_columns_raise_normalize_error() -> None:
