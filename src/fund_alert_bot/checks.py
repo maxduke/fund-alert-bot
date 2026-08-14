@@ -2034,7 +2034,7 @@ class DrawdownMarketDataCache:
         market_data_provider: MarketDataProvider,
         end_date: date,
         include_latest: bool,
-        confirmed_end_date: date | None,
+        confirmed_end_date: date | None = None,
     ) -> None:
         self._connection = connection
         self._market_data_provider = market_data_provider
