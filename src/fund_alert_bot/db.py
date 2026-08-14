@@ -8,6 +8,7 @@ import sqlite3
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -125,6 +126,17 @@ def init_db(connection: sqlite3.Connection) -> None:
             alert_event_id INTEGER REFERENCES alert_events(id) ON DELETE SET NULL,
             created_at TEXT NOT NULL,
             UNIQUE(cycle_id, tier_key)
+        );
+
+        CREATE TABLE IF NOT EXISTS drawdown_tier_reminder_states (
+            cycle_id INTEGER NOT NULL REFERENCES drawdown_cycles(id),
+            tier_key TEXT NOT NULL,
+            skipped_for_cycle INTEGER NOT NULL DEFAULT 0
+                CHECK (skipped_for_cycle IN (0, 1)),
+            snoozed_market_date TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (cycle_id, tier_key)
         );
 
         CREATE TABLE IF NOT EXISTS fund_settings (
@@ -2590,6 +2602,153 @@ def list_drawdown_tier_records(
     )
 
 
+def list_drawdown_tier_reminder_states(
+    connection: sqlite3.Connection,
+    cycle_id: int,
+) -> list[sqlite3.Row]:
+    """Return user reminder preferences for one drawdown cycle."""
+
+    return list(
+        connection.execute(
+            """
+            SELECT
+                cycle_id,
+                tier_key,
+                skipped_for_cycle,
+                snoozed_market_date,
+                created_at,
+                updated_at
+            FROM drawdown_tier_reminder_states
+            WHERE cycle_id = ?
+            ORDER BY tier_key
+            """,
+            (cycle_id,),
+        ).fetchall()
+    )
+
+
+def get_drawdown_tier_reminder_states(
+    connection: sqlite3.Connection,
+    cycle_id: int,
+) -> dict[str, sqlite3.Row]:
+    """Return reminder preferences keyed by their canonical tier key."""
+
+    return {
+        str(row["tier_key"]): row
+        for row in list_drawdown_tier_reminder_states(connection, cycle_id)
+    }
+
+
+def snooze_drawdown_tiers_for_date(
+    connection: sqlite3.Connection,
+    *,
+    cycle_id: int,
+    tier_keys: Sequence[str],
+    market_date: str,
+) -> tuple[str, ...]:
+    """Suppress selected tiers for one market date, without changing facts."""
+
+    keys = _normalize_drawdown_tier_keys(tier_keys)
+    if not keys:
+        return ()
+    if not market_date:
+        raise ValueError("A market date is required to snooze drawdown tiers.")
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        _require_drawdown_cycle(connection, cycle_id)
+        now = _utc_now_text()
+        connection.executemany(
+            """
+            INSERT INTO drawdown_tier_reminder_states (
+                cycle_id,
+                tier_key,
+                snoozed_market_date,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(cycle_id, tier_key) DO UPDATE SET
+                snoozed_market_date = excluded.snoozed_market_date,
+                updated_at = excluded.updated_at
+            """,
+            [(cycle_id, key, market_date, now, now) for key in keys],
+        )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    return keys
+
+
+def skip_drawdown_tiers_for_cycle(
+    connection: sqlite3.Connection,
+    *,
+    cycle_id: int,
+    tier_keys: Sequence[str],
+) -> tuple[str, ...]:
+    """Suppress selected tiers for the remainder of their active cycle."""
+
+    keys = _normalize_drawdown_tier_keys(tier_keys)
+    if not keys:
+        return ()
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        _require_drawdown_cycle(connection, cycle_id)
+        now = _utc_now_text()
+        connection.executemany(
+            """
+            INSERT INTO drawdown_tier_reminder_states (
+                cycle_id,
+                tier_key,
+                skipped_for_cycle,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, 1, ?, ?)
+            ON CONFLICT(cycle_id, tier_key) DO UPDATE SET
+                skipped_for_cycle = 1,
+                snoozed_market_date = NULL,
+                updated_at = excluded.updated_at
+            """,
+            [(cycle_id, key, now, now) for key in keys],
+        )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    return keys
+
+
+def clear_drawdown_tier_skip(
+    connection: sqlite3.Connection,
+    *,
+    cycle_id: int,
+    tier_keys: Sequence[str],
+) -> tuple[str, ...]:
+    """Clear cycle skips after a user records an actual addition."""
+
+    keys = _normalize_drawdown_tier_keys(tier_keys)
+    if not keys:
+        return ()
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        _require_drawdown_cycle(connection, cycle_id)
+        now = _utc_now_text()
+        connection.executemany(
+            """
+            UPDATE drawdown_tier_reminder_states
+            SET skipped_for_cycle = 0, updated_at = ?
+            WHERE cycle_id = ? AND tier_key = ?
+            """,
+            [(now, cycle_id, key) for key in keys],
+        )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    return keys
+
+
 def persist_drawdown_plan_evaluation(
     connection: sqlite3.Connection,
     *,
@@ -3102,6 +3261,41 @@ def _read_result_value(result: Any, key: str, default: Any) -> Any:
 
 def _json_text(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def _normalize_drawdown_tier_keys(tier_keys: Sequence[str]) -> tuple[str, ...]:
+    """Validate and de-duplicate tier keys while preserving caller order."""
+
+    keys: list[str] = []
+    for raw_key in tier_keys:
+        key = str(raw_key).strip()
+        if not key:
+            raise ValueError("Drawdown tier keys must not be empty.")
+        try:
+            number = float(key)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Drawdown tier keys must be finite numbers.") from exc
+        if not math.isfinite(number):
+            raise ValueError("Drawdown tier keys must be finite numbers.")
+        keys.append(format(Decimal(str(number)).normalize(), "f"))
+    keys = tuple(keys)
+    if len(set(keys)) != len(keys):
+        raise ValueError("Drawdown tier keys must be unique.")
+    return keys
+
+
+def _require_drawdown_cycle(
+    connection: sqlite3.Connection,
+    cycle_id: int,
+) -> None:
+    if (
+        connection.execute(
+            "SELECT 1 FROM drawdown_cycles WHERE id = ?",
+            (cycle_id,),
+        ).fetchone()
+        is None
+    ):
+        raise sqlite3.IntegrityError("Drawdown cycle was not found.")
 
 
 def _timestamp_text(value: str | datetime | None) -> str:

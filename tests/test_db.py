@@ -13,12 +13,15 @@ from fund_alert_bot.db import (
     add_drawdown_plan_rule,
     add_rule,
     alert_exists,
+    clear_drawdown_tier_skip,
     connect,
     delete_rule,
     get_cached_fund_nav,
+    get_drawdown_tier_reminder_states,
     get_fund_settings,
     get_position_snapshot,
     init_db,
+    list_drawdown_tier_reminder_states,
     list_enabled_rules,
     list_retryable_standard_alert_events,
     list_rules,
@@ -26,6 +29,8 @@ from fund_alert_bot.db import (
     open_connection,
     record_alert_notification_result,
     reserve_alert_event,
+    skip_drawdown_tiers_for_cycle,
+    snooze_drawdown_tiers_for_date,
     upsert_fund_cutoff,
     upsert_fund_fee,
     upsert_fund_nav,
@@ -58,7 +63,148 @@ def test_init_db_creates_storage_tables(tmp_path: Path) -> None:
         "rules",
         "market_daily_history",
         "fund_nav_history",
+        "drawdown_tier_reminder_states",
     }.issubset(table_names)
+
+
+def test_drawdown_tier_reminder_preferences_are_idempotent_and_cycle_scoped(
+    tmp_path: Path,
+) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+
+    with open_connection(sqlite_path) as connection:
+        init_db(connection)
+        rule_id = add_drawdown_plan_rule(
+            connection,
+            reference_symbol="159915",
+            investment_fund_symbol="110026",
+            name="创业板",
+            params={"tiers": [{"drawdown": 0.15, "amount": 2000}]},
+        )
+        connection.execute(
+            """
+            INSERT INTO drawdown_cycles (
+                rule_id, peak_date, initial_peak_price, peak_price,
+                last_evaluated_date, created_at, updated_at
+            ) VALUES (?, '2026-08-14', 100, 100, '2026-08-14',
+                      '2026-08-14T00:00:00+00:00', '2026-08-14T00:00:00+00:00')
+            """,
+            (rule_id,),
+        )
+        connection.commit()
+        cycle_id = int(
+            connection.execute(
+                "SELECT id FROM drawdown_cycles WHERE rule_id = ?", (rule_id,)
+            ).fetchone()[0]
+        )
+
+        assert snooze_drawdown_tiers_for_date(
+            connection,
+            cycle_id=cycle_id,
+            tier_keys=("0.15",),
+            market_date="2026-08-14",
+        ) == ("0.15",)
+        assert snooze_drawdown_tiers_for_date(
+            connection,
+            cycle_id=cycle_id,
+            tier_keys=("0.15",),
+            market_date="2026-08-14",
+        ) == ("0.15",)
+        state = get_drawdown_tier_reminder_states(connection, cycle_id)["0.15"]
+        assert state["skipped_for_cycle"] == 0
+        assert state["snoozed_market_date"] == "2026-08-14"
+        assert (
+            list_drawdown_tier_reminder_states(connection, cycle_id)[0]["tier_key"]
+            == "0.15"
+        )
+
+        skip_drawdown_tiers_for_cycle(
+            connection,
+            cycle_id=cycle_id,
+            tier_keys=("0.15", "0.20"),
+        )
+        states = list_drawdown_tier_reminder_states(connection, cycle_id)
+        assert [row["tier_key"] for row in states] == ["0.15", "0.2"]
+        assert all(row["skipped_for_cycle"] == 1 for row in states)
+        assert all(row["snoozed_market_date"] is None for row in states)
+
+        clear_drawdown_tier_skip(
+            connection,
+            cycle_id=cycle_id,
+            tier_keys=("0.15",),
+        )
+        assert (
+            get_drawdown_tier_reminder_states(connection, cycle_id)["0.15"][
+                "skipped_for_cycle"
+            ]
+            == 0
+        )
+        assert (
+            get_drawdown_tier_reminder_states(connection, cycle_id)["0.2"][
+                "skipped_for_cycle"
+            ]
+            == 1
+        )
+
+
+def test_drawdown_tier_reminder_keys_are_canonical_and_unique(
+    tmp_path: Path,
+) -> None:
+    with open_connection(tmp_path / "bot.sqlite3") as connection:
+        init_db(connection)
+        rule_id = add_drawdown_plan_rule(
+            connection,
+            reference_symbol="159915",
+            investment_fund_symbol="110026",
+            name="创业板",
+            params={"tiers": [{"drawdown": 0.2, "amount": 2000}]},
+        )
+        connection.execute(
+            """
+            INSERT INTO drawdown_cycles (
+                rule_id, peak_date, initial_peak_price, peak_price,
+                last_evaluated_date, created_at, updated_at
+            ) VALUES (?, '2026-08-14', 100, 100, '2026-08-14',
+                      '2026-08-14T00:00:00+00:00', '2026-08-14T00:00:00+00:00')
+            """,
+            (rule_id,),
+        )
+        connection.commit()
+        cycle_id = int(
+            connection.execute(
+                "SELECT id FROM drawdown_cycles WHERE rule_id = ?", (rule_id,)
+            ).fetchone()[0]
+        )
+
+        snooze_drawdown_tiers_for_date(
+            connection,
+            cycle_id=cycle_id,
+            tier_keys=("0.20000000000000001",),
+            market_date="2026-08-14",
+        )
+        assert (
+            list_drawdown_tier_reminder_states(connection, cycle_id)[0]["tier_key"]
+            == "0.2"
+        )
+        with pytest.raises(ValueError, match="unique"):
+            skip_drawdown_tiers_for_cycle(
+                connection,
+                cycle_id=cycle_id,
+                tier_keys=("0.2", "0.20"),
+            )
+
+
+def test_drawdown_tier_reminder_preferences_require_an_existing_cycle(
+    tmp_path: Path,
+) -> None:
+    with open_connection(tmp_path / "bot.sqlite3") as connection:
+        init_db(connection)
+        with pytest.raises(sqlite3.IntegrityError, match="cycle was not found"):
+            skip_drawdown_tiers_for_cycle(
+                connection,
+                cycle_id=999,
+                tier_keys=("0.15",),
+            )
 
 
 def test_market_history_and_fund_nav_survive_restart(tmp_path: Path) -> None:
