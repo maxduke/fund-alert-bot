@@ -121,6 +121,33 @@ def test_etf_history_normalizes_to_shared_schema() -> None:
     ]
 
 
+def test_history_cache_reuses_identical_request_without_mutating_cached_data() -> None:
+    fake_ak = FakeAkshare()
+    provider = AkshareMarketDataProvider(ak_module=fake_ak, retry_delay_seconds=0)
+    instrument = Instrument("510300", "CSI 300 ETF", AssetType.CN_ETF)
+
+    first = provider.get_history(instrument, "2024-01-01", "2024-01-03")
+    first.loc[0, "close"] = 999
+    second = provider.get_history(instrument, "2024-01-01", "2024-01-03")
+
+    assert second.loc[0, "close"] == 1.2
+    assert [name for name, _kwargs in fake_ak.calls] == ["fund_etf_hist_em"]
+
+
+def test_history_cache_reuses_wider_request_for_narrower_range() -> None:
+    fake_ak = FakeAkshare()
+    provider = AkshareMarketDataProvider(ak_module=fake_ak, retry_delay_seconds=0)
+    instrument = Instrument("510300", "CSI 300 ETF", AssetType.CN_ETF)
+
+    provider.get_history(instrument, "2024-01-01", "2024-01-03")
+    narrowed = provider.get_history(instrument, "2024-01-02", "2024-01-02")
+
+    assert narrowed["date"].dt.strftime("%Y-%m-%d").tolist() == [
+        "2024-01-02",
+    ]
+    assert [name for name, _kwargs in fake_ak.calls] == ["fund_etf_hist_em"]
+
+
 def test_fund_type_uses_single_symbol_xueqiu_metadata_request() -> None:
     fake_ak = FakeAkshare()
     provider = AkshareMarketDataProvider(ak_module=fake_ak, retry_delay_seconds=0)
@@ -746,6 +773,49 @@ def test_provider_retries_akshare_calls() -> None:
 
     assert len(history) == 2
     assert [call[0] for call in fake_ak.calls] == [
+        "fund_etf_hist_em",
+        "fund_etf_hist_em",
+    ]
+
+
+def test_provider_limits_eastmoney_retry_budget_separately() -> None:
+    class AlwaysFailingAkshare(FakeAkshare):
+        def fund_etf_hist_em(self, **kwargs: Any) -> pd.DataFrame:
+            self.calls.append(("fund_etf_hist_em", kwargs))
+            raise RuntimeError("rate limited")
+
+    fake_ak = AlwaysFailingAkshare()
+    provider = AkshareMarketDataProvider(
+        ak_module=fake_ak,
+        retries=3,
+        eastmoney_retries=1,
+        retry_delay_seconds=0,
+    )
+
+    with pytest.raises(MarketDataFetchError):
+        provider.get_history(
+            Instrument("510300", "CSI 300 ETF", AssetType.CN_ETF),
+            "2024-01-01",
+            "2024-01-03",
+            price_basis=PriceBasis.QFQ,
+        )
+
+    assert len(fake_ak.calls) == 1
+
+
+def test_history_cache_can_be_disabled() -> None:
+    fake_ak = FakeAkshare()
+    provider = AkshareMarketDataProvider(
+        ak_module=fake_ak,
+        retry_delay_seconds=0,
+        history_cache_ttl_seconds=0,
+    )
+    instrument = Instrument("510300", "CSI 300 ETF", AssetType.CN_ETF)
+
+    provider.get_history(instrument, "2024-01-01", "2024-01-03")
+    provider.get_history(instrument, "2024-01-01", "2024-01-03")
+
+    assert [name for name, _kwargs in fake_ak.calls] == [
         "fund_etf_hist_em",
         "fund_etf_hist_em",
     ]

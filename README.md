@@ -235,6 +235,32 @@ Optional notification channel configuration:
 - `NTFY_TOPIC`
 - `WEBHOOK_URL`
 
+### Optional paid Eastmoney proxy
+
+Eastmoney-backed AKShare endpoints can be rate-limited. The image includes the
+pinned [`akshare-proxy-patch==0.5.0`](https://github.com/HelloYie/akshare-proxy-patch),
+but it is disabled by default.
+Enable it only after purchasing a token from the proxy service:
+
+```dotenv
+AKSHARE_PROXY_ENABLED=true
+AKSHARE_PROXY_AUTH_TOKEN=replace-with-your-token
+AKSHARE_PROXY_RETRY=1
+AKSHARE_HISTORY_CACHE_TTL_SECONDS=300
+```
+
+The patch is installed at process startup, before the first lazy AKShare import.
+It hooks only the Eastmoney domains used by this bot; Sina fallback and Xueqiu
+metadata remain direct requests. Concurrent `fast` pagination is deliberately
+disabled because it can multiply paid requests. Keep the retry value low and
+never commit or log the token. When enabled, the provider caps Eastmoney
+retries at `min(AKSHARE_RETRIES, AKSHARE_PROXY_RETRY)`; other data sources keep
+the normal `AKSHARE_RETRIES` budget. History, realtime quotes, and feeder-NAV data
+also use short in-process caches, so repeated checks reuse an identical or
+narrower request without creating a persistent stale-data store. Restart after
+changing these variables and verify the startup log; a proxy failure still fails closed rather
+than inventing market data.
+
 Realtime ETF quotes are used only for before-close drawdown estimates. Each
 Reference ETF uses one bounded, per-symbol Eastmoney request; a failure opens a
 brief global Eastmoney cooldown so the remaining plans do not repeat requests.

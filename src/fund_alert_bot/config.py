@@ -30,6 +30,8 @@ DEFAULT_BOT_LANGUAGE = "zh-CN"
 DEFAULT_AKSHARE_RETRIES = 3
 DEFAULT_AKSHARE_RETRY_DELAY_SECONDS = 0.5
 DEFAULT_AKSHARE_LATEST_LOOKBACK_DAYS = 45
+DEFAULT_AKSHARE_HISTORY_CACHE_TTL_SECONDS = 300.0
+DEFAULT_AKSHARE_PROXY_RETRY = 1
 TRUE_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
 FALSE_ENV_VALUES = frozenset({"0", "false", "no", "off", ""})
 
@@ -141,6 +143,10 @@ class Settings:
     akshare_retries: int
     akshare_retry_delay_seconds: float
     akshare_latest_lookback_days: int
+    akshare_history_cache_ttl_seconds: float
+    akshare_proxy_enabled: bool
+    akshare_proxy_auth_token: str
+    akshare_proxy_retry: int
     notifications: NotificationSettings
 
 
@@ -152,6 +158,16 @@ def load_settings(
     """Load settings from environment variables and an optional .env file."""
     if load_env_file:
         load_dotenv(dotenv_path=env_file)
+
+    akshare_proxy_enabled = parse_bool_env(
+        os.environ.get("AKSHARE_PROXY_ENABLED"),
+        name="AKSHARE_PROXY_ENABLED",
+    )
+    akshare_proxy_auth_token = os.environ.get("AKSHARE_PROXY_AUTH_TOKEN", "")
+    if akshare_proxy_enabled and not akshare_proxy_auth_token.strip():
+        raise ValueError(
+            "AKSHARE_PROXY_AUTH_TOKEN is required when AKSHARE_PROXY_ENABLED=true"
+        )
 
     return Settings(
         sqlite_path=Path(os.environ.get("SQLITE_PATH", str(DEFAULT_SQLITE_PATH))),
@@ -191,6 +207,18 @@ def load_settings(
             os.environ.get("AKSHARE_LATEST_LOOKBACK_DAYS"),
             name="AKSHARE_LATEST_LOOKBACK_DAYS",
             default=DEFAULT_AKSHARE_LATEST_LOOKBACK_DAYS,
+        ),
+        akshare_history_cache_ttl_seconds=parse_non_negative_float_env(
+            os.environ.get("AKSHARE_HISTORY_CACHE_TTL_SECONDS"),
+            name="AKSHARE_HISTORY_CACHE_TTL_SECONDS",
+            default=DEFAULT_AKSHARE_HISTORY_CACHE_TTL_SECONDS,
+        ),
+        akshare_proxy_enabled=akshare_proxy_enabled,
+        akshare_proxy_auth_token=akshare_proxy_auth_token,
+        akshare_proxy_retry=parse_positive_int_env(
+            os.environ.get("AKSHARE_PROXY_RETRY"),
+            name="AKSHARE_PROXY_RETRY",
+            default=DEFAULT_AKSHARE_PROXY_RETRY,
         ),
         notifications=NotificationSettings(
             bark_enabled=parse_bool_env(
