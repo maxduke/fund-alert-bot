@@ -272,6 +272,15 @@ When one close crosses several untriggered tiers, insert every Tier Record and o
 the individual tiers, total incremental amount, current and peak data, trend
 context, source, and data date.
 
+Tier facts and user actions are independent. A `close_confirmed` Tier Record is
+the immutable market fact that the level was reached; it does not mean that the
+user bought. If the tier has no Manual Add Confirmation and is not skipped for
+the active cycle, it is `TRIGGERED_PENDING` and remains actionable whenever the
+current drawdown still reaches it. A pending tier may appear in one daily
+aggregate reminder again after recovery and re-crossing. A same-day snooze only
+suppresses that market date; a cycle skip suppresses the tier until a new cycle.
+`ADDED` has priority over both preferences.
+
 ## Before-Close Evaluation
 
 Run once at the existing `BEFORE_CLOSE_CHECK_TIME=14:50`; do not add an interval
@@ -291,8 +300,9 @@ For every plan's `cn_etf` Reference ETF:
    If Eastmoney fails, apply the stricter Sina Fallback Pre-Alert validation.
 4. Calculate estimated drawdown and price-to-SMA distance from the realtime
    price.
-5. Aggregate unconfirmed crossed tiers into at most one pre-alert per plan and
-   trading date.
+5. Select all actionable tiers into at most one pre-alert per plan and trading
+   date, separating newly reached realtime tiers from previously confirmed
+   pending tiers. Do not mutate confirmed Tier Records.
 6. Include Telegram actions for all tiers, partial selection, and no action,
    plus the exact `/mark_added <plan_id> <tier_percentages>` fallback and a
    prominent warning that this records only a completed user action.
@@ -438,10 +448,11 @@ serve commands safely.
 For each plan, expose current price and date, Recent Peak and date, drawdown,
 available trend fields, current-cycle triggered tiers, next tier, and distance to
 that tier. If all tiers are triggered, say so rather than inventing another
-level. Render tier state as `open`, `reminded_unrecorded`, or `add_recorded` by
-combining Tier Records with Manual Add Confirmations; never use a generic check
-mark that could be mistaken for execution. A realtime crossed tier is “pending
-close,” not triggered.
+level. Render tier state as `UNTRIGGERED`, `TRIGGERED_PENDING`, `ADDED`, or
+`SKIPPED` by combining close-confirmed Tier Records, Manual Add Confirmations,
+and reminder preferences; never use a generic check mark that could be mistaken
+for execution. A realtime crossed tier is provisional until close, while an
+older unresolved tier is a pending actionable reminder.
 
 ### Persistent market-data cache
 
@@ -803,9 +814,10 @@ transaction ledger.
 
 - Existing tests and legacy rule behavior remain compatible.
 - Tier amounts are incremental and multi-tier gaps produce one totalled reminder.
-- A multi-tier total includes only open tiers newly reached in that evaluation;
-  recorded earlier tiers and upward recovery crossings contribute nothing.
-- A tier triggers once per stable Drawdown Cycle.
+- A multi-tier total includes newly reached plus still-pending actionable tiers;
+  added/skipped tiers and upward recovery crossings contribute nothing.
+- A market tier fact is recorded once per stable Drawdown Cycle, while an
+  unresolved pending tier may be reminded once per later market date.
 - A 365-day peak window uses deterministic inclusive endpoints: the latest
   confirmed date plus the preceding 364 calendar dates.
 - The peak date remains locked through the cycle; lookback expiry never lowers

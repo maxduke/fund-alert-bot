@@ -87,8 +87,9 @@ Drawdown Cycle is active.
 _Avoid_: Cost basis, rolling peak, all-time high
 
 **Drawdown Cycle**:
-The period in which each Drawdown Tier may become due once, ending only when a
-confirmed close reaches or exceeds the Recent Peak after being below it.
+The period in which each Drawdown Tier's market fact may become confirmed once,
+ending only when a confirmed close reaches or exceeds the Recent Peak after being
+below it. Pending user reminders are separate and may repeat within the cycle.
 _Avoid_: Rolling-window reset, partial recovery reset
 
 **Initial Plan Evaluation**:
@@ -97,8 +98,9 @@ tiers after a Drawdown Add Plan is created.
 _Avoid_: Silent baseline, historical replay, command-time trigger
 
 **Drawdown Pre-Alert**:
-A provisional reminder that a realtime Reference ETF price has reached an open
-Drawdown Tier without making the tier officially due.
+A provisional reminder that a realtime Reference ETF price has reached an
+actionable Drawdown Tier, whether newly reached or previously confirmed but
+still pending, without making a new market fact officially due.
 _Avoid_: Confirmed trigger, official alert
 
 **Fallback Pre-Alert**:
@@ -111,13 +113,31 @@ A Drawdown Tier becoming due from confirmed closing data in its Drawdown Cycle.
 _Avoid_: Intraday crossing, pre-alert
 
 **Tier Record**:
-The durable statement that one Drawdown Tier must not be offered again within
-its Drawdown Cycle.
+The durable market fact that one Drawdown Tier was confirmed by a close (or was
+temporarily recorded from a user's manual-add statement). It is not proof that
+the user bought and is not itself the user's reminder preference.
 _Avoid_: Notification message, broker execution, cumulative tier
 
+**Pending Drawdown Tier**:
+A tier whose market condition has been confirmed in the active Drawdown Cycle,
+but for which no Manual Add Confirmation or cycle skip exists. It is actionable
+again on a later market date whenever the current drawdown still reaches it.
+_Avoid_: New market crossing, completed purchase
+
+**Tier Snooze**:
+The user's choice to suppress a pending tier for one market date only. The
+market fact remains stored and the snooze expires automatically on the next
+market date.
+_Avoid_: Tier skip, added state, deleted trigger
+
+**Tier Skip**:
+The user's choice to suppress one tier for the remainder of the active Drawdown
+Cycle without claiming that an investment occurred. A new cycle reopens it.
+_Avoid_: Manual addition, deleted market fact
+
 **Aggregated Drawdown Reminder**:
-One Investment Reminder containing all newly reached open Drawdown Tiers and the
-sum of only their incremental amounts.
+One Investment Reminder containing all currently actionable newly reached and
+pending Drawdown Tiers and the sum of their incremental amounts.
 _Avoid_: One reminder per tier, completed investment total
 
 **Manual Add Confirmation**:

@@ -41,9 +41,10 @@ Normal operation is:
 3. If the user subscribed, they record exactly which tiers they used. The bot
    asks for confirmation and, when necessary, which side of the `15:00` cutoff
    the real submission occurred.
-4. At `17:10`, confirmed ETF closing data makes any remaining reached tiers
-   officially due. Tiers already recorded from the user's pre-close action do
-   not repeat.
+4. At `17:10`, confirmed ETF closing data records every newly reached market
+   tier. A tier that was already confirmed but not added remains **pending** and
+   can appear in a later reminder while the drawdown is still below its level;
+   a tier the user marked added or skipped is not offered again in that cycle.
 5. At `08:30` on later calendar mornings, the bot waits for the exact dated
    feeder-fund unit NAV. It quietly applies routine DCA estimates, sends one
    completion notice for a manual drawdown addition, and evaluates any enabled
@@ -169,30 +170,32 @@ Reference ETF's normalized forward-adjusted (`qfq`) closing prices; there is no
 configurable price field.
 
 Each amount belongs only to its tier; it does not include amounts from earlier
-tiers. If one evaluation reaches several open tiers, the bot records each tier
-separately but sends one reminder containing only their incremental amounts and
-their sum. A recorded tier means its condition was confirmed or the user marked
-it added, not that the bot completed a purchase.
+tiers. Market facts and user actions are separate: a `close_confirmed` Tier
+Record means only that the ETF closed through the level, while `Manual Add
+Confirmation` means that you say you actually subscribed. A confirmed but
+unadded tier is **pending** and may be reminded again; it is not silently
+treated as purchased.
 
 Example using `15:5000,20:10000,25:15000,30:20000`:
 
 ```text
 Day 1: drawdown reaches -15%
 New amount: -15% = ¥5,000
+If you do not add it, -15% becomes pending.
 
 Day 2: drawdown falls directly to -30%
-New amounts: -20% + -25% + -30%
-Total: ¥10,000 + ¥15,000 + ¥20,000 = ¥45,000
-The recorded -15% tier is not counted again.
+Actionable amounts: pending -15% + new -20% + -25% + -30%
+Total: ¥5,000 + ¥10,000 + ¥15,000 + ¥20,000 = ¥50,000
+If -15% was already added or skipped, only the three new tiers total ¥45,000.
 
 Day 3: drawdown recovers to -20%
-New amount: none
-Recovery does not reopen or newly cross a drawdown tier.
+The pending -15% tier is not actionable while the market is above -15%.
+If it later falls below -15% in the same cycle, it becomes actionable again.
 ```
 
-If ¥45,000 would be too much for one gap event, configure smaller incremental
-amounts per tier. The evaluator does not silently cap, spread, or reinterpret the
-user's plan.
+If the total actionable amount would be too much for one gap event, configure
+smaller incremental amounts per tier. The evaluator does not silently cap, spread,
+or reinterpret the user's plan.
 
 ### Cycle behavior
 
@@ -200,7 +203,9 @@ The first scheduled evaluation finds the highest valid Reference ETF close in
 the inclusive calendar window ending on the latest confirmed close. A 365-day
 window therefore contains that date plus the preceding 364 calendar dates. It
 locks the most recent equal high as the Recent Peak for the Drawdown Cycle, and
-each tier may be recorded once in that cycle.
+each tier's market fact is recorded once in that cycle. Pending user reminders
+are separate and can repeat on later market dates until the user adds, skips, or
+a new cycle begins.
 
 The peak does not expire or fall simply because 365 days pass. A new cycle begins
 when a confirmed close exceeds the locked peak, or first returns to the peak
@@ -221,10 +226,10 @@ normally.
 
 ### Before and after close
 
-Before close, the bot sends a provisional Drawdown Pre-Alert only when the
-realtime price actually reaches an unconfirmed tier. It aggregates crossed tiers,
-sends at most once per plan per trading date, and does not consume the confirmed
-tier.
+Before close, the bot sends a provisional Drawdown Pre-Alert when the realtime
+price reaches any actionable tier: a newly reached tier or a previously
+confirmed-but-pending tier. It aggregates them, sends at most once per plan per
+trading date, and does not consume a confirmed market fact.
 
 The Drawdown Add Plan reuses the existing single before-close scheduler time,
 `14:50` Asia/Shanghai. That quote is closer to the close than an earlier check,
@@ -492,8 +497,9 @@ SQLite, so it does not refresh paid market data on every view. Use
 consume provider quota.
 
 If the latest confirmed close is already beyond an unrecorded tier, `/plans`
-shows **Reached, awaiting official close confirmation**. This is read-only: a
-realtime before-close quote never consumes the official tier.
+shows **Reached, awaiting official close confirmation**. It also shows
+confirmed-but-unadded tiers as **pending**. This is read-only: `/plans` and
+`/check` never consume the official tier or claim that a purchase occurred.
 
 If a known feeder fund has no position-linked Price-Gain rule, Telegram shows:
 
@@ -522,9 +528,9 @@ platform baseline.
 
 `/check` shows detailed plan measurements, current-cycle tier status, and the next
 tier. Drawdown Add Plan status is read-only: running `/check` never confirms a new
-plan tier. It distinguishes **not reached**, **reminded but no add recorded**, and
-**add recorded**; a check mark never implies that the Bot or platform completed a
-purchase. Existing legacy rule behavior remains unchanged.
+plan tier. It distinguishes **untriggered**, **triggered pending**, **added**, and
+**skipped for this cycle**; a check mark never implies that the Bot or platform
+completed a purchase. Existing legacy rule behavior remains unchanged.
 
 ## Low-maintenance DCA position tracking
 
