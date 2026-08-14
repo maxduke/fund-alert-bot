@@ -62,5 +62,5 @@ def _encode_header_value(value: str) -> str:
     try:
         value.encode("ascii")
     except UnicodeEncodeError:
-        return Header(value, "utf-8").encode()
+        return Header(value, "utf-8").encode(maxlinelen=0)
     return value
