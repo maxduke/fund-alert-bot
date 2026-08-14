@@ -616,6 +616,7 @@ def build_drawdown_plan_alert(
         "payload": {
             "phase": "after_close",
             "rule_id": rule_id,
+            "cycle_id": cycle_id,
             "reference_symbol": reference_symbol,
             "investment_fund_symbol": config.investment_fund_symbol,
             "data_date": evaluation.latest_date.isoformat(),
