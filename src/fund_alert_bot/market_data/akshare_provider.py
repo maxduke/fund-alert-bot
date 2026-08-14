@@ -354,7 +354,7 @@ class AkshareMarketDataProvider(MarketDataProvider):
             "close": quote.price,
             "volume": quote.volume,
             "amount": quote.amount,
-            "source": "akshare_realtime",
+            "source": f"{quote.source}_realtime",
         }
 
     def _get_eastmoney_etf_quote(self, instrument: Instrument) -> RealtimeQuote:

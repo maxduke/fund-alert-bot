@@ -422,7 +422,7 @@ def test_latest_uses_one_bounded_quote_for_index_and_stock(
 
     assert latest is not None
     assert latest["close"] == 1.25
-    assert latest["source"] == "akshare_realtime"
+    assert latest["source"] == "eastmoney_realtime"
     assert len(calls) == 1
     assert fake_ak.calls == []
 
