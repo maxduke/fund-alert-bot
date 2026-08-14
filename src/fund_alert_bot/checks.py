@@ -47,6 +47,7 @@ from fund_alert_bot.market_data import (
     Instrument,
     MarketCalendar,
     MarketCalendarUnavailableError,
+    MarketDataFetchError,
     MarketDataProvider,
     MarketDataProviderError,
     PriceBasis,
@@ -623,20 +624,34 @@ def evaluate_drawdown_plan_prealerts(
                     market_date=market_date,
                     recorded_tier_keys=recorded_tier_keys,
                 )
-            except ValueError:
+            except ValueError as eastmoney_validation_error:
                 if quote.source != "eastmoney":
                     raise
-                quote = market_data_provider.get_sina_etf_realtime_quote(
-                    Instrument(reference_symbol, name, AssetType.CN_ETF)
-                )
-                realtime = evaluate_drawdown_plan_realtime(
-                    confirmed,
-                    config,
-                    quote,
-                    reference_symbol=reference_symbol,
-                    market_date=market_date,
-                    recorded_tier_keys=recorded_tier_keys,
-                )
+                try:
+                    quote = market_data_provider.get_sina_etf_realtime_quote(
+                        Instrument(reference_symbol, name, AssetType.CN_ETF)
+                    )
+                except MarketDataProviderError as sina_fetch_error:
+                    raise MarketDataFetchError(
+                        "Eastmoney realtime quote rejected "
+                        f"({eastmoney_validation_error}); Sina fallback unavailable "
+                        f"({sina_fetch_error})."
+                    ) from sina_fetch_error
+                try:
+                    realtime = evaluate_drawdown_plan_realtime(
+                        confirmed,
+                        config,
+                        quote,
+                        reference_symbol=reference_symbol,
+                        market_date=market_date,
+                        recorded_tier_keys=recorded_tier_keys,
+                    )
+                except ValueError as sina_validation_error:
+                    raise MarketDataFetchError(
+                        "Eastmoney realtime quote rejected "
+                        f"({eastmoney_validation_error}); Sina fallback quote "
+                        f"rejected ({sina_validation_error})."
+                    ) from sina_validation_error
             if active_cycle is None:
                 raise sqlite3.IntegrityError("Drawdown plan cycle was not initialized.")
             cycle_id = active_cycle.cycle_id
