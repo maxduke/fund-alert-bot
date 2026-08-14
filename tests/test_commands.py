@@ -428,7 +428,10 @@ def test_check_prevents_duplicate_alert_notifications() -> None:
     assert len(first_result.notifications) == 1
     assert len(second_result.notifications) == 0
     assert event_count == 1
+    # The fixture is intentionally shorter than the requested 365-day range;
+    # the persistent cache must re-fetch rather than treat it as complete.
     assert [call[0].asset_type for call in provider.calls] == [
+        AssetType.CN_INDEX,
         AssetType.CN_INDEX,
     ]
 

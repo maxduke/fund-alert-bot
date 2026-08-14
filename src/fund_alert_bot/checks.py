@@ -957,6 +957,8 @@ def read_drawdown_plan_statuses(
                 end_date=check_date,
                 require_end_date=False,
                 force_refresh=force_refresh,
+                persist_end_date=check_date - timedelta(days=1),
+                return_fetched_if_persisted=True,
             )
             latest_date = _latest_history_date(history)
             if latest_date is None:
@@ -1117,6 +1119,7 @@ def _load_drawdown_plan_state(
 
 
 _HISTORY_OVERLAP_DAYS = 5
+_HISTORY_COVERAGE_BUFFER_DAYS = 14
 
 
 def _history_frame_from_rows(
@@ -1161,6 +1164,24 @@ def _history_frame_from_rows(
     return frame
 
 
+def _history_from_start(
+    history: pd.DataFrame | None,
+    start_date: date,
+) -> pd.DataFrame | None:
+    if history is None:
+        return None
+    filtered = history.loc[history["date"] >= pd.Timestamp(start_date)].copy()
+    filtered.attrs = history.attrs.copy()
+    return None if filtered.empty else filtered.reset_index(drop=True)
+
+
+def _earliest_history_date(history: pd.DataFrame | None) -> date | None:
+    if history is None or history.empty or "date" not in history.columns:
+        return None
+    dates = pd.to_datetime(history["date"], errors="coerce").dropna()
+    return None if dates.empty else dates.min().date()
+
+
 def _persist_history(
     connection: Any,
     history: pd.DataFrame,
@@ -1197,36 +1218,47 @@ def _history_with_persistent_cache(
     force_refresh: bool = False,
     cache_end_date: date | None = None,
     persist_end_date: date | None = None,
+    return_fetched_if_persisted: bool = False,
 ) -> pd.DataFrame:
     """Read confirmed history from SQLite and fetch only missing ranges."""
 
     symbol = str(instrument.symbol)
     asset_type = AssetType(instrument.asset_type)
     storage_end_date = cache_end_date or end_date
-    cached = _history_frame_from_rows(
+    storage_start_date = start_date - timedelta(days=_HISTORY_COVERAGE_BUFFER_DAYS)
+    cached_coverage = _history_frame_from_rows(
         load_market_history(
             connection,
             symbol=symbol,
             asset_type=asset_type.value,
             price_basis=price_basis.value,
-            start_date=start_date,
+            start_date=storage_start_date,
             end_date=storage_end_date,
         ),
         symbol=symbol,
         asset_type=asset_type,
         price_basis=price_basis,
     )
+    cached = _history_from_start(cached_coverage, start_date)
+    earliest = _earliest_history_date(cached_coverage)
     latest = None if cached is None else _latest_history_date(cached)
     covered = (
-        cached is not None
+        cached_coverage is not None
+        and cached is not None
         and not cached.empty
+        and earliest is not None
+        and earliest <= start_date
         and (not require_end_date or (latest is not None and latest >= end_date))
     )
     if covered and not force_refresh:
         return cached
 
     fetch_start = start_date
-    if latest is not None and latest >= start_date:
+    if (
+        price_basis is not PriceBasis.QFQ
+        and latest is not None
+        and latest >= start_date
+    ):
         fetch_start = max(
             start_date,
             latest - timedelta(days=_HISTORY_OVERLAP_DAYS),
@@ -1256,17 +1288,21 @@ def _history_with_persistent_cache(
             symbol=symbol,
             asset_type=asset_type.value,
             price_basis=price_basis.value,
-            start_date=start_date,
+            start_date=storage_start_date,
             end_date=storage_end_date,
         ),
         symbol=symbol,
         asset_type=asset_type,
         price_basis=price_basis,
     )
+    merged = _history_from_start(merged, start_date)
     if merged is None and persist_end_date is not None:
-        raise EmptyMarketDataError(
-            f"No confirmed history available for {instrument.symbol}."
-        )
+        if not return_fetched_if_persisted:
+            raise EmptyMarketDataError(
+                f"No confirmed history available for {instrument.symbol}."
+            )
+    if return_fetched_if_persisted and persist_end_date is not None:
+        return fetched_history
     return fetched_history if merged is None else merged
 
 
@@ -1311,6 +1347,8 @@ def _fetch_drawdown_plan_history(
     end_date: date,
     require_end_date: bool = True,
     force_refresh: bool = False,
+    persist_end_date: date | None = None,
+    return_fetched_if_persisted: bool = False,
 ) -> pd.DataFrame:
     config, active_cycle, _recorded = _load_drawdown_plan_state(connection, rule)
     instrument = Instrument(
@@ -1331,6 +1369,8 @@ def _fetch_drawdown_plan_history(
         price_basis=PriceBasis.QFQ,
         require_end_date=require_end_date,
         force_refresh=force_refresh,
+        persist_end_date=persist_end_date,
+        return_fetched_if_persisted=return_fetched_if_persisted,
     )
 
 

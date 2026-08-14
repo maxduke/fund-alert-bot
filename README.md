@@ -267,7 +267,9 @@ operation once. `AKSHARE_RETRIES` remains the retry budget for other data
 sources. History, realtime quotes, and feeder-NAV data also use short
 in-process caches. Confirmed normalized ETF history and exact feeder-fund NAVs
 are additionally stored in SQLite. After the first backfill, the after-close
-job requests only a small overlapping range, while `/plans` reads local rows.
+job refreshes the full required QFQ history window (unadjusted history uses a
+small overlap), while `/plans` reads local rows. A status refresh never treats
+the current session as a confirmed close.
 Restart after changing these variables and verify the startup log; a proxy
 failure still fails closed rather than inventing market data.
 
