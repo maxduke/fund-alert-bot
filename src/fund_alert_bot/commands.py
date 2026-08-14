@@ -31,6 +31,7 @@ from fund_alert_bot.checks import (
     evaluate_dca_rules,
     evaluate_drawdown_rules,
     evaluate_profit_rules,
+    get_cached_or_fetch_fund_nav,
     latest_completed_open_date,
     read_drawdown_plan_statuses,
 )
@@ -1281,24 +1282,33 @@ def format_plan_overview(
             )
     for status in result.statuses:
         next_tier = _next_open_tier(status)
-        lines.extend(
-            (
-                "",
-                f"{status.name} (plan {status.rule_id}) — {status.readiness}",
-                f"ETF {status.reference_symbol} → fund "
-                f"{status.config.investment_fund_symbol}",
-                f"Drawdown: -{status.evaluation.drawdown:.1%} "
-                f"({status.evaluation.latest_date}, {status.evaluation.source})",
-                (
-                    "Next open tier: all tiers already reminded"
-                    if next_tier is None
-                    else "Next open tier: "
-                    f"-{format_plan_percent(next_tier.drawdown)} / "
-                    f"{format_plan_amount(next_tier.amount)}"
-                ),
-                *_format_position_lines(status),
+        pending_tiers = _currently_reached_unrecorded_tiers(status)
+        plan_lines = [
+            "",
+            f"{status.name} (plan {status.rule_id}) — {status.readiness}",
+            f"ETF {status.reference_symbol} → fund "
+            f"{status.config.investment_fund_symbol}",
+            f"Drawdown: -{status.evaluation.drawdown:.1%} "
+            f"({status.evaluation.latest_date}, {status.evaluation.source})",
+        ]
+        if pending_tiers:
+            plan_lines.append(
+                "⚠️ Reached, awaiting official close confirmation: "
+                + ", ".join(
+                    f"-{format_plan_percent(tier.drawdown)} / "
+                    f"{format_plan_amount(tier.amount)}"
+                    for tier in pending_tiers
+                )
             )
+        plan_lines.append(
+            "Next open tier: all tiers already reminded"
+            if next_tier is None
+            else "Next open tier: "
+            f"-{format_plan_percent(next_tier.drawdown)} / "
+            f"{format_plan_amount(next_tier.amount)}"
         )
+        plan_lines.extend(_format_position_lines(status))
+        lines.extend(plan_lines)
     for position, nav, ownership in unmatched_positions:
         units = float(position["units"])
         accuracy = "estimated" if position["is_estimated"] else "exact"
@@ -1409,6 +1419,19 @@ def _next_open_tier(status: DrawdownPlanStatus) -> Any | None:
             if tier.key not in status.recorded_tier_keys
         ),
         None,
+    )
+
+
+def _currently_reached_unrecorded_tiers(
+    status: DrawdownPlanStatus,
+) -> tuple[Any, ...]:
+    """Return crossed tiers not yet consumed by a confirmed reminder."""
+
+    return tuple(
+        tier
+        for tier in status.config.tiers
+        if tier.key not in status.recorded_tier_keys
+        and status.evaluation.drawdown + 1e-12 >= tier.drawdown
     )
 
 
@@ -2916,9 +2939,13 @@ def build_command_handlers(
         await _reply_text(update, response)
 
     async def plans(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        del context
         if await reject_if_unauthorized(update, allowed_user_ids):
             return
+        args = tuple(getattr(context, "args", ()) or ())
+        if args not in ((), ("refresh",)):
+            await _reply_text(update, "Usage: /plans [refresh]")
+            return
+        force_refresh = args == ("refresh",)
         user_id = int(update.effective_user.id)
         with open_connection(sqlite_path) as connection:
             initialize_database(connection)
@@ -2926,6 +2953,7 @@ def build_command_handlers(
                 connection,
                 market_data_provider,
                 end_date=_clock_now(clock).astimezone(timezone_info).date(),
+                force_refresh=force_refresh,
             )
             planned_funds = set(list_enabled_drawdown_plan_fund_symbols(connection))
             dca_statuses = list_enhanced_dca_statuses(connection)
@@ -2950,12 +2978,11 @@ def build_command_handlers(
                 )
                 if float(row["units"]) > 0 and not sync_required:
                     try:
-                        nav = market_data_provider.get_fund_nav(
-                            Instrument(
-                                str(row["fund_symbol"]),
-                                str(row["fund_symbol"]),
-                                AssetType.CN_OPEN_FUND,
-                            )
+                        nav = get_cached_or_fetch_fund_nav(
+                            connection,
+                            market_data_provider,
+                            str(row["fund_symbol"]),
+                            force_refresh=force_refresh,
                         )
                     except MarketDataProviderError:
                         LOGGER.warning(

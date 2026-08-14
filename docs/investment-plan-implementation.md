@@ -443,6 +443,19 @@ combining Tier Records with Manual Add Confirmations; never use a generic check
 mark that could be mistaken for execution. A realtime crossed tier is “pending
 close,” not triggered.
 
+### Persistent market-data cache
+
+Store normalized confirmed daily rows in SQLite keyed by symbol, asset type,
+price basis, and date. Store exact feeder-fund unit NAVs separately by fund and
+NAV date. Do not store raw provider payloads. The first evaluation backfills the
+required drawdown and trend range; later after-close evaluations refresh the
+full required QFQ history window (unadjusted history uses a small overlap) and
+upsert it. Before-close evaluation reads the last confirmed rows and still fetches one realtime quote per ETF. The plan-status
+portions of `/plans` and `/check` use local confirmed rows by default;
+`/plans refresh` is the explicit provider-refresh escape hatch. A cached row is never used as an
+official close unless its date matches the scheduled confirmed date, and every
+status includes the data date.
+
 For a known feeder fund without an `auto` Price-Gain rule, include a Telegram
 **Set gain thresholds** callback. It returns a command template with trusted fund
 identity and an explicit threshold placeholder; it neither supplies percentages

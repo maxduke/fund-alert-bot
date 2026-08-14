@@ -7,7 +7,7 @@ import math
 import sqlite3
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -256,6 +256,37 @@ def init_db(connection: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL,
             UNIQUE(rule_id, due_date)
         );
+
+        CREATE TABLE IF NOT EXISTS market_daily_history (
+            symbol TEXT NOT NULL,
+            asset_type TEXT NOT NULL,
+            price_basis TEXT NOT NULL,
+            date TEXT NOT NULL,
+            open REAL,
+            high REAL,
+            low REAL,
+            close REAL NOT NULL,
+            volume REAL,
+            amount REAL,
+            source TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (symbol, asset_type, price_basis, date)
+        );
+
+        CREATE INDEX IF NOT EXISTS market_daily_history_lookup
+        ON market_daily_history(symbol, asset_type, price_basis, date);
+
+        CREATE TABLE IF NOT EXISTS fund_nav_history (
+            fund_symbol TEXT NOT NULL,
+            nav_date TEXT NOT NULL,
+            unit_nav REAL NOT NULL,
+            source TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (fund_symbol, nav_date)
+        );
+
+        CREATE INDEX IF NOT EXISTS fund_nav_history_lookup
+        ON fund_nav_history(fund_symbol, nav_date);
         """
     )
     delivery_columns_added = _ensure_alert_event_delivery_columns(connection)
@@ -287,6 +318,163 @@ def init_db(connection: sqlite3.Connection) -> None:
 def initialize_database(connection: sqlite3.Connection) -> None:
     """Backward-compatible alias for database initialization."""
     init_db(connection)
+
+
+def upsert_market_history(
+    connection: sqlite3.Connection,
+    *,
+    symbol: str,
+    asset_type: str,
+    price_basis: str,
+    rows: Sequence[dict[str, Any]],
+) -> int:
+    """Persist validated normalized daily rows and return the inserted count."""
+
+    prepared: list[tuple[object, ...]] = []
+    now = _utc_now_text()
+    for row in rows:
+        try:
+            row_date = date.fromisoformat(str(row["date"])[:10]).isoformat()
+            close = float(row["close"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not math.isfinite(close) or close <= 0:
+            continue
+        values: list[float | None] = []
+        for column in ("open", "high", "low", "volume", "amount"):
+            try:
+                value = float(row[column])
+            except (KeyError, TypeError, ValueError):
+                value = None
+            values.append(value if value is not None and math.isfinite(value) else None)
+        source = str(row.get("source", "")).strip()
+        if not source:
+            continue
+        prepared.append(
+            (
+                symbol,
+                asset_type,
+                price_basis,
+                row_date,
+                *values[:3],
+                close,
+                *values[3:],
+                source,
+                now,
+            )
+        )
+    if not prepared:
+        return 0
+    connection.executemany(
+        """
+        INSERT INTO market_daily_history (
+            symbol, asset_type, price_basis, date,
+            open, high, low, close, volume, amount, source, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(symbol, asset_type, price_basis, date) DO UPDATE SET
+            open = excluded.open,
+            high = excluded.high,
+            low = excluded.low,
+            close = excluded.close,
+            volume = excluded.volume,
+            amount = excluded.amount,
+            source = excluded.source,
+            updated_at = excluded.updated_at
+        """,
+        prepared,
+    )
+    connection.commit()
+    return len(prepared)
+
+
+def load_market_history(
+    connection: sqlite3.Connection,
+    *,
+    symbol: str,
+    asset_type: str,
+    price_basis: str,
+    start_date: date,
+    end_date: date,
+) -> list[sqlite3.Row]:
+    """Load persisted normalized daily rows in ascending date order."""
+
+    return list(
+        connection.execute(
+            """
+            SELECT date, open, high, low, close, volume, amount, source
+            FROM market_daily_history
+            WHERE symbol = ? AND asset_type = ? AND price_basis = ?
+                AND date BETWEEN ? AND ?
+            ORDER BY date
+            """,
+            (
+                symbol,
+                asset_type,
+                price_basis,
+                start_date.isoformat(),
+                end_date.isoformat(),
+            ),
+        ).fetchall()
+    )
+
+
+def upsert_fund_nav(
+    connection: sqlite3.Connection,
+    *,
+    fund_symbol: str,
+    nav_date: date,
+    unit_nav: float,
+    source: str,
+) -> None:
+    """Persist one validated feeder-fund unit NAV."""
+
+    value = float(unit_nav)
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError("unit_nav must be a positive finite number.")
+    source_text = str(source).strip()
+    if not source_text:
+        raise ValueError("NAV source must not be empty.")
+    connection.execute(
+        """
+        INSERT INTO fund_nav_history (
+            fund_symbol, nav_date, unit_nav, source, updated_at
+        ) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(fund_symbol, nav_date) DO UPDATE SET
+            unit_nav = excluded.unit_nav,
+            source = excluded.source,
+            updated_at = excluded.updated_at
+        """,
+        (fund_symbol, nav_date.isoformat(), value, source_text, _utc_now_text()),
+    )
+    connection.commit()
+
+
+def get_cached_fund_nav(
+    connection: sqlite3.Connection,
+    fund_symbol: str,
+    nav_date: date | None = None,
+) -> sqlite3.Row | None:
+    """Return one cached exact-date NAV, or the latest cached NAV."""
+
+    if nav_date is None:
+        return connection.execute(
+            """
+            SELECT fund_symbol, nav_date, unit_nav, source
+            FROM fund_nav_history
+            WHERE fund_symbol = ?
+            ORDER BY nav_date DESC
+            LIMIT 1
+            """,
+            (fund_symbol,),
+        ).fetchone()
+    return connection.execute(
+        """
+        SELECT fund_symbol, nav_date, unit_nav, source
+        FROM fund_nav_history
+        WHERE fund_symbol = ? AND nav_date = ?
+        """,
+        (fund_symbol, nav_date.isoformat()),
+    ).fetchone()
 
 
 def add_rule(

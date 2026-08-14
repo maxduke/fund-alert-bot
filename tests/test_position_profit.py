@@ -261,7 +261,6 @@ def test_thresholds_are_once_per_continuous_positive_position_cycle(tmp_path) ->
         )
         assert provider.calls == [
             ("000001", date(2024, 1, 2)),
-            ("000001", date(2024, 1, 2)),
         ]
         assert len(list_retryable_position_profit_alert_events(connection)) == 2
 

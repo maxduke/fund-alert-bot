@@ -482,7 +482,15 @@ investment reminder.
 a Drawdown Add Plan, enhanced DCA rule, Position Snapshot, or Position-Linked
 Price-Gain Rule. It summarizes configured DCA, current drawdown and next tier,
 position accuracy, and Price-Gain status without detailed history. It is not an
-alias for `/list`, which continues to list raw rule configuration.
+alias for `/list`, which continues to list raw rule configuration. Plain
+`/plans` reads the persisted normalized ETF history and feeder-fund NAV from
+SQLite, so it does not refresh paid market data on every view. Use
+`/plans refresh` when a deliberate provider refresh is wanted; that command can
+consume provider quota.
+
+If the latest confirmed close is already beyond an unrecorded tier, `/plans`
+shows **Reached, awaiting official close confirmation**. This is read-only: a
+realtime before-close quote never consumes the official tier.
 
 If a known feeder fund has no position-linked Price-Gain rule, Telegram shows:
 

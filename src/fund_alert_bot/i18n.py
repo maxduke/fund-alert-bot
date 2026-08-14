@@ -110,6 +110,7 @@ _EN_TO_ZH = {
     "Drawdown:": "回撤：",
     "Next open tier: all tiers already reminded": "下一档：所有档位均已提醒",
     "Next open tier:": "下一档：",
+    "Reached, awaiting official close confirmation:": "已达到，等待收盘确认：",
     "Drawdown Add Plan status (read-only)": "回撤加仓计划状态（只读）",
     "Current:": "当前价：",
     "Peak:": "高点：",

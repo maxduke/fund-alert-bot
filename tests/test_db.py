@@ -1,5 +1,6 @@
 import json
 import sqlite3
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -14,17 +15,21 @@ from fund_alert_bot.db import (
     alert_exists,
     connect,
     delete_rule,
+    get_cached_fund_nav,
     get_fund_settings,
     get_position_snapshot,
     init_db,
     list_enabled_rules,
     list_retryable_standard_alert_events,
     list_rules,
+    load_market_history,
     open_connection,
     record_alert_notification_result,
     reserve_alert_event,
     upsert_fund_cutoff,
     upsert_fund_fee,
+    upsert_fund_nav,
+    upsert_market_history,
     upsert_position_snapshot,
 )
 
@@ -51,7 +56,59 @@ def test_init_db_creates_storage_tables(tmp_path: Path) -> None:
         "notification_channels",
         "position_snapshots",
         "rules",
+        "market_daily_history",
+        "fund_nav_history",
     }.issubset(table_names)
+
+
+def test_market_history_and_fund_nav_survive_restart(tmp_path: Path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    with open_connection(sqlite_path) as connection:
+        init_db(connection)
+        assert (
+            upsert_market_history(
+                connection,
+                symbol="159352",
+                asset_type="cn_etf",
+                price_basis="qfq",
+                rows=[
+                    {
+                        "date": "2026-08-13",
+                        "close": 1.2,
+                        "source": "akshare_eastmoney",
+                    },
+                    {
+                        "date": "2026-08-14 00:00:00",
+                        "close": 1.3,
+                        "source": "akshare_eastmoney",
+                    },
+                ],
+            )
+            == 2
+        )
+        upsert_fund_nav(
+            connection,
+            fund_symbol="022434",
+            nav_date=date(2026, 8, 13),
+            unit_nav=1.2462,
+            source="akshare_eastmoney",
+        )
+
+    with open_connection(sqlite_path) as connection:
+        init_db(connection)
+        history = load_market_history(
+            connection,
+            symbol="159352",
+            asset_type="cn_etf",
+            price_basis="qfq",
+            start_date=date(2026, 8, 13),
+            end_date=date(2026, 8, 14),
+        )
+        nav = get_cached_fund_nav(connection, "022434", date(2026, 8, 13))
+
+    assert [row["date"] for row in history] == ["2026-08-13", "2026-08-14"]
+    assert nav is not None
+    assert nav["unit_nav"] == 1.2462
 
 
 def test_fund_settings_and_position_snapshot_survive_restart(tmp_path: Path) -> None:

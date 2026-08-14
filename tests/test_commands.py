@@ -428,10 +428,46 @@ def test_check_prevents_duplicate_alert_notifications() -> None:
     assert len(first_result.notifications) == 1
     assert len(second_result.notifications) == 0
     assert event_count == 1
+    # The fixture is intentionally shorter than the requested 365-day range;
+    # the persistent cache must re-fetch rather than treat it as complete.
     assert [call[0].asset_type for call in provider.calls] == [
         AssetType.CN_INDEX,
         AssetType.CN_INDEX,
     ]
+
+
+def test_before_close_latest_quote_is_not_persisted_as_a_close() -> None:
+    connection = connect(":memory:")
+    try:
+        init_db(connection)
+        add_rule(
+            connection,
+            type=DRAW_DOWN_RULE_TYPE,
+            symbol="399006",
+            name="创业板指",
+            asset_type=AssetType.CN_INDEX.value,
+            params={"lookback_days": 365, "thresholds": [0.10]},
+        )
+        provider = FakeProvider(
+            _history(["2024-01-01", "2024-01-02"], [100.0, 90.0]),
+            latest={"date": "2024-01-02", "close": 90.0, "source": "test"},
+        )
+        evaluate_drawdown_rules(
+            connection,
+            provider,
+            today=date(2024, 1, 2),
+            include_latest=True,
+        )
+        dates = [
+            row["date"]
+            for row in connection.execute(
+                "SELECT date FROM market_daily_history ORDER BY date"
+            ).fetchall()
+        ]
+    finally:
+        connection.close()
+
+    assert dates == ["2024-01-01"]
 
 
 def test_manual_check_summary_shows_current_drawdown_percent() -> None:
@@ -1627,6 +1663,10 @@ def test_plans_and_check_show_plan_state_without_mutation(tmp_path) -> None:
     assert "/add_profit cn_open_fund 000001 A500 auto" in setup_query.edits[0]
     assert "No rule was created by this button." in setup_query.edits[0]
     assert "Next open tier: -15% / ¥5,000" in message.replies[0]
+    assert (
+        "Reached, awaiting official close confirmation: -15% / ¥5,000"
+        in (message.replies[0])
+    )
     assert "Drawdown Add Plan status (read-only)" in message.replies[1]
     assert "Read-only Drawdown Add Plans checked: 1" in message.replies[1]
     assert "No enabled drawdown_from_high" not in message.replies[1]

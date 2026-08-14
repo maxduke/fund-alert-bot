@@ -144,6 +144,78 @@ def test_read_plan_status_is_pure_and_reports_open_tiers(tmp_path: Path) -> None
     assert counts == [0, 0, 0]
 
 
+def test_read_plan_status_reuses_persisted_history_until_refresh(
+    tmp_path: Path,
+) -> None:
+    sqlite_path = tmp_path / "bot.sqlite3"
+    _add_plan(sqlite_path)
+    provider = FakePlanProvider(_history([100, 80]))
+
+    with open_connection(sqlite_path) as connection:
+        first = read_drawdown_plan_statuses(
+            connection,
+            provider,
+            end_date=date(2024, 1, 2),
+        )
+        second = read_drawdown_plan_statuses(
+            connection,
+            provider,
+            end_date=date(2024, 1, 2),
+        )
+        refreshed = read_drawdown_plan_statuses(
+            connection,
+            provider,
+            end_date=date(2024, 1, 2),
+            force_refresh=True,
+        )
+
+    assert len(first.statuses) == len(second.statuses) == len(refreshed.statuses) == 1
+    # The status path does not persist the requested session date as a
+    # confirmed close, so a short fixture without a covered prefix is fetched
+    # again until the explicit refresh. Production history normally covers the
+    # full required range and therefore reuses the cache.
+    assert len(provider.calls) == 3
+
+
+def test_cached_fund_nav_is_used_for_read_only_plan_status(tmp_path: Path) -> None:
+    sqlite_path = tmp_path / "bot.sqlite3"
+    _add_plan(sqlite_path)
+    provider = FakePlanProvider(_history([100, 80]))
+    nav_calls: list[str] = []
+
+    def get_fund_nav(instrument: Instrument, **kwargs: object) -> FundNav:
+        del kwargs
+        nav_calls.append(instrument.symbol)
+        return FundNav(instrument.symbol, date(2024, 1, 2), 2, "akshare_eastmoney")
+
+    provider.get_fund_nav = get_fund_nav  # type: ignore[method-assign]
+    with open_connection(sqlite_path) as connection:
+        upsert_fund_fee(
+            connection,
+            fund_symbol="000001",
+            fee_mode="rate",
+            fee_value=0,
+        )
+        upsert_position_snapshot(
+            connection,
+            fund_symbol="000001",
+            units=100,
+            average_unit_cost=1,
+        )
+        read_drawdown_plan_statuses(
+            connection,
+            provider,
+            end_date=date(2024, 1, 2),
+        )
+        read_drawdown_plan_statuses(
+            connection,
+            provider,
+            end_date=date(2024, 1, 2),
+        )
+
+    assert nav_calls == ["000001"]
+
+
 def test_read_plan_status_does_not_reuse_tiers_after_new_peak(tmp_path: Path) -> None:
     sqlite_path = tmp_path / "bot.sqlite3"
     _add_plan(sqlite_path)
