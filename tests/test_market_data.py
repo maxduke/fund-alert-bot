@@ -396,6 +396,7 @@ def test_get_latest_uses_the_quote_data_date_instead_of_local_today() -> None:
         (AssetType.CN_INDEX, "399006", "0.399006"),
         (AssetType.CN_STOCK, "600000", "1.600000"),
         (AssetType.CN_STOCK, "300750", "0.300750"),
+        (AssetType.CN_STOCK, "920001", "0.920001"),
     ],
 )
 def test_latest_uses_one_bounded_quote_for_index_and_stock(

@@ -695,6 +695,8 @@ def _eastmoney_market_id(asset_type: AssetType | str, symbol: str) -> int:
     if resolved is AssetType.CN_INDEX:
         return 0 if normalized.startswith("399") else 1
     if resolved is AssetType.CN_STOCK:
+        if normalized.startswith("920"):
+            return 0
         return 1 if normalized.startswith(("6", "9")) else 0
     return _eastmoney_etf_market_id(normalized)
 
