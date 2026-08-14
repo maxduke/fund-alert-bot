@@ -122,6 +122,29 @@ work around it with world-writable permissions.
 
 Keep `.env` on the VPS only. Do not commit real secrets.
 
+### Optional paid Eastmoney proxy
+
+Leave the proxy disabled unless you have a valid paid token. If Eastmoney rate
+limits the bot, add these values to the VPS `.env` and restart:
+
+```dotenv
+AKSHARE_PROXY_ENABLED=true
+AKSHARE_PROXY_AUTH_TOKEN=your-paid-token
+AKSHARE_PROXY_RETRY=1
+AKSHARE_HISTORY_CACHE_TTL_SECONDS=300
+```
+
+The container already includes the pinned
+[`akshare-proxy-patch==0.5.0`](https://github.com/HelloYie/akshare-proxy-patch);
+no runtime `pip install` is needed. The bot hooks only its Eastmoney domains and
+keeps the patch's concurrent `fast` mode off. A low retry count and the bot's
+short in-process caches are intentional cost controls. With the proxy enabled,
+the patch owns retries for paid Eastmoney requests and the provider calls each
+Eastmoney operation once; other data sources keep their normal retry budget. Do not
+put the token in Compose files, shell history, logs, or Git. If the proxy and fallback sources
+are unavailable, the bot sends a data-unavailable notice and does not consume a
+drawdown tier or fabricate a price.
+
 ## 4. Log In To GHCR If Needed
 
 If `ghcr.io/maxduke/fund-alert-bot:latest` is private, log in with a GitHub

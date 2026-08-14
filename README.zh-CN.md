@@ -239,6 +239,33 @@ Bot 启动时会注册命令菜单；在 Telegram 输入 `/` 即可看到可用�
 - `NTFY_ENABLED`、`NTFY_SERVER_URL`、`NTFY_TOPIC`
 - `WEBHOOK_ENABLED`、`WEBHOOK_URL`
 
+### 可选的付费东方财富代理
+
+东方财富接口可能严格限流。镜像已固定包含
+[`akshare-proxy-patch==0.5.0`](https://github.com/HelloYie/akshare-proxy-patch)，
+但默认关闭。只有购买代理服务并拿到 Token
+后才启用：
+
+```dotenv
+AKSHARE_PROXY_ENABLED=true
+AKSHARE_PROXY_AUTH_TOKEN=替换为你的代理Token
+AKSHARE_PROXY_RETRY=1
+AKSHARE_HISTORY_CACHE_TTL_SECONDS=300
+```
+
+Bot 启动时会在第一次延迟导入 AKShare 前安装补丁。补丁只拦截本 Bot 使用的
+东方财富域名；新浪备用行情和雪球基金类型检查仍直接请求。为避免放大付费
+请求，补丁的并发 `fast` 分页始终关闭。请保持重试次数较低，绝不要把 Token
+提交到 Git 或写入日志。启用后，付费东方财富请求只由代理补丁负责重试；Bot 对每个
+东方财富 AKShare 操作只调用一次，避免两层重试相乘。
+新浪、雪球等其他数据源仍使用普通的 `AKSHARE_RETRIES`。历史数据、实时行情和联接基金净值都使用短时进程内
+缓存，相同或更窄的历史请求会复用结果，不建立可能长期过期的磁盘缓存。修改配置后要重启，
+并查看启动日志；代理或数据源失败时 Bot 会安全跳过，不会猜测行情。
+
+补丁的可选 `fast` 模式会并发请求通用的资金流/排行分页接口；本 Bot 使用的 ETF、
+指数、股票和联接基金净值接口不需要这种分页，因此默认关闭。打开它可能增加并发
+付费请求，却不会改善提醒任务。
+
 ## 技术栈
 
 - Python 3.12

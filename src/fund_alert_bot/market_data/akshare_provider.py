@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import re
 import time
@@ -32,6 +33,7 @@ _EASTMONEY_QUOTE_URL = "https://push2.eastmoney.com/api/qt/stock/get"
 _SINA_QUOTE_URL = "https://hq.sinajs.cn/list={symbol}"
 _REALTIME_HTTP_TIMEOUT_SECONDS = 8
 _CN_TIMEZONE = ZoneInfo("Asia/Shanghai")
+LOGGER = logging.getLogger(__name__)
 
 
 class AkshareMarketDataProvider(MarketDataProvider):
@@ -44,6 +46,8 @@ class AkshareMarketDataProvider(MarketDataProvider):
         retries: int = 3,
         retry_delay_seconds: float = 0.5,
         latest_lookback_days: int = 45,
+        history_cache_ttl_seconds: float = 300.0,
+        eastmoney_retries: int | None = None,
         realtime_spot_ttl_seconds: float = 30.0,
         fund_nav_cache_ttl_seconds: float = 300.0,
         eastmoney_failure_ttl_seconds: float = 30.0,
@@ -55,6 +59,13 @@ class AkshareMarketDataProvider(MarketDataProvider):
             raise ValueError("retries must be at least 1")
         if latest_lookback_days < 1:
             raise ValueError("latest_lookback_days must be at least 1")
+        if eastmoney_retries is not None and eastmoney_retries < 1:
+            raise ValueError("eastmoney_retries must be at least 1")
+        if (
+            not math.isfinite(history_cache_ttl_seconds)
+            or history_cache_ttl_seconds < 0
+        ):
+            raise ValueError("history_cache_ttl_seconds must be non-negative")
         if (
             not math.isfinite(realtime_spot_ttl_seconds)
             or realtime_spot_ttl_seconds < 0
@@ -73,8 +84,12 @@ class AkshareMarketDataProvider(MarketDataProvider):
 
         self._ak_module = ak_module
         self._retries = retries
+        self._eastmoney_retries = (
+            retries if eastmoney_retries is None else eastmoney_retries
+        )
         self._retry_delay_seconds = retry_delay_seconds
         self._latest_lookback_days = latest_lookback_days
+        self._history_cache_ttl_seconds = history_cache_ttl_seconds
         self._realtime_spot_ttl_seconds = realtime_spot_ttl_seconds
         self._fund_nav_cache_ttl_seconds = fund_nav_cache_ttl_seconds
         self._eastmoney_failure_ttl_seconds = eastmoney_failure_ttl_seconds
@@ -83,6 +98,9 @@ class AkshareMarketDataProvider(MarketDataProvider):
         self._http_get = http_get or requests.get
         self._realtime_spot_cache: dict[
             AssetType, tuple[float, datetime, pd.DataFrame]
+        ] = {}
+        self._history_cache: dict[
+            tuple[str, str, str, str, str], tuple[float, pd.DataFrame]
         ] = {}
         self._etf_quote_cache: dict[tuple[str, str], tuple[float, RealtimeQuote]] = {}
         self._fund_nav_cache: dict[str, tuple[float, pd.DataFrame | None]] = {}
@@ -101,6 +119,18 @@ class AkshareMarketDataProvider(MarketDataProvider):
 
         asset_type = self._resolve_asset_type(instrument.asset_type)
         basis = self._resolve_price_basis(price_basis)
+        cache_key = (
+            _strip_exchange_prefix(instrument.symbol),
+            asset_type.value,
+            _format_akshare_date(start_date),
+            _format_akshare_date(end_date),
+            basis.value,
+        )
+        cached = self._read_history_cache(cache_key)
+        if cached is not None:
+            LOGGER.debug("AKShare history cache hit key=%s", cache_key)
+            return cached
+
         raw_data, source = self._fetch_raw_history(
             instrument,
             asset_type,
@@ -125,7 +155,55 @@ class AkshareMarketDataProvider(MarketDataProvider):
                 "frequency": "daily",
             }
         )
+        self._write_history_cache(cache_key, result)
         return result
+
+    def _read_history_cache(
+        self,
+        cache_key: tuple[str, str, str, str, str],
+    ) -> pd.DataFrame | None:
+        if self._history_cache_ttl_seconds <= 0:
+            return None
+        cached = self._history_cache.get(cache_key)
+        if cached is not None:
+            cached_at, history = cached
+            if time.monotonic() - cached_at <= self._history_cache_ttl_seconds:
+                return history.copy(deep=True)
+            self._history_cache.pop(cache_key, None)
+
+        # A wider request already fetched for the same instrument and basis can
+        # satisfy a narrower request without another paid provider call.
+        for candidate_key, (cached_at, history) in tuple(self._history_cache.items()):
+            if (
+                candidate_key[0] != cache_key[0]
+                or candidate_key[1] != cache_key[1]
+                or candidate_key[4] != cache_key[4]
+            ):
+                continue
+            if time.monotonic() - cached_at > self._history_cache_ttl_seconds:
+                self._history_cache.pop(candidate_key, None)
+                continue
+            if candidate_key[2] > cache_key[2] or candidate_key[3] < cache_key[3]:
+                continue
+            start = pd.Timestamp(cache_key[2])
+            end = pd.Timestamp(cache_key[3])
+            narrowed = history.loc[
+                (history["date"] >= start) & (history["date"] <= end)
+            ]
+            if not narrowed.empty:
+                return narrowed.reset_index(drop=True).copy(deep=True)
+        return None
+
+    def _write_history_cache(
+        self,
+        cache_key: tuple[str, str, str, str, str],
+        history: pd.DataFrame,
+    ) -> None:
+        if self._history_cache_ttl_seconds > 0:
+            self._history_cache[cache_key] = (
+                time.monotonic(),
+                history.copy(deep=True),
+            )
 
     def get_etf_realtime_quote(self, instrument: Instrument) -> RealtimeQuote:
         """Return one bounded per-symbol ETF quote with a Sina fallback."""
@@ -543,21 +621,24 @@ class AkshareMarketDataProvider(MarketDataProvider):
     def _call_with_retry(
         self,
         func: Callable[..., pd.DataFrame],
+        *,
+        attempts: int | None = None,
         **kwargs: object,
     ) -> pd.DataFrame:
         last_error: Exception | None = None
-        for attempt in range(1, self._retries + 1):
+        retry_count = self._retries if attempts is None else attempts
+        for attempt in range(1, retry_count + 1):
             try:
                 return func(**kwargs)
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
-                if attempt == self._retries:
+                if attempt == retry_count:
                     break
                 if self._retry_delay_seconds > 0:
                     time.sleep(self._retry_delay_seconds)
 
         raise MarketDataFetchError(
-            f"AKShare call failed after {self._retries} attempts."
+            f"AKShare call failed after {retry_count} attempts."
         ) from last_error
 
     def _call_eastmoney_with_retry(
@@ -567,7 +648,11 @@ class AkshareMarketDataProvider(MarketDataProvider):
     ) -> pd.DataFrame:
         self._raise_if_source_cooling_down("Eastmoney", self._eastmoney_failed_at)
         try:
-            result = self._call_with_retry(func, **kwargs)
+            result = self._call_with_retry(
+                func,
+                attempts=self._eastmoney_retries,
+                **kwargs,
+            )
         except MarketDataFetchError:
             if self._eastmoney_failure_ttl_seconds > 0:
                 self._eastmoney_failed_at = time.monotonic()

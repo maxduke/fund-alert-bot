@@ -14,7 +14,9 @@ from fund_alert_bot.commands import (
 )
 from fund_alert_bot.config import (
     DEFAULT_AFTER_CLOSE_CHECK_TIME,
+    DEFAULT_AKSHARE_HISTORY_CACHE_TTL_SECONDS,
     DEFAULT_AKSHARE_LATEST_LOOKBACK_DAYS,
+    DEFAULT_AKSHARE_PROXY_RETRY,
     DEFAULT_AKSHARE_RETRIES,
     DEFAULT_AKSHARE_RETRY_DELAY_SECONDS,
     DEFAULT_BOT_LANGUAGE,
@@ -137,6 +139,35 @@ def test_akshare_settings_use_defaults(monkeypatch) -> None:
     assert settings.akshare_retries == DEFAULT_AKSHARE_RETRIES
     assert settings.akshare_retry_delay_seconds == DEFAULT_AKSHARE_RETRY_DELAY_SECONDS
     assert settings.akshare_latest_lookback_days == DEFAULT_AKSHARE_LATEST_LOOKBACK_DAYS
+    assert (
+        settings.akshare_history_cache_ttl_seconds
+        == DEFAULT_AKSHARE_HISTORY_CACHE_TTL_SECONDS
+    )
+    assert not settings.akshare_proxy_enabled
+    assert settings.akshare_proxy_auth_token == ""
+    assert settings.akshare_proxy_retry == DEFAULT_AKSHARE_PROXY_RETRY
+
+
+def test_akshare_proxy_settings_require_token_when_enabled(monkeypatch) -> None:
+    monkeypatch.setenv("AKSHARE_PROXY_ENABLED", "true")
+    monkeypatch.delenv("AKSHARE_PROXY_AUTH_TOKEN", raising=False)
+
+    with pytest.raises(ValueError, match="AKSHARE_PROXY_AUTH_TOKEN is required"):
+        load_settings(load_env_file=False)
+
+
+def test_akshare_proxy_settings_from_environment(monkeypatch) -> None:
+    monkeypatch.setenv("AKSHARE_PROXY_ENABLED", "true")
+    monkeypatch.setenv("AKSHARE_PROXY_AUTH_TOKEN", "paid-token")
+    monkeypatch.setenv("AKSHARE_PROXY_RETRY", "2")
+    monkeypatch.setenv("AKSHARE_HISTORY_CACHE_TTL_SECONDS", "900")
+
+    settings = load_settings(load_env_file=False)
+
+    assert settings.akshare_proxy_enabled
+    assert settings.akshare_proxy_auth_token == "paid-token"
+    assert settings.akshare_proxy_retry == 2
+    assert settings.akshare_history_cache_ttl_seconds == 900
 
 
 def test_parse_bool_env_accepts_common_values() -> None:
