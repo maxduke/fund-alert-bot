@@ -696,6 +696,30 @@ def evaluate_drawdown_plan_prealerts(
             if active_cycle is None:
                 raise sqlite3.IntegrityError("Drawdown plan cycle was not initialized.")
             cycle_id = active_cycle.cycle_id
+            added_tier_keys, skipped_tier_keys, snoozed_tier_keys = (
+                _drawdown_reminder_key_sets(
+                    connection,
+                    cycle_id,
+                    market_date=market_date,
+                )
+            )
+            actionable_tiers = select_actionable_tiers(
+                config=config,
+                current_drawdown=realtime.drawdown,
+                added_tier_keys=added_tier_keys,
+                skipped_tier_keys=skipped_tier_keys,
+                snoozed_tier_keys=snoozed_tier_keys,
+            )
+            actionable_keys = {tier.key for tier in actionable_tiers}
+            newly_realtime_tiers = tuple(
+                tier
+                for tier in realtime.newly_crossed_tiers
+                if tier.key in actionable_keys
+            )
+            newly_keys = {tier.key for tier in newly_realtime_tiers}
+            pending_tiers = tuple(
+                tier for tier in actionable_tiers if tier.key not in newly_keys
+            )
             alert = build_drawdown_plan_pre_alert(
                 rule_id=rule_id,
                 cycle_id=cycle_id,
@@ -705,6 +729,8 @@ def evaluate_drawdown_plan_prealerts(
                 config=config,
                 evaluation=realtime,
                 quote=quote,
+                actionable_tiers=actionable_tiers,
+                pending_tiers=pending_tiers,
             )
             if alert is None:
                 continue
@@ -721,7 +747,7 @@ def evaluate_drawdown_plan_prealerts(
                 "evaluation_date=%s "
                 "latest_price=%s peak_price=%s drawdown=%s "
                 "newly_crossed_tiers=%s sma=%s distance_to_sma=%s sma_slope=%s "
-                "alert_reserved=true",
+                "actionable_tiers=%s alert_reserved=true",
                 rule_id,
                 cycle_id,
                 reference_symbol,
@@ -729,7 +755,8 @@ def evaluate_drawdown_plan_prealerts(
                 realtime.latest_price,
                 realtime.peak_price,
                 realtime.drawdown,
-                [tier.key for tier in realtime.newly_crossed_tiers],
+                [tier.key for tier in newly_realtime_tiers],
+                [tier.key for tier in actionable_tiers],
                 realtime.sma,
                 realtime.distance_to_sma,
                 realtime.sma_slope,
@@ -742,7 +769,7 @@ def evaluate_drawdown_plan_prealerts(
                     telegram_actions=_drawdown_plan_action_rows(
                         rule_id,
                         event_id,
-                        realtime.newly_crossed_tiers,
+                        actionable_tiers,
                     ),
                 )
             )
