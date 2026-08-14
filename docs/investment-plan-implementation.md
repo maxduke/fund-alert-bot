@@ -303,9 +303,11 @@ For every plan's `cn_etf` Reference ETF:
 5. Select all actionable tiers into at most one pre-alert per plan and trading
    date, separating newly reached realtime tiers from previously confirmed
    pending tiers. Do not mutate confirmed Tier Records.
-6. Include Telegram actions for all tiers, partial selection, and no action,
-   plus the exact `/mark_added <plan_id> <tier_percentages>` fallback and a
-   prominent warning that this records only a completed user action.
+6. Include the three Telegram actions **Added**, **Defer for today**, and
+   **Skip for this cycle**. Added supports all or partial tier selection; Skip
+   supports all or partial selection with confirmation. Include the exact
+   `/mark_added <plan_id> <tier_percentages>` fallback and a prominent warning
+   that it records only a completed user action.
 7. Do not insert Tier Records automatically; the only allowed state mutation is
    initialization of a missing cycle from confirmed history.
 
@@ -333,7 +335,8 @@ Manual Add Estimate for the selected tiers. The estimate snapshots their gross
 total, shared Fund Subscription Fee, and action timestamp for later dated-NAV
 processing. Unique cycle-and-tier action identity makes commands, repeated
 callbacks, and restart idempotent. The handler does not place or verify an
-order. Selecting no action creates no Tier Record or position estimate.
+The Defer and Skip actions never create a position estimate or claim that an
+order occurred; they only persist the selected reminder preference.
 
 Create the Manual Add Estimate only for a `READY` plan. For `SETUP_REQUIRED`,
 render a distinct record-without-estimate action and confirmation. It inserts the

@@ -245,19 +245,18 @@ Telegram pre-alerts and confirmed reminders include inline buttons. A typical
 multi-tier message shows:
 
 ```text
-[✅ 已按全部档位加仓 ¥30,000]
-[📝 只记录部分档位]
-[⏭ 暂未加仓]
+[✅ 已加仓]
+[⏰ 今天不投，之后提醒]
+[⏭ 本周期跳过]
 ```
 
-The first two choices show the selected tiers and amount once more, then require
-confirmation that the actual gross subscription exactly equals the displayed
-configured total. If it does, the user chooses **Record and estimate**. If the
-amount differs, **Record tiers; sync position later** consumes only the selected
-tiers, creates no estimate, and leaves a persistent Position Sync requirement.
-Partial selection never silently includes an unselected tier. A confirmed action
-edits the original Telegram message to show what was recorded, and duplicate
-callbacks return the existing result instead of applying it twice.
+`✅ 已加仓` starts the existing all-or-selected-tier manual-add confirmation;
+only tiers the user actually submitted should be selected. `⏰ 今天不投，之后提醒`
+stores a one-market-date snooze without recording an addition. `⏭ 本周期跳过`
+asks for confirmation and then lets the user skip all or selected tiers for the
+current drawdown cycle. A pending tier remains eligible on later market dates
+until it is added or skipped. A confirmed action edits the original Telegram
+message to show what was recorded, and duplicate callbacks are idempotent.
 
 Buttons are the normal Telegram workflow. Bark, ntfy, webhook, and button
 failure use the command fallback printed in the same reminder:

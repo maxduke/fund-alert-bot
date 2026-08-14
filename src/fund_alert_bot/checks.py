@@ -352,6 +352,8 @@ class DrawdownPlanStatus:
     evaluation: DrawdownPlanEvaluation
     recorded_tier_keys: frozenset[str]
     added_tier_keys: frozenset[str]
+    skipped_tier_keys: frozenset[str]
+    snoozed_tier_keys: frozenset[str]
     readiness: str
     missing_setup: tuple[str, ...]
     position: Any | None
@@ -1076,6 +1078,23 @@ def read_drawdown_plan_statuses(
                     )
                 )
             )
+            skipped_tier_keys = frozenset()
+            snoozed_tier_keys = frozenset()
+            if active_cycle is not None and not evaluation.cycle_changed:
+                reminder_states = get_drawdown_tier_reminder_states(
+                    connection,
+                    active_cycle.cycle_id,
+                )
+                skipped_tier_keys = frozenset(
+                    key
+                    for key, row in reminder_states.items()
+                    if bool(row["skipped_for_cycle"])
+                )
+                snoozed_tier_keys = frozenset(
+                    key
+                    for key, row in reminder_states.items()
+                    if row["snoozed_market_date"] == check_date.isoformat()
+                )
             fund_nav = None
             if position is not None and float(position["units"]) > 0:
                 try:
@@ -1104,6 +1123,8 @@ def read_drawdown_plan_statuses(
                         () if evaluation.cycle_changed else recorded_tier_keys
                     ),
                     added_tier_keys=added_tier_keys,
+                    skipped_tier_keys=skipped_tier_keys,
+                    snoozed_tier_keys=snoozed_tier_keys,
                     readiness=readiness,
                     missing_setup=missing_setup,
                     position=position,
@@ -1152,7 +1173,7 @@ def _drawdown_plan_action_rows(
     tiers: tuple[DrawdownTier, ...],
 ) -> tuple[tuple[tuple[str, str], ...], ...]:
     rows: list[tuple[tuple[str, str], ...]] = [
-        (("✅ 已按全部档位加仓", f"drawdown_add:{rule_id}:{event_id}:all"),)
+        (("✅ 已加仓", f"drawdown_add:{rule_id}:{event_id}:all"),)
     ]
     if len(tiers) > 1:
         rows.extend(
@@ -1166,7 +1187,22 @@ def _drawdown_plan_action_rows(
             )
             for index, tier in enumerate(tiers)
         )
-    rows.append((("⏭ 暂未加仓", f"drawdown_add:{rule_id}:{event_id}:none"),))
+    rows.extend(
+        (
+            (
+                (
+                    "⏰ 今天不投，之后提醒",
+                    f"drawdown_defer:{rule_id}:{event_id}:all",
+                ),
+            ),
+            (
+                (
+                    "⏭ 本周期跳过",
+                    f"drawdown_skip:{rule_id}:{event_id}:choose",
+                ),
+            ),
+        )
+    )
     return tuple(rows)
 
 

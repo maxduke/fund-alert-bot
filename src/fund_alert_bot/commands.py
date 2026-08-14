@@ -47,6 +47,7 @@ from fund_alert_bot.db import (
     get_active_drawdown_cycle,
     get_active_position_cycle,
     get_drawdown_plan_action_event,
+    get_drawdown_tier_reminder_states,
     get_fund_settings,
     get_position_profit_event,
     get_position_snapshot,
@@ -61,7 +62,9 @@ from fund_alert_bot.db import (
     open_connection,
     reconcile_position_snapshot,
     record_manual_addition,
+    skip_drawdown_tiers_for_cycle,
     skip_scheduled_dca_occurrence,
+    snooze_drawdown_tiers_for_date,
     update_dca_rule_amount,
     upsert_fund_cutoff,
     upsert_fund_fee,
@@ -70,7 +73,7 @@ from fund_alert_bot.db import (
 from fund_alert_bot.db import (
     list_rules as db_list_rules,
 )
-from fund_alert_bot.i18n import localize_text
+from fund_alert_bot.i18n import get_language, localize_text
 from fund_alert_bot.market_data import (
     AkshareMarketDataProvider,
     AssetType,
@@ -87,8 +90,12 @@ from fund_alert_bot.notifications.dispatch import send_alert_notifications
 from fund_alert_bot.notifications.service import build_notification_service
 from fund_alert_bot.rules.dca import normalize_weekday
 from fund_alert_bot.rules.drawdown_plan import (
+    TIER_STATE_ADDED,
+    TIER_STATE_PENDING,
+    TIER_STATE_SKIPPED,
     DrawdownPlanConfig,
     DrawdownTier,
+    derive_tier_action_state,
     evaluate_drawdown_plan,
     format_plan_amount,
     format_plan_percent,
@@ -595,6 +602,7 @@ def load_manual_add_selection(
     tier_keys: Sequence[str] = (),
     tier_index: int | None = None,
     select_all: bool = False,
+    ignore_already_added: bool = False,
 ) -> ManualAddSelection:
     """Load and validate eligible tiers from a stored same-day alert event."""
 
@@ -672,7 +680,9 @@ def load_manual_add_selection(
         str(row["tier_key"])
         for row in list_manual_add_actions(connection, int(active["id"]))
     }
-    if any(tier.key in already_added for tier in selected):
+    if ignore_already_added:
+        selected = tuple(tier for tier in selected if tier.key not in already_added)
+    elif any(tier.key in already_added for tier in selected):
         raise CommandParseError("One or more selected tiers were already recorded.")
     readiness, missing_setup = derive_plan_readiness(
         connection,
@@ -1285,7 +1295,8 @@ def format_plan_overview(
             )
     for status in result.statuses:
         next_tier = _next_open_tier(status)
-        pending_tiers = _currently_reached_unrecorded_tiers(status)
+        pending_tiers = _pending_drawdown_tiers(status)
+        newly_reached_tiers = _currently_reached_unrecorded_tiers(status)
         plan_lines = [
             "",
             f"{status.name} (plan {status.rule_id}) — {status.readiness}",
@@ -1296,11 +1307,32 @@ def format_plan_overview(
         ]
         if pending_tiers:
             plan_lines.append(
-                "⚠️ Reached, awaiting official close confirmation: "
+                "⏳ Triggered, still pending: "
                 + ", ".join(
                     f"-{format_plan_percent(tier.drawdown)} / "
                     f"{format_plan_amount(tier.amount)}"
                     for tier in pending_tiers
+                )
+            )
+        if newly_reached_tiers:
+            plan_lines.append(
+                "⚠️ Reached, awaiting official close confirmation: "
+                + ", ".join(
+                    f"-{format_plan_percent(tier.drawdown)} / "
+                    f"{format_plan_amount(tier.amount)}"
+                    for tier in newly_reached_tiers
+                )
+            )
+        skipped_tiers = tuple(
+            tier for tier in status.config.tiers if tier.key in status.skipped_tier_keys
+        )
+        if skipped_tiers:
+            plan_lines.append(
+                "⏭ Skipped for this cycle: "
+                + ", ".join(
+                    f"-{format_plan_percent(tier.drawdown)} / "
+                    f"{format_plan_amount(tier.amount)}"
+                    for tier in skipped_tiers
                 )
             )
         plan_lines.append(
@@ -1378,13 +1410,44 @@ def format_plan_details(result: DrawdownPlanStatusResult) -> str:
         if status.missing_setup:
             lines.append(f"Missing setup: {', '.join(status.missing_setup)}")
         lines.append("Tiers:")
+        language = get_language()
         for tier in status.config.tiers:
-            if tier.key in status.added_tier_keys:
-                state = "add recorded (user-confirmed)"
-            elif tier.key in status.recorded_tier_keys:
-                state = "reminded; no add recorded"
+            state_key = derive_tier_action_state(
+                tier_key=tier.key,
+                triggered_tier_keys=status.recorded_tier_keys,
+                added_tier_keys=status.added_tier_keys,
+                skipped_tier_keys=status.skipped_tier_keys,
+            )
+            if state_key == TIER_STATE_ADDED:
+                state = (
+                    "add recorded (user-confirmed) [ADDED]"
+                    if language == "en"
+                    else "已加仓（ADDED）"
+                )
+            elif state_key == TIER_STATE_SKIPPED:
+                state = (
+                    "skipped (this cycle) [SKIPPED]"
+                    if language == "en"
+                    else "已跳过（SKIPPED）"
+                )
+            elif state_key == TIER_STATE_PENDING:
+                state = (
+                    "reminded; no add recorded [TRIGGERED_PENDING]"
+                    if language == "en"
+                    else "已触发待处理（TRIGGERED_PENDING）"
+                )
+                if tier.key in status.snoozed_tier_keys:
+                    if language == "en":
+                        deferred = "; deferred today"
+                    else:
+                        deferred = "；今天已顺延提醒"
+                    state += deferred
             else:
-                state = "open"
+                state = (
+                    "open [UNTRIGGERED]"
+                    if language == "en"
+                    else "未触发（UNTRIGGERED）"
+                )
             lines.append(
                 f"• -{format_plan_percent(tier.drawdown)} / "
                 f"{format_plan_amount(tier.amount)}: {state}"
@@ -1421,7 +1484,9 @@ def _format_plan_drawdown(drawdown: float) -> str:
 
 
 def _next_open_tier(status: DrawdownPlanStatus) -> Any | None:
-    completed = status.recorded_tier_keys | status.added_tier_keys
+    completed = status.recorded_tier_keys | (
+        status.added_tier_keys | status.skipped_tier_keys
+    )
     return next(
         (tier for tier in status.config.tiers if tier.key not in completed),
         None,
@@ -1431,14 +1496,28 @@ def _next_open_tier(status: DrawdownPlanStatus) -> Any | None:
 def _currently_reached_unrecorded_tiers(
     status: DrawdownPlanStatus,
 ) -> tuple[Any, ...]:
-    """Return crossed tiers not yet consumed by a confirmed reminder."""
+    """Return newly reached tiers that still await close confirmation."""
 
-    completed = status.recorded_tier_keys | status.added_tier_keys
+    completed = status.recorded_tier_keys | (
+        status.added_tier_keys | status.skipped_tier_keys
+    )
     return tuple(
         tier
         for tier in status.config.tiers
         if tier.key not in completed
         and status.evaluation.drawdown + 1e-12 >= tier.drawdown
+    )
+
+
+def _pending_drawdown_tiers(status: DrawdownPlanStatus) -> tuple[Any, ...]:
+    """Return close-confirmed tiers that have no user action yet."""
+
+    return tuple(
+        tier
+        for tier in status.config.tiers
+        if tier.key in status.recorded_tier_keys
+        and tier.key not in status.added_tier_keys
+        and tier.key not in status.skipped_tier_keys
     )
 
 
@@ -2296,10 +2375,11 @@ def build_command_handlers(
             return
         selector = parts[3]
         if selector == "none":
-            await _edit_message_text(
+            await defer_drawdown_event(
                 query,
-                "No addition recorded. The tier reminder state was not changed. "
-                "No order has been placed.",
+                plan_id=plan_id,
+                event_id=event_id,
+                action_date=_clock_now(clock).astimezone(cn_market_timezone).date(),
             )
             return
         user_id = get_update_user_id(update)
@@ -2331,6 +2411,298 @@ def build_command_handlers(
             format_manual_add_confirmation(selection),
             reply_markup=manual_add_confirmation_markup(token, selection.readiness),
         )
+
+    async def defer_drawdown_event(
+        query: Any,
+        *,
+        plan_id: int,
+        event_id: int,
+        action_date: date,
+    ) -> None:
+        """Snooze actionable tiers for the current market date."""
+
+        try:
+            with open_connection(sqlite_path) as connection:
+                initialize_database(connection)
+                selection = load_manual_add_selection(
+                    connection,
+                    plan_id=plan_id,
+                    event_id=event_id,
+                    action_date=action_date,
+                    select_all=True,
+                    ignore_already_added=True,
+                )
+                states = get_drawdown_tier_reminder_states(
+                    connection,
+                    selection.cycle_id,
+                )
+                selected = tuple(
+                    tier
+                    for tier in selection.tiers
+                    if not (
+                        states.get(tier.key) is not None
+                        and bool(states[tier.key]["skipped_for_cycle"])
+                    )
+                )
+                if not selected:
+                    await _edit_message_text(
+                        query,
+                        "These tiers are already skipped for this cycle. No reminder "
+                        "state was changed.",
+                    )
+                    return
+                selected_keys = tuple(tier.key for tier in selected)
+                already_deferred = all(
+                    states.get(key) is not None
+                    and states[key]["snoozed_market_date"] == action_date.isoformat()
+                    for key in selected_keys
+                )
+                if not already_deferred:
+                    snooze_drawdown_tiers_for_date(
+                        connection,
+                        cycle_id=selection.cycle_id,
+                        tier_keys=selected_keys,
+                        market_date=action_date.isoformat(),
+                    )
+        except (CommandParseError, ValueError, sqlite3.IntegrityError) as exc:
+            await _edit_message_text(query, str(exc))
+            return
+        if already_deferred:
+            message = (
+                "Already deferred for today. These tiers remain pending for the "
+                "next market date. No order has been placed."
+            )
+        else:
+            message = (
+                "⏰ Deferred for today. These tiers remain pending and will be "
+                "reminded again on the next market date if still reached. "
+                "No order has been placed."
+            )
+        await _edit_message_text(query, message)
+
+    async def drawdown_defer_callback(
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        del context
+        query = getattr(update, "callback_query", None)
+        if query is None:
+            return
+        await query.answer()
+        if await reject_if_unauthorized(update, allowed_user_ids):
+            return
+        parts = str(getattr(query, "data", "")).split(":")
+        if len(parts) != 4 or parts[0] != "drawdown_defer":
+            return
+        try:
+            plan_id = int(parts[1])
+            event_id = int(parts[2])
+            selector = parts[3]
+            if selector not in {"all"}:
+                raise ValueError("Invalid defer action.")
+        except ValueError as exc:
+            await _edit_message_text(query, str(exc))
+            return
+        await defer_drawdown_event(
+            query,
+            plan_id=plan_id,
+            event_id=event_id,
+            action_date=_clock_now(clock).astimezone(cn_market_timezone).date(),
+        )
+
+    async def drawdown_skip_callback(
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        del context
+        query = getattr(update, "callback_query", None)
+        if query is None:
+            return
+        await query.answer()
+        if await reject_if_unauthorized(update, allowed_user_ids):
+            return
+        parts = str(getattr(query, "data", "")).split(":")
+        if len(parts) < 4 or parts[0] != "drawdown_skip":
+            return
+        try:
+            plan_id = int(parts[1])
+            event_id = int(parts[2])
+        except ValueError:
+            await _edit_message_text(query, "Invalid skip action.")
+            return
+        action_date = _clock_now(clock).astimezone(cn_market_timezone).date()
+        action = parts[3]
+        if action == "cancel":
+            await _edit_message_text(query, "Skip cancelled. Nothing was changed.")
+            return
+        try:
+            with open_connection(sqlite_path) as connection:
+                initialize_database(connection)
+                if action == "choose":
+                    selection = load_manual_add_selection(
+                        connection,
+                        plan_id=plan_id,
+                        event_id=event_id,
+                        action_date=action_date,
+                        select_all=True,
+                        ignore_already_added=True,
+                    )
+                    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+                    if len(selection.tiers) == 1:
+                        markup = InlineKeyboardMarkup(
+                            [
+                                [
+                                    InlineKeyboardButton(
+                                        "✅ 确认跳过",
+                                        callback_data=(
+                                            f"drawdown_skip:{plan_id}:{event_id}:"
+                                            "apply:all"
+                                        ),
+                                    )
+                                ],
+                                [
+                                    InlineKeyboardButton(
+                                        "❌ 取消",
+                                        callback_data=(
+                                            f"drawdown_skip:{plan_id}:{event_id}:cancel"
+                                        ),
+                                    )
+                                ],
+                            ]
+                        )
+                        message = (
+                            "Confirm skipping "
+                            f"-{format_plan_percent(selection.tiers[0].drawdown)} "
+                            f"/ {format_plan_amount(selection.tiers[0].amount)}?\n\n"
+                            "This tier will not be reminded again in the current "
+                            "drawdown cycle."
+                        )
+                    else:
+                        rows = [
+                            [
+                                InlineKeyboardButton(
+                                    "全部跳过",
+                                    callback_data=(
+                                        f"drawdown_skip:{plan_id}:{event_id}:confirm_all"
+                                    ),
+                                )
+                            ]
+                        ]
+                        rows.extend(
+                            [
+                                InlineKeyboardButton(
+                                    f"跳过 -{format_plan_percent(tier.drawdown)}",
+                                    callback_data=(
+                                        f"drawdown_skip:{plan_id}:{event_id}:"
+                                        f"apply:tier:{index}"
+                                    ),
+                                )
+                            ]
+                            for index, tier in enumerate(selection.tiers)
+                        )
+                        rows.append(
+                            [
+                                InlineKeyboardButton(
+                                    "❌ 取消",
+                                    callback_data=(
+                                        f"drawdown_skip:{plan_id}:{event_id}:cancel"
+                                    ),
+                                )
+                            ]
+                        )
+                        markup = InlineKeyboardMarkup(rows)
+                        message = (
+                            "Choose which actionable tiers to skip for this drawdown "
+                            "cycle."
+                        )
+                    await _edit_message_text(query, message, reply_markup=markup)
+                    return
+                if action == "confirm_all":
+                    selection = load_manual_add_selection(
+                        connection,
+                        plan_id=plan_id,
+                        event_id=event_id,
+                        action_date=action_date,
+                        select_all=True,
+                        ignore_already_added=True,
+                    )
+                    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+                    markup = InlineKeyboardMarkup(
+                        [
+                            [
+                                InlineKeyboardButton(
+                                    "✅ 确认全部跳过",
+                                    callback_data=(
+                                        f"drawdown_skip:{plan_id}:{event_id}:apply:all"
+                                    ),
+                                )
+                            ],
+                            [
+                                InlineKeyboardButton(
+                                    "❌ 取消",
+                                    callback_data=(
+                                        f"drawdown_skip:{plan_id}:{event_id}:choose"
+                                    ),
+                                )
+                            ],
+                        ]
+                    )
+                    await _edit_message_text(
+                        query,
+                        "Confirm skipping all currently actionable tiers? They will "
+                        "not be reminded again in this drawdown cycle.",
+                        reply_markup=markup,
+                    )
+                    return
+                if action != "apply" or len(parts) < 5:
+                    await _edit_message_text(query, "Invalid skip action.")
+                    return
+                selector = parts[4]
+                tier_index = None
+                if selector == "tier":
+                    if len(parts) != 6:
+                        raise ValueError("Invalid skip action.")
+                    tier_index = int(parts[5])
+                elif selector != "all" or len(parts) != 5:
+                    raise ValueError("Invalid skip action.")
+                selection = load_manual_add_selection(
+                    connection,
+                    plan_id=plan_id,
+                    event_id=event_id,
+                    action_date=action_date,
+                    select_all=tier_index is None,
+                    tier_index=tier_index,
+                    ignore_already_added=True,
+                )
+                states = get_drawdown_tier_reminder_states(
+                    connection,
+                    selection.cycle_id,
+                )
+                selected_keys = tuple(tier.key for tier in selection.tiers)
+                if all(
+                    states.get(key) is not None
+                    and bool(states[key]["skipped_for_cycle"])
+                    for key in selected_keys
+                ):
+                    message = (
+                        "Already skipped for this drawdown cycle. Nothing was changed."
+                    )
+                else:
+                    skip_drawdown_tiers_for_cycle(
+                        connection,
+                        cycle_id=selection.cycle_id,
+                        tier_keys=selected_keys,
+                    )
+                    message = (
+                        "⏭ Skipped for this drawdown cycle. These tiers will not be "
+                        "reminded again until a new cycle. No order has been placed."
+                    )
+        except (CommandParseError, ValueError, sqlite3.IntegrityError) as exc:
+            await _edit_message_text(query, str(exc))
+            return
+        await _edit_message_text(query, message)
 
     def get_manual_add_draft(update: Update, token: str) -> ManualAddDraft | None:
         draft = manual_add_drafts.get(token)
@@ -3291,6 +3663,14 @@ def build_command_handlers(
         CallbackQueryHandler(
             manual_add_event_callback,
             pattern=(r"^drawdown_add:[0-9]+:[0-9]+:(?:all|none|tier:[0-9]+)$"),
+        ),
+        CallbackQueryHandler(
+            drawdown_defer_callback,
+            pattern=r"^drawdown_defer:[0-9]+:[0-9]+:all$",
+        ),
+        CallbackQueryHandler(
+            drawdown_skip_callback,
+            pattern=r"^drawdown_skip:[0-9]+:[0-9]+:(?:choose|cancel|confirm_all|apply:(?:all|tier:[0-9]+))$",
         ),
         CallbackQueryHandler(
             manual_add_confirm_callback,
