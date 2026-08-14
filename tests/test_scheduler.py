@@ -37,6 +37,7 @@ from fund_alert_bot.market_data import (
     FundNav,
     Instrument,
     MarketCalendarUnavailableError,
+    MarketDataFetchError,
     PriceBasis,
     RealtimeQuote,
 )
@@ -977,6 +978,52 @@ def test_before_close_plan_uses_sina_when_eastmoney_quote_fails_validation(
     assert "Quote source: sina_fallback" in application.bot.messages[0]["text"]
 
 
+def test_before_close_dual_failure_reports_eastmoney_validation_and_sina_error(
+    tmp_path: Path,
+) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    _add_drawdown_plan(sqlite_path)
+    fetched_at = datetime(2024, 1, 2, 6, 50, tzinfo=ZoneInfo("UTC"))
+    provider = FakeProvider(
+        _plan_history([100]),
+        realtime_quote=RealtimeQuote(
+            "510300",
+            84,
+            100,
+            0,
+            0,
+            "eastmoney",
+            fetched_at,
+        ),
+        sina_error=MarketDataFetchError("Sina realtime ETF quote failed."),
+    )
+    application = FakeApplication()
+
+    asyncio.run(
+        scheduler.run_scheduled_before_close_check(
+            application=application,
+            sqlite_path=sqlite_path,
+            allowed_user_ids={123},
+            market_data_provider=provider,
+            market_calendar=FakeMarketCalendar(is_trading_day=True),
+            timezone="Asia/Shanghai",
+            run_date=date(2024, 1, 2),
+        )
+    )
+
+    assert len(application.bot.messages) == 1
+    message = application.bot.messages[0]["text"]
+    assert "Eastmoney realtime quote rejected" in message
+    assert "Sina fallback unavailable" in message
+    with open_connection(sqlite_path) as connection:
+        assert (
+            connection.execute("SELECT COUNT(*) FROM drawdown_tier_records").fetchone()[
+                0
+            ]
+            == 0
+        )
+
+
 def test_scheduled_market_check_evaluates_profit_rules(
     tmp_path: Path,
 ) -> None:
@@ -1443,12 +1490,14 @@ class FakeProvider:
         latest: dict[str, object] | None = None,
         realtime_quote: RealtimeQuote | None = None,
         sina_quote: RealtimeQuote | None = None,
+        sina_error: Exception | None = None,
         fund_nav: FundNav | None = None,
     ) -> None:
         self.history = history
         self.latest = latest
         self.realtime_quote = realtime_quote
         self.sina_quote = sina_quote
+        self.sina_error = sina_error
         self.fund_nav = fund_nav
         self.calls: list[tuple[Instrument, object, object]] = []
         self.latest_calls: list[Instrument] = []
@@ -1481,6 +1530,8 @@ class FakeProvider:
 
     def get_sina_etf_realtime_quote(self, instrument: Instrument) -> RealtimeQuote:
         self.sina_calls.append(instrument.symbol)
+        if self.sina_error is not None:
+            raise self.sina_error
         if self.sina_quote is None:
             raise RuntimeError("No Sina quote configured.")
         return self.sina_quote

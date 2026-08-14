@@ -4,7 +4,8 @@ Drawdown Add Plans use AKShare's Eastmoney ETF daily-history endpoint with
 `adjust="qfq"`. Before close, the market-data provider requests only the exact
 ETF symbol from Eastmoney with a hard timeout and briefly suppresses all other
 Eastmoney requests after a failure. A bounded Sina per-symbol request is the
-realtime fallback. Both realtime adapters must expose the source's quote time;
+realtime fallback, with failure cooldown isolated per ETF symbol. Both realtime
+adapters must expose the source's quote time;
 the Bot request time is not market-data freshness evidence.
 
 Forward adjustment keeps the current price unchanged while removing artificial

@@ -429,8 +429,11 @@ global Eastmoney cooldown after failure. Its exact symbol, source quote time,
 positive trading activity, and previous close must be consistent with the latest
 validated `qfq` close. If it is unavailable or inconsistent, the bot makes one
 bounded per-symbol Sina request for a Fallback Pre-Alert with the same checks.
-The message identifies the source and source quote time, asks the user to verify
-their own platform, and never confirms a tier automatically.
+Sina failure cooldowns are isolated per symbol, so one temporary failure does
+not suppress the other plans. If both sources fail, the data notice includes
+both failure reasons. The message identifies the source and source quote time,
+asks the user to verify their own platform, and never confirms a tier
+automatically.
 
 Sina daily history has no adjustment option, so it cannot provide the cycle
 peak, MA250, or after-close confirmation. A prolonged Eastmoney outage delays
