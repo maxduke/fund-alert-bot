@@ -703,6 +703,35 @@ def validate_drawdown_plan_notification_size(
             quote=quote,
         ),
     )
+    pending_tiers = config.tiers[:-1] if len(config.tiers) > 1 else config.tiers
+    mixed_evaluation = replace(
+        evaluation,
+        newly_crossed_tiers=(config.tiers[-1],) if len(config.tiers) > 1 else (),
+        total_amount=sum((tier.amount for tier in config.tiers), start=0),
+    )
+    alerts += (
+        build_drawdown_plan_alert(
+            rule_id=2**63 - 1,
+            reference_symbol=reference_symbol,
+            name=name,
+            config=config,
+            evaluation=mixed_evaluation,
+            actionable_tiers=config.tiers,
+            pending_tiers=pending_tiers,
+        ),
+        build_drawdown_plan_pre_alert(
+            rule_id=2**63 - 1,
+            cycle_id=2**63 - 1,
+            reference_symbol=reference_symbol,
+            name=name,
+            confirmed_date=date(2099, 12, 30),
+            config=config,
+            evaluation=replace(mixed_evaluation, source="sina_fallback"),
+            quote=quote,
+            actionable_tiers=config.tiers,
+            pending_tiers=pending_tiers,
+        ),
+    )
     if any(
         alert is not None and len(str(alert["message"])) > _TELEGRAM_TEXT_LIMIT
         for alert in alerts

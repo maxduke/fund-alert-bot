@@ -2614,12 +2614,22 @@ def get_active_drawdown_cycle(
 def list_drawdown_tier_records(
     connection: sqlite3.Connection,
     cycle_id: int,
+    *,
+    source: str | None = None,
 ) -> list[sqlite3.Row]:
-    """Return durable tier records for one cycle."""
+    """Return durable tier records for one cycle, optionally by source."""
+
+    filters = ["cycle_id = ?"]
+    values: list[object] = [cycle_id]
+    if source is not None:
+        if source not in {"close_confirmed", "user_marked_added"}:
+            raise ValueError("Unsupported drawdown tier record source.")
+        filters.append("source = ?")
+        values.append(source)
 
     return list(
         connection.execute(
-            """
+            f"""
             SELECT
                 id,
                 cycle_id,
@@ -2631,10 +2641,10 @@ def list_drawdown_tier_records(
                 alert_event_id,
                 created_at
             FROM drawdown_tier_records
-            WHERE cycle_id = ?
+            WHERE {" AND ".join(filters)}
             ORDER BY drawdown
             """,
-            (cycle_id,),
+            values,
         ).fetchall()
     )
 
@@ -2811,6 +2821,9 @@ def persist_drawdown_plan_evaluation(
     records = tuple(tiers if tiers_to_record is None else tiers_to_record)
     if alert is not None and alert_factory is not None:
         raise ValueError("Pass alert or alert_factory, not both.")
+    record_keys = tuple(str(tier.key) for tier in records)
+    if len(set(record_keys)) != len(record_keys):
+        raise sqlite3.IntegrityError("Duplicate drawdown tier records.")
 
     connection.execute("BEGIN IMMEDIATE")
     try:
@@ -2882,9 +2895,19 @@ def persist_drawdown_plan_evaluation(
 
         resolved_alert = alert_factory(cycle_id) if alert_factory is not None else alert
         event_id: int | None = None
+        alert_tier_keys: set[str] | None = None
         if resolved_alert is not None:
             payload = dict(resolved_alert.get("payload") or {})
             payload["cycle_id"] = cycle_id
+            alert_tiers = payload.get("actionable_tiers")
+            if alert_tiers is None:
+                alert_tiers = payload.get("crossed_tiers")
+            if isinstance(alert_tiers, (list, tuple)):
+                alert_tier_keys = {
+                    str(item["key"])
+                    for item in alert_tiers
+                    if isinstance(item, dict) and "key" in item
+                }
             cursor = connection.execute(
                 """
                 INSERT INTO alert_events (
@@ -2921,6 +2944,24 @@ def persist_drawdown_plan_evaluation(
                     created_at
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(cycle_id, tier_key) DO UPDATE SET
+                    drawdown = excluded.drawdown,
+                    amount = excluded.amount,
+                    source = CASE
+                        WHEN excluded.source = 'close_confirmed'
+                        THEN excluded.source
+                        ELSE drawdown_tier_records.source
+                    END,
+                    data_date = CASE
+                        WHEN excluded.source = 'close_confirmed'
+                        THEN excluded.data_date
+                        ELSE drawdown_tier_records.data_date
+                    END,
+                    alert_event_id = CASE
+                        WHEN excluded.source = 'close_confirmed'
+                        THEN excluded.alert_event_id
+                        ELSE drawdown_tier_records.alert_event_id
+                    END
                 """,
                 [
                     (
@@ -2930,7 +2971,12 @@ def persist_drawdown_plan_evaluation(
                         float(tier.amount),
                         tier_source,
                         evaluation_date,
-                        event_id,
+                        (
+                            event_id
+                            if alert_tier_keys is None
+                            or str(tier.key) in alert_tier_keys
+                            else None
+                        ),
                         now,
                     )
                     for tier in records

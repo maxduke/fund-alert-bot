@@ -1168,7 +1168,11 @@ def _load_drawdown_plan_state(
     )
     recorded = {
         str(row["tier_key"])
-        for row in list_drawdown_tier_records(connection, active_cycle.cycle_id)
+        for row in list_drawdown_tier_records(
+            connection,
+            active_cycle.cycle_id,
+            source="close_confirmed",
+        )
     }
     return config, active_cycle, recorded
 

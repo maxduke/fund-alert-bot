@@ -17,6 +17,7 @@ from fund_alert_bot.checks import (
     read_drawdown_plan_statuses,
 )
 from fund_alert_bot.db import (
+    add_drawdown_plan_pre_alert_event,
     add_rule,
     apply_manual_add_estimate,
     delete_rule,
@@ -95,6 +96,100 @@ def test_market_tier_facts_can_persist_without_an_alert(tmp_path: Path) -> None:
     assert [row["tier_key"] for row in records] == ["0.15"]
     assert records[0]["alert_event_id"] is None
     assert event_count == 0
+
+
+def test_prealert_add_is_upgraded_to_close_confirmed_fact(tmp_path: Path) -> None:
+    sqlite_path = tmp_path / "bot.sqlite3"
+    _add_plan(sqlite_path)
+
+    with open_connection(sqlite_path) as connection:
+        rule = list_rules(connection)[0]
+        initial = evaluate_drawdown_plan_rule(
+            connection,
+            rule,
+            _history([100]),
+            expected_date=date(2024, 1, 1),
+        )
+        tier = DrawdownTier(0.15, 5000, "0.15")
+        prealert_id = add_drawdown_plan_pre_alert_event(
+            connection,
+            rule_id=1,
+            alert={
+                "alert_key": "pre-alert-test",
+                "title": "pre-alert",
+                "message": "pre-alert",
+                "payload": {
+                    "cycle_id": initial.cycle_id,
+                    "data_date": "2024-01-02",
+                    "investment_fund_symbol": "000001",
+                    "crossed_tiers": [
+                        {
+                            "key": tier.key,
+                            "drawdown": tier.drawdown,
+                            "amount": tier.amount,
+                        }
+                    ],
+                },
+            },
+        )
+        record_manual_addition(
+            connection,
+            rule_id=1,
+            cycle_id=initial.cycle_id,
+            source_alert_event_id=prealert_id,
+            fund_symbol="000001",
+            tiers=(tier,),
+            action_at=datetime(2024, 1, 2, 10, tzinfo=UTC),
+            create_estimate=False,
+        )
+        result = evaluate_drawdown_plan_rule(
+            connection,
+            rule,
+            _history([100, 84]),
+            expected_date=date(2024, 1, 2),
+        )
+        records = list_drawdown_tier_records(connection, result.cycle_id)
+
+    assert [(row["tier_key"], row["source"]) for row in records] == [
+        ("0.15", "close_confirmed")
+    ]
+
+
+def test_suppressed_market_fact_has_no_unrelated_alert_link(tmp_path: Path) -> None:
+    sqlite_path = tmp_path / "bot.sqlite3"
+    _add_plan(sqlite_path)
+
+    with open_connection(sqlite_path) as connection:
+        rule = list_rules(connection)[0]
+        first = evaluate_drawdown_plan_rule(
+            connection,
+            rule,
+            _history([100]),
+            expected_date=date(2024, 1, 1),
+        )
+        snooze_drawdown_tiers_for_date(
+            connection,
+            cycle_id=first.cycle_id,
+            tier_keys=("0.15",),
+            market_date="2024-01-02",
+        )
+        result = evaluate_drawdown_plan_rule(
+            connection,
+            rule,
+            _history([100, 74]),
+            expected_date=date(2024, 1, 2),
+        )
+        records = list_drawdown_tier_records(connection, result.cycle_id)
+        event = connection.execute(
+            "SELECT id FROM alert_events ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+
+    assert event is not None
+    assert {row["tier_key"]: row["alert_event_id"] for row in records} == {
+        "0.15": None,
+        "0.2": event["id"],
+        "0.25": event["id"],
+    }
 
 
 def test_pending_tier_follow_up_is_one_daily_action_event(tmp_path: Path) -> None:

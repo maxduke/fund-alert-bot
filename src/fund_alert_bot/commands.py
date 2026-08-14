@@ -1421,12 +1421,9 @@ def _format_plan_drawdown(drawdown: float) -> str:
 
 
 def _next_open_tier(status: DrawdownPlanStatus) -> Any | None:
+    completed = status.recorded_tier_keys | status.added_tier_keys
     return next(
-        (
-            tier
-            for tier in status.config.tiers
-            if tier.key not in status.recorded_tier_keys
-        ),
+        (tier for tier in status.config.tiers if tier.key not in completed),
         None,
     )
 
@@ -1436,10 +1433,11 @@ def _currently_reached_unrecorded_tiers(
 ) -> tuple[Any, ...]:
     """Return crossed tiers not yet consumed by a confirmed reminder."""
 
+    completed = status.recorded_tier_keys | status.added_tier_keys
     return tuple(
         tier
         for tier in status.config.tiers
-        if tier.key not in status.recorded_tier_keys
+        if tier.key not in completed
         and status.evaluation.drawdown + 1e-12 >= tier.drawdown
     )
 
