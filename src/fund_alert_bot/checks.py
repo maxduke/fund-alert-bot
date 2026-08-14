@@ -756,10 +756,10 @@ def evaluate_drawdown_plan_prealerts(
                 realtime.peak_price,
                 realtime.drawdown,
                 [tier.key for tier in newly_realtime_tiers],
-                [tier.key for tier in actionable_tiers],
                 realtime.sma,
                 realtime.distance_to_sma,
                 realtime.sma_slope,
+                [tier.key for tier in actionable_tiers],
             )
             notifications.append(
                 AlertNotification(
