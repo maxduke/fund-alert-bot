@@ -177,6 +177,31 @@ def test_read_plan_status_reuses_persisted_history_until_refresh(
     assert len(provider.calls) == 3
 
 
+def test_read_plan_status_accepts_nontrading_history_start_without_refetch(
+    tmp_path: Path,
+) -> None:
+    sqlite_path = tmp_path / "bot.sqlite3"
+    _add_plan(sqlite_path)
+    provider = FakePlanProvider(_long_history())
+
+    with open_connection(sqlite_path) as connection:
+        first = read_drawdown_plan_statuses(
+            connection,
+            provider,
+            end_date=date(2024, 1, 7),
+        )
+        second = read_drawdown_plan_statuses(
+            connection,
+            provider,
+            end_date=date(2024, 1, 7),
+        )
+
+    assert first.statuses[0].evaluation.latest_date == date(2024, 1, 7)
+    assert second.statuses[0].evaluation.latest_date == date(2024, 1, 6)
+    assert len(provider.calls) == 1
+    assert provider.calls[0][1] == date(2022, 7, 3)
+
+
 def test_cached_fund_nav_is_used_for_read_only_plan_status(tmp_path: Path) -> None:
     sqlite_path = tmp_path / "bot.sqlite3"
     _add_plan(sqlite_path)
@@ -887,6 +912,25 @@ def _history(closes: list[float]) -> pd.DataFrame:
             "date": pd.date_range("2024-01-01", periods=len(closes)),
             "close": closes,
             "source": ["akshare_eastmoney"] * len(closes),
+        }
+    )
+    frame.attrs.update(
+        {
+            "symbol": "510300",
+            "source": "akshare_eastmoney",
+            "price_basis": "qfq",
+            "frequency": "daily",
+        }
+    )
+    return frame
+
+
+def _long_history() -> pd.DataFrame:
+    frame = pd.DataFrame(
+        {
+            "date": pd.date_range("2022-06-20", "2024-01-07", freq="D"),
+            "close": 100.0,
+            "source": "akshare_eastmoney",
         }
     )
     frame.attrs.update(

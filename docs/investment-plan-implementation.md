@@ -448,9 +448,11 @@ close,” not triggered.
 Store normalized confirmed daily rows in SQLite keyed by symbol, asset type,
 price basis, and date. Store exact feeder-fund unit NAVs separately by fund and
 NAV date. Do not store raw provider payloads. The first evaluation backfills the
-required drawdown and trend range; later after-close evaluations refresh the
-full required QFQ history window (unadjusted history uses a small overlap) and
-upsert it. Before-close evaluation reads the last confirmed rows and still fetches one realtime quote per ETF. The plan-status
+required drawdown and trend range plus a small calendar buffer; later after-close
+evaluations refresh the full required QFQ history window (unadjusted history
+uses a small overlap) and upsert it. Before-close evaluation first verifies
+that cached history reaches the latest confirmed trading session, then fetches
+one realtime quote per ETF. The plan-status
 portions of `/plans` and `/check` use local confirmed rows by default;
 `/plans refresh` is the explicit provider-refresh escape hatch. A cached row is never used as an
 official close unless its date matches the scheduled confirmed date, and every
