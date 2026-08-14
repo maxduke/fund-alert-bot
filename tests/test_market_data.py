@@ -389,6 +389,95 @@ def test_get_latest_uses_the_quote_data_date_instead_of_local_today() -> None:
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize(
+    ("asset_type", "symbol", "expected_secid"),
+    [
+        (AssetType.CN_INDEX, "000300", "1.000300"),
+        (AssetType.CN_INDEX, "399006", "0.399006"),
+        (AssetType.CN_STOCK, "600000", "1.600000"),
+        (AssetType.CN_STOCK, "300750", "0.300750"),
+        (AssetType.CN_STOCK, "920001", "0.920001"),
+    ],
+)
+def test_latest_uses_one_bounded_quote_for_index_and_stock(
+    asset_type: AssetType,
+    symbol: str,
+    expected_secid: str,
+) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def http_get(url: str, **kwargs: Any) -> FakeResponse:
+        calls.append((url, kwargs))
+        assert kwargs["params"]["secid"] == expected_secid
+        return _eastmoney_quote_response(symbol)
+
+    fake_ak = FakeAkshare()
+    provider = AkshareMarketDataProvider(
+        ak_module=fake_ak,
+        retry_delay_seconds=0,
+        http_get=http_get,
+    )
+
+    latest = provider.get_latest(Instrument(symbol, symbol, asset_type))
+
+    assert latest is not None
+    assert latest["close"] == 1.25
+    assert latest["source"] == "eastmoney_realtime"
+    assert len(calls) == 1
+    assert fake_ak.calls == []
+
+
+def test_invalid_symbol_quote_does_not_cool_down_other_symbols() -> None:
+    calls: list[str] = []
+
+    def http_get(url: str, **kwargs: Any) -> FakeResponse:
+        secid = str(kwargs["params"]["secid"])
+        calls.append(secid)
+        symbol = secid.split(".", 1)[1]
+        if symbol == "000300":
+            return _eastmoney_quote_response(symbol, price=0)
+        return _eastmoney_quote_response(symbol)
+
+    provider = AkshareMarketDataProvider(
+        ak_module=FakeAkshare(),
+        retry_delay_seconds=0,
+        today_factory=lambda: date(2024, 1, 4),
+        http_get=http_get,
+    )
+
+    fallback = provider.get_latest(
+        Instrument("000300", "CSI 300 Index", AssetType.CN_INDEX)
+    )
+    realtime = provider.get_latest(
+        Instrument("399006", "ChiNext Index", AssetType.CN_INDEX)
+    )
+
+    assert fallback is not None
+    assert fallback["source"] == "akshare"
+    assert realtime is not None
+    assert realtime["source"] == "eastmoney_realtime"
+    assert calls == ["1.000300", "0.399006"]
+
+
+def test_unsupported_etf_symbol_falls_back_to_history() -> None:
+    def http_get(*args: Any, **kwargs: Any) -> FakeResponse:
+        raise TimeoutError("realtime unavailable")
+
+    provider = AkshareMarketDataProvider(
+        ak_module=FakeAkshare(),
+        retry_delay_seconds=0,
+        today_factory=lambda: date(2024, 1, 4),
+        http_get=http_get,
+    )
+
+    latest = provider.get_latest(
+        Instrument("000001", "Unsupported ETF", AssetType.CN_ETF)
+    )
+
+    assert latest is not None
+    assert latest["source"] == "akshare"
+
+
 def test_get_etf_realtime_quote_uses_eastmoney_contract() -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
 
