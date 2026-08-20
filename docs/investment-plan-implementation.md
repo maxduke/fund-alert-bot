@@ -687,7 +687,7 @@ Keep confirmed business state separate from delivery state:
 
 - close-confirmed Tier Records remain confirmed if delivery fails;
 - pending and failed aggregate drawdown events are selected again on a later
-  scheduled run or startup until at least one enabled channel succeeds;
+  scheduled run or startup until every frozen delivery target succeeds;
 - pending and failed Manual Add Settlement Notices retry without reapplying the
   position estimate;
 - pending and failed Position-Linked Price-Gain Reminders retry without
@@ -706,11 +706,21 @@ Keep confirmed business state separate from delivery state:
   the current occurrence, preventing deleted SQLite rule IDs from being reused;
 - expired pre-alerts are not retried;
 - Data Availability Notices are deduplicated by phase and trading date;
-- current delivery semantics remain unchanged: success on any enabled channel
-  marks the event delivered.
+- delivery is tracked per concrete target, including each Telegram recipient;
+  retries claim only failed or expired target leases, and an event is delivered
+  only after all of its frozen targets succeed.
 
 Do not introduce a queue or worker. A small SQLite query before scheduled
 dispatch is sufficient.
+
+## Storage retention
+
+Run one conservative SQLite prune at startup and after the daily NAV process.
+Keep at least 400 calendar days of terminal history. Bound market-price caches
+to enabled-rule windows plus a small calendar buffer, while preserving active
+cycle peaks. Keep the latest NAV per fund and any exact NAV dates still needed
+by pending work. Never prune pending estimates, unreconciled actions, active
+cycles, or deduplication keys that may still suppress a valid duplicate.
 
 ## Rule lifecycle and logging
 

@@ -20,6 +20,10 @@ drawdown-from-high rule evaluation, DCA reminder
 evaluation, price-gain reminder evaluation, Telegram commands, scheduled
 market and DCA checks, multi-channel notification dispatch with delivery state,
 market data normalization, tests, Ruff configuration, and Docker packaging.
+SQLite cleanup runs automatically with a 400-day terminal-history baseline,
+while preserving active and pending state plus the cache windows rules require.
+Notification retries are tracked per concrete target to avoid resending to
+targets that already succeeded.
 
 Implemented Telegram commands:
 

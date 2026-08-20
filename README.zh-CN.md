@@ -19,6 +19,8 @@
 项目已经实现 Python 3.12 单进程服务、SQLite 持久化、APScheduler 调度、
 AKShare 行情归一化、Telegram 命令、通知投递状态与失败恢复、Docker 镜像、
 Ruff 和 pytest 测试。
+SQLite 会自动清理已终结历史（基准保留 400 天），但保留活跃/待处理状态和规则所需
+行情窗口；通知按具体目标记录重试，已成功的接收者不会因其他目标失败而重复收到提醒。
 
 已实现的 Telegram 命令：
 

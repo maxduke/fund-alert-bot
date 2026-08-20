@@ -776,8 +776,14 @@ synchronizes again after the platform has settled them rather than guessing.
 
 Confirmed tier state and notification delivery state are separate. A failed
 notification does not undo a confirmed tier. Pending or failed drawdown reminders
-are retried after later scheduled runs or restart until at least one enabled
-channel succeeds.
+are retried after later scheduled runs or restart. Delivery is recorded per
+concrete target, including each Telegram recipient, so a successful target is
+not sent the same reminder again while another target retries.
+
+The bot also prunes terminal SQLite history automatically. It normally keeps
+400 days, while retaining active cycles, pending work, required market windows,
+the latest fund NAV, and deduplication state that is still in use. This bounds
+routine database growth without sacrificing recovery correctness.
 
 Simple drawdown, fixed-cost Price-Gain, and DCA reminders also keep their
 delivery state in SQLite. An undelivered reminder is retried by the next morning
