@@ -5,7 +5,10 @@ from __future__ import annotations
 import math
 import os
 from dataclasses import dataclass
+from datetime import time
 from pathlib import Path
+from urllib.parse import urlparse
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 try:
     from dotenv import load_dotenv
@@ -113,6 +116,37 @@ def parse_bot_language(raw_value: str | None) -> str:
     return language
 
 
+def parse_hhmm_time(raw_value: str | None, *, name: str) -> str:
+    """Parse a strict 24-hour ``HH:MM`` environment value."""
+    value = (raw_value or "").strip()
+    pieces = value.split(":")
+    if len(pieces) != 2 or any(
+        len(piece) != 2 or not piece.isdigit() for piece in pieces
+    ):
+        raise ValueError(f"{name} must use HH:MM")
+
+    hour, minute = (int(piece) for piece in pieces)
+    if hour > 23 or minute > 59:
+        raise ValueError(f"{name} must be a valid 24-hour time")
+    return time(hour=hour, minute=minute).strftime("%H:%M")
+
+
+def parse_http_url(raw_value: str | None, *, name: str) -> str:
+    """Normalize an optional URL and accept only absolute HTTP(S) URLs."""
+    value = (raw_value or "").strip()
+    if not value:
+        return ""
+
+    parsed = urlparse(value)
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not parsed.netloc
+        or any(character.isspace() for character in value)
+    ):
+        raise ValueError(f"{name} must be an absolute http or https URL")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class NotificationSettings:
     """Optional notification channel settings."""
@@ -159,37 +193,95 @@ def load_settings(
     if load_env_file:
         load_dotenv(dotenv_path=env_file)
 
+    timezone = (os.environ.get("TZ") or DEFAULT_TIMEZONE).strip()
+    try:
+        ZoneInfo(timezone)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise ValueError("TZ must be a valid IANA timezone") from exc
+
+    schedule_times = {
+        "after_close_check_time": parse_hhmm_time(
+            os.environ.get("AFTER_CLOSE_CHECK_TIME", DEFAULT_AFTER_CLOSE_CHECK_TIME),
+            name="AFTER_CLOSE_CHECK_TIME",
+        ),
+        "before_close_check_time": parse_hhmm_time(
+            os.environ.get(
+                "BEFORE_CLOSE_CHECK_TIME",
+                DEFAULT_BEFORE_CLOSE_CHECK_TIME,
+            ),
+            name="BEFORE_CLOSE_CHECK_TIME",
+        ),
+        "dca_reminder_time": parse_hhmm_time(
+            os.environ.get("DCA_REMINDER_TIME", DEFAULT_DCA_REMINDER_TIME),
+            name="DCA_REMINDER_TIME",
+        ),
+        "fund_nav_process_time": parse_hhmm_time(
+            os.environ.get("FUND_NAV_PROCESS_TIME", DEFAULT_FUND_NAV_PROCESS_TIME),
+            name="FUND_NAV_PROCESS_TIME",
+        ),
+    }
+
     akshare_proxy_enabled = parse_bool_env(
         os.environ.get("AKSHARE_PROXY_ENABLED"),
         name="AKSHARE_PROXY_ENABLED",
     )
-    akshare_proxy_auth_token = os.environ.get("AKSHARE_PROXY_AUTH_TOKEN", "")
-    if akshare_proxy_enabled and not akshare_proxy_auth_token.strip():
+    akshare_proxy_auth_token = os.environ.get("AKSHARE_PROXY_AUTH_TOKEN", "").strip()
+    if akshare_proxy_enabled and not akshare_proxy_auth_token:
         raise ValueError(
             "AKSHARE_PROXY_AUTH_TOKEN is required when AKSHARE_PROXY_ENABLED=true"
         )
 
+    bark_enabled = parse_bool_env(
+        os.environ.get("BARK_ENABLED"),
+        name="BARK_ENABLED",
+    )
+    bark_server_url = parse_http_url(
+        os.environ.get("BARK_SERVER_URL"),
+        name="BARK_SERVER_URL",
+    )
+    bark_device_key = os.environ.get("BARK_DEVICE_KEY", "").strip()
+    if bark_enabled and (not bark_server_url or not bark_device_key):
+        raise ValueError(
+            "BARK_SERVER_URL and BARK_DEVICE_KEY are required when BARK_ENABLED=true"
+        )
+
+    ntfy_enabled = parse_bool_env(
+        os.environ.get("NTFY_ENABLED"),
+        name="NTFY_ENABLED",
+    )
+    ntfy_server_url = parse_http_url(
+        os.environ.get("NTFY_SERVER_URL"),
+        name="NTFY_SERVER_URL",
+    )
+    ntfy_topic = os.environ.get("NTFY_TOPIC", "").strip()
+    if ntfy_enabled and (not ntfy_server_url or not ntfy_topic):
+        raise ValueError(
+            "NTFY_SERVER_URL and NTFY_TOPIC are required when NTFY_ENABLED=true"
+        )
+
+    webhook_enabled = parse_bool_env(
+        os.environ.get("WEBHOOK_ENABLED"),
+        name="WEBHOOK_ENABLED",
+    )
+    webhook_url = parse_http_url(
+        os.environ.get("WEBHOOK_URL"),
+        name="WEBHOOK_URL",
+    )
+    if webhook_enabled and not webhook_url:
+        raise ValueError("WEBHOOK_URL is required when WEBHOOK_ENABLED=true")
+
     return Settings(
-        sqlite_path=Path(os.environ.get("SQLITE_PATH", str(DEFAULT_SQLITE_PATH))),
-        timezone=os.environ.get("TZ", DEFAULT_TIMEZONE),
-        after_close_check_time=os.environ.get(
-            "AFTER_CLOSE_CHECK_TIME",
-            DEFAULT_AFTER_CLOSE_CHECK_TIME,
+        sqlite_path=Path(
+            os.environ.get("SQLITE_PATH", str(DEFAULT_SQLITE_PATH)).strip()
+            or DEFAULT_SQLITE_PATH
         ),
-        before_close_check_time=os.environ.get(
-            "BEFORE_CLOSE_CHECK_TIME",
-            DEFAULT_BEFORE_CLOSE_CHECK_TIME,
-        ),
-        dca_reminder_time=os.environ.get(
-            "DCA_REMINDER_TIME",
-            DEFAULT_DCA_REMINDER_TIME,
-        ),
-        fund_nav_process_time=os.environ.get(
-            "FUND_NAV_PROCESS_TIME",
-            DEFAULT_FUND_NAV_PROCESS_TIME,
-        ),
+        timezone=timezone,
+        after_close_check_time=schedule_times["after_close_check_time"],
+        before_close_check_time=schedule_times["before_close_check_time"],
+        dca_reminder_time=schedule_times["dca_reminder_time"],
+        fund_nav_process_time=schedule_times["fund_nav_process_time"],
         bot_language=parse_bot_language(os.environ.get("BOT_LANGUAGE")),
-        telegram_bot_token=os.environ.get("TELEGRAM_BOT_TOKEN", ""),
+        telegram_bot_token=os.environ.get("TELEGRAM_BOT_TOKEN", "").strip(),
         telegram_allowed_user_ids=parse_allowed_user_ids(
             os.environ.get("TELEGRAM_ALLOWED_USER_IDS")
         ),
@@ -221,22 +313,13 @@ def load_settings(
             default=DEFAULT_AKSHARE_PROXY_RETRY,
         ),
         notifications=NotificationSettings(
-            bark_enabled=parse_bool_env(
-                os.environ.get("BARK_ENABLED"),
-                name="BARK_ENABLED",
-            ),
-            bark_server_url=os.environ.get("BARK_SERVER_URL", ""),
-            bark_device_key=os.environ.get("BARK_DEVICE_KEY", ""),
-            ntfy_enabled=parse_bool_env(
-                os.environ.get("NTFY_ENABLED"),
-                name="NTFY_ENABLED",
-            ),
-            ntfy_server_url=os.environ.get("NTFY_SERVER_URL", ""),
-            ntfy_topic=os.environ.get("NTFY_TOPIC", ""),
-            webhook_enabled=parse_bool_env(
-                os.environ.get("WEBHOOK_ENABLED"),
-                name="WEBHOOK_ENABLED",
-            ),
-            webhook_url=os.environ.get("WEBHOOK_URL", ""),
+            bark_enabled=bark_enabled,
+            bark_server_url=bark_server_url,
+            bark_device_key=bark_device_key,
+            ntfy_enabled=ntfy_enabled,
+            ntfy_server_url=ntfy_server_url,
+            ntfy_topic=ntfy_topic,
+            webhook_enabled=webhook_enabled,
+            webhook_url=webhook_url,
         ),
     )

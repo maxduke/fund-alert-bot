@@ -30,7 +30,7 @@ from fund_alert_bot.checks import (
     process_scheduled_dca_occurrences,
     reserve_drawdown_plan_data_unavailable_notice,
 )
-from fund_alert_bot.config import NotificationSettings
+from fund_alert_bot.config import NotificationSettings, parse_hhmm_time
 from fund_alert_bot.db import (
     initialize_database,
     list_enabled_rules,
@@ -99,21 +99,7 @@ def parse_fund_nav_process_time(raw_value: str) -> time:
 
 
 def _parse_hhmm_time(raw_value: str, *, name: str) -> time:
-    pieces = raw_value.strip().split(":")
-    if len(pieces) != 2:
-        raise ValueError(f"{name} must use HH:MM")
-
-    raw_hour, raw_minute = pieces
-    try:
-        hour = int(raw_hour)
-        minute = int(raw_minute)
-    except ValueError as exc:
-        raise ValueError(f"{name} must use HH:MM") from exc
-
-    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
-        raise ValueError(f"{name} must be a valid 24-hour time")
-
-    return time(hour=hour, minute=minute)
+    return time.fromisoformat(parse_hhmm_time(raw_value, name=name))
 
 
 def create_weekday_after_close_trigger(

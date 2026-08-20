@@ -1806,6 +1806,14 @@ def build_command_handlers(
     timezone_info = ZoneInfo(timezone)
     cn_market_timezone = ZoneInfo("Asia/Shanghai")
 
+    def purge_drafts(now: datetime) -> None:
+        """Drop expired in-memory Telegram confirmations at command boundaries."""
+
+        for drafts in (plan_drafts, manual_add_drafts, position_sync_drafts):
+            for token, draft in tuple(drafts.items()):
+                if draft.expires_at <= now:
+                    drafts.pop(token, None)
+
     async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context
         if await reject_if_unauthorized(update, allowed_user_ids):
@@ -2167,9 +2175,7 @@ def build_command_handlers(
             )
 
         now = _clock_now(clock)
-        for old_token, draft in tuple(plan_drafts.items()):
-            if draft.expires_at <= now:
-                plan_drafts.pop(old_token, None)
+        purge_drafts(now)
         token = secrets.token_urlsafe(9)
         plan_drafts[token] = DrawdownPlanDraft(
             user_id=user_id,
@@ -2208,6 +2214,7 @@ def build_command_handlers(
         await query.answer()
         if await reject_if_unauthorized(update, allowed_user_ids):
             return
+        purge_drafts(_clock_now(clock))
         data = str(getattr(query, "data", ""))
         action, separator, token = data.partition(":")
         if not separator or action not in {
@@ -2263,9 +2270,7 @@ def build_command_handlers(
         selection: ManualAddSelection,
     ) -> tuple[str, ManualAddDraft]:
         now = _clock_now(clock)
-        for old_token, old_draft in tuple(manual_add_drafts.items()):
-            if old_draft.expires_at <= now:
-                manual_add_drafts.pop(old_token, None)
+        purge_drafts(now)
         token = secrets.token_urlsafe(9)
         draft = ManualAddDraft(
             user_id=user_id,
@@ -2752,8 +2757,9 @@ def build_command_handlers(
         await _edit_message_text(query, message)
 
     def get_manual_add_draft(update: Update, token: str) -> ManualAddDraft | None:
-        draft = manual_add_drafts.get(token)
         now = _clock_now(clock)
+        purge_drafts(now)
+        draft = manual_add_drafts.get(token)
         if (
             draft is None
             or draft.expires_at <= now
@@ -3044,6 +3050,7 @@ def build_command_handlers(
     ) -> None:
         if await reject_if_unauthorized(update, allowed_user_ids):
             return
+        purge_drafts(_clock_now(clock))
         try:
             command = parse_sync_position_args(getattr(context, "args", ()))
         except CommandParseError as exc:
@@ -3179,12 +3186,13 @@ def build_command_handlers(
         await query.answer()
         if await reject_if_unauthorized(update, allowed_user_ids):
             return
+        now = _clock_now(clock)
+        purge_drafts(now)
         parts = str(getattr(query, "data", "")).split(":")
         if len(parts) != 3:
             return
         token, choice = parts[1], parts[2]
         draft = position_sync_drafts.get(token)
-        now = _clock_now(clock)
         if (
             draft is None
             or draft.expires_at <= now
