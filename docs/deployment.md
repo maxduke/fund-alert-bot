@@ -140,8 +140,13 @@ invalid, or unverifiable balance leaves the patch disabled, uses direct data
 sources, and sends a warning through the enabled notification channels;
 recharge or fix the token and restart the container. The container already includes the pinned
 [`akshare-proxy-patch==0.5.0`](https://github.com/HelloYie/akshare-proxy-patch);
-no runtime `pip install` is needed. The bot hooks only its Eastmoney domains and
-keeps the patch's concurrent `fast` mode off. A low retry count and the bot's
+no runtime `pip install` is needed. The vendor's balance endpoint is currently
+HTTP-only: setting `AKSHARE_PROXY_ENABLED=true` sends the reusable token in a
+plaintext URL that may be visible to network intermediaries and provider/access
+logs. Enable it only if you explicitly accept that risk and trust the network
+path; prefer a vendor-supported HTTPS endpoint with header/body credentials
+when available. The bot hooks only its Eastmoney domains and keeps the patch's
+concurrent `fast` mode off. A low retry count and the bot's
 short in-process caches are intentional cost controls. With the proxy enabled,
 the patch owns retries for paid Eastmoney requests and the provider calls each
 Eastmoney operation once; other data sources keep their normal retry budget. Do not

@@ -12,6 +12,9 @@ import requests
 LOGGER = logging.getLogger(__name__)
 
 _PROXY_GATEWAY = "101.201.173.125"
+# The vendor currently exposes this lookup over HTTP only, sending the reusable
+# token in the URL without transport encryption; use a vendor HTTPS endpoint
+# with header/body credentials here if one becomes available.
 _PROXY_BALANCE_URL = "http://101.201.173.125:47001/api/token/{token}"
 _PROXY_BALANCE_TIMEOUT_SECONDS = 5
 _EASTMONEY_HOOK_DOMAINS = (
