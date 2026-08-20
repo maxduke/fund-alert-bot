@@ -7,10 +7,12 @@ import math
 import sqlite3
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from fund_alert_bot.rules.drawdown_plan import format_plan_amount, format_plan_percent
 
@@ -25,6 +27,11 @@ SUPPRESSING_ALERT_NOTIFICATION_STATUSES = (
 STANDARD_NOTIFICATION_RECOVERY_MIGRATION_KEY = "standard_notification_recovery_v1"
 STANDARD_NOTIFICATION_RECOVERY_NOTICE_TITLE = "Reminder recovery notice"
 DEFAULT_RETENTION_DAYS = 400
+NOTIFICATION_DELIVERY_PENDING = "pending"
+NOTIFICATION_DELIVERY_SENDING = "sending"
+NOTIFICATION_DELIVERY_SENT = "sent"
+NOTIFICATION_DELIVERY_FAILED = "failed"
+NOTIFICATION_DELIVERY_CLAIM_LEASE_SECONDS = 120
 
 
 def connect(sqlite_path: str | Path) -> sqlite3.Connection:
@@ -87,6 +94,26 @@ def init_db(connection: sqlite3.Connection) -> None:
             notification_sent_at TEXT,
             notification_result_json TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS notification_deliveries (
+            event_id INTEGER NOT NULL REFERENCES alert_events(id) ON DELETE CASCADE,
+            target_key TEXT NOT NULL,
+            channel TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending' CHECK (
+                status IN ('pending', 'sending', 'sent', 'failed')
+            ),
+            claim_token TEXT,
+            claim_until TEXT,
+            attempted_at TEXT,
+            sent_at TEXT,
+            result_json TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (event_id, target_key)
+        );
+
+        CREATE INDEX IF NOT EXISTS notification_deliveries_claim_lookup
+        ON notification_deliveries(status, claim_until, event_id);
 
         CREATE TABLE IF NOT EXISTS notification_channels (
             id INTEGER PRIMARY KEY,
@@ -3225,6 +3252,330 @@ def record_alert_notification_result(
         ),
     )
     connection.commit()
+
+
+@dataclass(frozen=True, slots=True)
+class NotificationDeliveryClaim:
+    """One leased event/notification-target delivery attempt."""
+
+    event_id: int
+    target_key: str
+    channel: str
+    claim_token: str
+
+
+def ensure_notification_delivery_targets(
+    connection: sqlite3.Connection,
+    *,
+    event_ids: Sequence[int],
+    targets: Sequence[tuple[str, str]],
+) -> None:
+    """Freeze the currently configured targets for events without targets."""
+
+    normalized_event_ids = tuple(dict.fromkeys(int(event_id) for event_id in event_ids))
+    normalized_targets = tuple(
+        (str(target_key), str(channel)) for target_key, channel in targets
+    )
+    if not normalized_event_ids:
+        return
+    if any(not target_key or not channel for target_key, channel in normalized_targets):
+        raise ValueError("Notification targets must have non-empty keys and channels.")
+    if len({target_key for target_key, _ in normalized_targets}) != len(
+        normalized_targets
+    ):
+        raise ValueError("Notification target keys must be unique.")
+
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        now = _utc_now_text()
+        for event_id in normalized_event_ids:
+            event = connection.execute(
+                "SELECT notification_status FROM alert_events WHERE id = ?",
+                (event_id,),
+            ).fetchone()
+            if (
+                event is None
+                or str(event["notification_status"]) == ALERT_NOTIFICATION_SENT
+            ):
+                continue
+            if (
+                connection.execute(
+                    """
+                SELECT 1
+                FROM notification_deliveries
+                WHERE event_id = ?
+                LIMIT 1
+                """,
+                    (event_id,),
+                ).fetchone()
+                is not None
+            ):
+                continue
+            connection.executemany(
+                """
+                INSERT INTO notification_deliveries (
+                    event_id, target_key, channel, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                [
+                    (event_id, target_key, channel, now, now)
+                    for target_key, channel in normalized_targets
+                ],
+            )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+
+
+def claim_notification_deliveries(
+    connection: sqlite3.Connection,
+    *,
+    event_ids: Sequence[int],
+    target_keys: Sequence[str] | None = None,
+    lease_seconds: int = NOTIFICATION_DELIVERY_CLAIM_LEASE_SECONDS,
+) -> list[NotificationDeliveryClaim]:
+    """Atomically lease retryable target deliveries for one dispatcher."""
+
+    normalized_event_ids = tuple(dict.fromkeys(int(event_id) for event_id in event_ids))
+    if not normalized_event_ids:
+        return []
+    if isinstance(lease_seconds, bool) or lease_seconds <= 0:
+        raise ValueError("lease_seconds must be positive.")
+    normalized_target_keys = (
+        None
+        if target_keys is None
+        else tuple(dict.fromkeys(str(target_key) for target_key in target_keys))
+    )
+
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        now = _utc_now_text()
+        claim_until = (
+            (datetime.now(UTC) + timedelta(seconds=lease_seconds))
+            .replace(microsecond=0)
+            .isoformat()
+        )
+        event_placeholders = ", ".join("?" for _ in normalized_event_ids)
+        params: list[object] = [
+            *normalized_event_ids,
+            NOTIFICATION_DELIVERY_PENDING,
+            NOTIFICATION_DELIVERY_FAILED,
+            NOTIFICATION_DELIVERY_SENDING,
+            now,
+        ]
+        target_filter = ""
+        if normalized_target_keys:
+            target_placeholders = ", ".join("?" for _ in normalized_target_keys)
+            target_filter = f"AND target_key IN ({target_placeholders})"
+            params.extend(normalized_target_keys)
+        rows = connection.execute(
+            f"""
+            SELECT event_id, target_key, channel
+            FROM notification_deliveries
+            WHERE event_id IN ({event_placeholders})
+                AND (
+                    status IN (?, ?)
+                    OR (status = ? AND (claim_until IS NULL OR claim_until <= ?))
+                )
+                {target_filter}
+            ORDER BY event_id, target_key
+            """,
+            params,
+        ).fetchall()
+        claims: list[NotificationDeliveryClaim] = []
+        for row in rows:
+            token = uuid4().hex
+            connection.execute(
+                """
+                UPDATE notification_deliveries
+                SET
+                    status = ?,
+                    claim_token = ?,
+                    claim_until = ?,
+                    updated_at = ?
+                WHERE event_id = ? AND target_key = ?
+                """,
+                (
+                    NOTIFICATION_DELIVERY_SENDING,
+                    token,
+                    claim_until,
+                    now,
+                    int(row["event_id"]),
+                    str(row["target_key"]),
+                ),
+            )
+            claims.append(
+                NotificationDeliveryClaim(
+                    event_id=int(row["event_id"]),
+                    target_key=str(row["target_key"]),
+                    channel=str(row["channel"]),
+                    claim_token=token,
+                )
+            )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    return claims
+
+
+def complete_notification_delivery(
+    connection: sqlite3.Connection,
+    *,
+    event_id: int,
+    target_key: str,
+    claim_token: str,
+    result: Any,
+) -> bool:
+    """Complete a leased target delivery, ignoring stale workers."""
+
+    result_payload = _notification_result_payload(result)
+    success = bool(result_payload["success"])
+    now = _utc_now_text()
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        cursor = connection.execute(
+            """
+            UPDATE notification_deliveries
+            SET
+                status = ?,
+                claim_token = NULL,
+                claim_until = NULL,
+                attempted_at = ?,
+                sent_at = CASE WHEN ? THEN ? ELSE NULL END,
+                result_json = ?,
+                updated_at = ?
+            WHERE event_id = ?
+                AND target_key = ?
+                AND claim_token = ?
+                AND status = ?
+            """,
+            (
+                NOTIFICATION_DELIVERY_SENT if success else NOTIFICATION_DELIVERY_FAILED,
+                now,
+                success,
+                now,
+                _json_text(result_payload),
+                now,
+                int(event_id),
+                str(target_key),
+                str(claim_token),
+                NOTIFICATION_DELIVERY_SENDING,
+            ),
+        )
+        if cursor.rowcount == 0:
+            connection.rollback()
+            return False
+        _refresh_alert_notification_status(connection, event_id=int(event_id))
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    return True
+
+
+def refresh_alert_notification_status(
+    connection: sqlite3.Connection,
+    *,
+    event_ids: Sequence[int],
+) -> None:
+    """Rebuild legacy event aggregates from target delivery rows."""
+
+    normalized_event_ids = tuple(dict.fromkeys(int(event_id) for event_id in event_ids))
+    if not normalized_event_ids:
+        return
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        for event_id in normalized_event_ids:
+            _refresh_alert_notification_status(connection, event_id=event_id)
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+
+
+def _refresh_alert_notification_status(
+    connection: sqlite3.Connection,
+    *,
+    event_id: int,
+) -> None:
+    rows = connection.execute(
+        """
+        SELECT target_key, channel, status, attempted_at, sent_at, result_json
+        FROM notification_deliveries
+        WHERE event_id = ?
+        ORDER BY target_key
+        """,
+        (event_id,),
+    ).fetchall()
+    now = _utc_now_text()
+    if not rows:
+        existing = connection.execute(
+            "SELECT notification_status FROM alert_events WHERE id = ?",
+            (event_id,),
+        ).fetchone()
+        if (
+            existing is not None
+            and str(existing["notification_status"]) == ALERT_NOTIFICATION_SENT
+        ):
+            return
+        status = ALERT_NOTIFICATION_FAILED
+        attempted_at = now
+        sent_at = None
+        result_payload: list[dict[str, object]] = [
+            {"channel": "", "success": False, "detail": "no_targets"}
+        ]
+    else:
+        statuses = {str(row["status"]) for row in rows}
+        if statuses == {NOTIFICATION_DELIVERY_SENT}:
+            status = ALERT_NOTIFICATION_SENT
+        elif statuses & {
+            NOTIFICATION_DELIVERY_PENDING,
+            NOTIFICATION_DELIVERY_SENDING,
+        }:
+            status = ALERT_NOTIFICATION_PENDING
+        else:
+            status = ALERT_NOTIFICATION_FAILED
+        attempted_values = [
+            str(row["attempted_at"]) for row in rows if row["attempted_at"] is not None
+        ]
+        sent_values = [
+            str(row["sent_at"]) for row in rows if row["sent_at"] is not None
+        ]
+        attempted_at = max(attempted_values, default=None)
+        sent_at = (
+            max(sent_values, default=None)
+            if status == ALERT_NOTIFICATION_SENT
+            else None
+        )
+        result_payload = []
+        for row in rows:
+            try:
+                value = json.loads(str(row["result_json"]))
+            except (TypeError, json.JSONDecodeError):
+                value = {
+                    "channel": str(row["channel"]),
+                    "success": str(row["status"]) == NOTIFICATION_DELIVERY_SENT,
+                    "detail": "",
+                }
+            if not isinstance(value, dict):
+                value = {"channel": str(row["channel"]), "success": False}
+            value = dict(value)
+            value["target_key"] = str(row["target_key"])
+            result_payload.append(value)
+    connection.execute(
+        """
+        UPDATE alert_events
+        SET
+            notification_status = ?,
+            notification_attempted_at = ?,
+            notification_sent_at = ?,
+            notification_result_json = ?
+        WHERE id = ?
+        """,
+        (status, attempted_at, sent_at, _json_text(result_payload), event_id),
+    )
 
 
 def get_active_drawdown_cycle(

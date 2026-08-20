@@ -27,11 +27,74 @@ class NotificationService:
 
     def __init__(self, channels: Sequence[NotificationChannel]) -> None:
         self._channels = tuple(channels)
+        targets: list[tuple[str, str, NotificationChannel]] = []
+        for channel in self._channels:
+            channel_targets = getattr(channel, "target_keys", ())
+            if not channel_targets:
+                channel_targets = (channel.name,)
+            for target_key in channel_targets:
+                targets.append((str(target_key), channel.name, channel))
+        self._targets = tuple(targets)
 
     @property
     def enabled_channel_names(self) -> tuple[str, ...]:
         """Return the enabled notification channel names."""
         return tuple(channel.name for channel in self._channels)
+
+    @property
+    def delivery_targets(self) -> tuple[tuple[str, str], ...]:
+        """Return frozen-delivery keys and their channel names."""
+        return tuple(
+            (target_key, channel_name) for target_key, channel_name, _ in self._targets
+        )
+
+    async def send_target(
+        self,
+        target_key: str,
+        *,
+        title: str,
+        body: str,
+        telegram_actions: tuple[tuple[tuple[str, str], ...], ...] = (),
+    ) -> NotificationResult:
+        """Send one message to one durable notification target."""
+        target = next(
+            (item for item in self._targets if item[0] == target_key),
+            None,
+        )
+        if target is None:
+            return NotificationResult(
+                channel="",
+                success=False,
+                detail="unknown_target",
+            )
+
+        message = NotificationMessage(
+            title=localize_text(title),
+            body=localize_text(body),
+            telegram_actions=localize_actions(telegram_actions),
+        )
+        _, _, channel = target
+        try:
+            send_to = getattr(channel, "send_to", None)
+            if callable(send_to):
+                result = await send_to(target_key, message)
+            else:
+                result = await channel.send(message)
+        except Exception as exc:  # noqa: BLE001
+            result = NotificationResult(
+                channel=channel.name,
+                success=False,
+                detail=f"unexpected_error={type(exc).__name__}",
+            )
+        if result.success:
+            LOGGER.info("Notification sent through target=%s", target_key)
+        else:
+            LOGGER.warning(
+                "Notification failed through target=%s detail=%s",
+                target_key,
+                result.detail or "unknown",
+            )
+        return result
 
     async def send_alert(
         self,
@@ -45,32 +108,16 @@ class NotificationService:
             LOGGER.warning("Notification skipped; no enabled notification channels")
             return []
 
-        message = NotificationMessage(
-            title=localize_text(title),
-            body=localize_text(body),
-            telegram_actions=localize_actions(telegram_actions),
-        )
         results: list[NotificationResult] = []
-        for channel in self._channels:
-            try:
-                result = await channel.send(message)
-            except Exception as exc:  # noqa: BLE001
-                result = NotificationResult(
-                    channel=channel.name,
-                    success=False,
-                    detail=f"unexpected_error={type(exc).__name__}",
+        for target_key, _, _ in self._targets:
+            results.append(
+                await self.send_target(
+                    target_key,
+                    title=title,
+                    body=body,
+                    telegram_actions=telegram_actions,
                 )
-
-            results.append(result)
-            if result.success:
-                LOGGER.info("Notification sent through channel=%s", result.channel)
-            else:
-                LOGGER.warning(
-                    "Notification failed through channel=%s detail=%s",
-                    result.channel,
-                    result.detail or "unknown",
-                )
-
+            )
         return results
 
 
