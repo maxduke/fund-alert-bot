@@ -47,13 +47,16 @@ from fund_alert_bot.commands import (
 )
 from fund_alert_bot.config import NotificationSettings
 from fund_alert_bot.db import (
+    add_enhanced_dca_rule,
     add_rule,
     connect,
+    create_scheduled_dca_occurrence,
     get_active_drawdown_cycle,
     get_active_position_cycle,
     get_drawdown_tier_reminder_states,
     get_fund_settings,
     get_position_snapshot,
+    get_scheduled_dca_occurrence,
     init_db,
     list_pending_position_items,
     list_rules,
@@ -163,6 +166,14 @@ def test_parse_valid_drawdown_command() -> None:
     }
 
 
+def test_parse_drawdown_command_recovers_telegram_split_quoted_name() -> None:
+    command = parse_add_drawdown_args(
+        ["cn_index", "399006", '"ChiNext', 'Index"', "365", "10,15"]
+    )
+
+    assert command.name == "ChiNext Index"
+
+
 def test_reply_text_splits_long_messages_and_keeps_buttons_on_last_page() -> None:
     message = FakeMessage()
     markup = object()
@@ -205,6 +216,14 @@ def test_parse_valid_profit_command() -> None:
     }
 
 
+def test_parse_profit_command_recovers_telegram_split_quoted_name() -> None:
+    command = parse_add_profit_args(
+        ["cn_open_fund", "110026", '"A500', 'feeder"', "auto", "20,30"]
+    )
+
+    assert command.name == "A500 feeder"
+
+
 def test_parse_valid_dca_command_with_chinese_weekday() -> None:
     command = parse_add_dca_args(["创业板", "周四", "1000"])
 
@@ -212,6 +231,12 @@ def test_parse_valid_dca_command_with_chinese_weekday() -> None:
     assert command.weekday == "THU"
     assert command.amount == 1000
     assert dca_params(command) == {"weekday": "THU", "amount": 1000}
+
+
+def test_parse_simple_dca_recovers_telegram_split_quoted_name() -> None:
+    command = parse_add_dca_args(['"Core', 'fund"', "周四", "1000"])
+
+    assert command.name == "Core fund"
 
 
 def test_parse_valid_dca_command_with_english_weekday() -> None:
@@ -274,6 +299,7 @@ def test_fractional_drawdown_tiers_keep_precision_in_actions_and_confirmation() 
         "仅记录 -15.1% ¥100.005",
         "仅记录 -15.4% ¥100.006",
     ]
+    assert rows[0][0][0] == "✅ 全部已加仓"
     assert "• -15.1% → ¥100.005" in confirmation
     assert "• -15.4% → ¥100.006" in confirmation
     assert "Configured gross total: ¥200.011" in confirmation
@@ -359,6 +385,8 @@ def test_parse_fund_settings_and_position_commands() -> None:
 
     marked = parse_mark_added_args(["12", "15,20"])
     assert (marked.plan_id, marked.tier_keys) == (12, ("0.15", "0.2"))
+    historical = parse_mark_added_args(["12", "15,20", "2024-01-02"])
+    assert historical.action_date == date(2024, 1, 2)
 
 
 @pytest.mark.parametrize(
@@ -721,9 +749,10 @@ def test_list_shows_asset_type() -> None:
     finally:
         connection.close()
 
-    assert "type=drawdown_from_high" in response
-    assert "asset_type=cn_open_fund" in response
-    assert "symbol=110026" in response
+    assert "Type: drawdown_from_high" in response
+    assert "Status: enabled" in response
+    assert "Asset type: cn_open_fund" in response
+    assert "Symbol: 110026" in response
 
 
 def test_list_shows_profit_rule() -> None:
@@ -743,10 +772,12 @@ def test_list_shows_profit_rule() -> None:
     finally:
         connection.close()
 
-    assert "type=profit_reminder" in response
-    assert "asset_type=cn_etf" in response
-    assert "symbol=159915" in response
-    assert 'params={"cost":1.85,"thresholds":[0.25,0.4]}' in response
+    assert "#1 ChiNext ETF" in response
+    assert "Type: profit_reminder" in response
+    assert "Asset type: cn_etf" in response
+    assert "Symbol: 159915" in response
+    assert "Cost: 1.85" in response
+    assert "Thresholds: 25%, 40%" in response
 
 
 def test_list_shows_dca_rule() -> None:
@@ -766,9 +797,34 @@ def test_list_shows_dca_rule() -> None:
     finally:
         connection.close()
 
-    assert "type=dca_reminder" in response
-    assert "name=创业板" in response
-    assert 'params={"amount":1000,"weekday":"THU"}' in response
+    assert "#1 创业板" in response
+    assert "Type: dca_reminder" in response
+    assert "Weekday: THU" in response
+    assert "Gross amount: ¥1,000" in response
+
+
+def test_list_reports_malformed_rule_without_crashing() -> None:
+    connection = connect(":memory:")
+    try:
+        init_db(connection)
+        rule_id = add_rule(
+            connection,
+            type="profit_reminder",
+            asset_type="cn_etf",
+            symbol="159915",
+            name="broken",
+            params={"cost": 1.85, "thresholds": [0.25]},
+        )
+        connection.execute(
+            "UPDATE rules SET params_json = 'not-json' WHERE id = ?",
+            (rule_id,),
+        )
+        connection.commit()
+        response = format_rules_list(list_rules(connection))
+    finally:
+        connection.close()
+
+    assert "Configuration invalid" in response
 
 
 def test_add_dca_command_persists_rule(tmp_path) -> None:
@@ -878,6 +934,47 @@ def test_add_enhanced_dca_persists_settings_and_plans_instructions(tmp_path) -> 
     assert "Verified fund type: 指数型-股票" in message.replies[0]
     assert "A500 feeder (fixed DCA 1)" in message.replies[1]
     assert "remember /sync_position" in message.replies[1]
+
+
+def test_add_enhanced_dca_reports_sync_required_snapshot_as_not_ready(tmp_path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    with open_connection(sqlite_path) as connection:
+        init_db(connection)
+        upsert_position_snapshot(
+            connection,
+            fund_symbol="110026",
+            units=100,
+            average_unit_cost=1,
+        )
+        connection.execute(
+            "UPDATE position_snapshots SET position_sync_required_since = ? "
+            "WHERE fund_symbol = ?",
+            ("2024-01-01T00:00:00+08:00", "110026"),
+        )
+        connection.commit()
+    provider = FakeProvider(_history(["2024-01-02"], [1]))
+    provider.get_fund_type = lambda _symbol: "指数型-股票"
+    handlers = build_command_handlers(
+        {123},
+        sqlite_path=sqlite_path,
+        market_data_provider=provider,
+    )
+    message = FakeMessage()
+
+    asyncio.run(
+        _handler_by_command(handlers, "add_dca").callback(
+            SimpleNamespace(
+                effective_user=SimpleNamespace(id=123),
+                effective_chat=SimpleNamespace(id=456),
+                effective_message=message,
+            ),
+            SimpleNamespace(args=["110026", "A500", "周四", "2000", "rate:0.12%"]),
+        )
+    )
+
+    assert "Position readiness: SETUP_REQUIRED" in message.replies[0]
+    assert "position sync required" in message.replies[0]
+    assert "Run /sync_position" in message.replies[0]
 
 
 def test_add_enhanced_dca_rejects_qdii_metadata(tmp_path) -> None:
@@ -1005,6 +1102,190 @@ def test_mark_added_records_one_pending_estimate_after_confirmation(tmp_path) ->
     assert len(actions) == 1
     assert actions[0]["tier_key"] == "0.15"
     assert all("waiting for exact dated NAV" in edit for edit in query.edits)
+
+
+def test_mark_added_records_prior_pending_and_new_tier_together(tmp_path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    rule_id = _prepare_ready_plan_alert(
+        sqlite_path,
+        closes=[100, 84],
+        expected_date=date(2024, 1, 2),
+    )
+    with open_connection(sqlite_path) as connection:
+        second = evaluate_drawdown_plan_rule(
+            connection,
+            list_rules(connection)[0],
+            _plan_history([100, 84, 79]),
+            expected_date=date(2024, 1, 3),
+        )
+    assert second.notification is not None
+
+    handlers = build_command_handlers(
+        {123},
+        sqlite_path=sqlite_path,
+        market_calendar=FakeMarketCalendar(),
+        now_factory=lambda: datetime(2024, 1, 3, 6, 0, tzinfo=UTC),
+    )
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        effective_message=message,
+    )
+    asyncio.run(
+        _handler_by_command(handlers, "mark_added").callback(
+            update,
+            SimpleNamespace(args=[str(rule_id), "15,20"]),
+        )
+    )
+    query = FakeCallbackQuery(
+        message.reply_markups[0].inline_keyboard[0][0].callback_data
+    )
+    update.callback_query = query
+    asyncio.run(
+        _callback_by_name(handlers, "manual_add_confirm_callback").callback(
+            update,
+            SimpleNamespace(),
+        )
+    )
+
+    with open_connection(sqlite_path) as connection:
+        actions = connection.execute(
+            "SELECT tier_key FROM manual_add_actions ORDER BY tier_key"
+        ).fetchall()
+
+    assert [row["tier_key"] for row in actions] == ["0.15", "0.2"]
+
+
+def test_mark_added_records_historical_date_without_estimate(tmp_path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    rule_id = _prepare_ready_plan_alert(
+        sqlite_path,
+        closes=[100, 80],
+        expected_date=date(2024, 1, 2),
+    )
+    handlers = build_command_handlers(
+        {123},
+        sqlite_path=sqlite_path,
+        now_factory=lambda: datetime(2024, 1, 3, 6, 0, tzinfo=UTC),
+    )
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        effective_message=message,
+    )
+
+    asyncio.run(
+        _handler_by_command(handlers, "mark_added").callback(
+            update,
+            SimpleNamespace(args=[str(rule_id), "15,20", "2024-01-02"]),
+        )
+    )
+    assert "Historical correction" in message.replies[0]
+    callback_data = message.reply_markups[0].inline_keyboard[0][0].callback_data
+    query = FakeCallbackQuery(callback_data)
+    asyncio.run(
+        _callback_by_name(handlers, "manual_add_confirm_callback").callback(
+            SimpleNamespace(
+                effective_user=SimpleNamespace(id=123),
+                effective_chat=SimpleNamespace(id=456),
+                effective_message=message,
+                callback_query=query,
+            ),
+            SimpleNamespace(),
+        )
+    )
+
+    with open_connection(sqlite_path) as connection:
+        actions = connection.execute(
+            "SELECT * FROM manual_add_actions ORDER BY tier_key"
+        ).fetchall()
+        estimate_count = connection.execute(
+            "SELECT COUNT(*) FROM manual_add_estimates"
+        ).fetchone()[0]
+        settings = get_fund_settings(connection, "000001")
+
+    assert [row["tier_key"] for row in actions] == ["0.15", "0.2"]
+    assert {row["action_date"] for row in actions} == {"2024-01-02"}
+    assert estimate_count == 0
+    assert settings["position_sync_required_since"] is not None
+    assert "Position sync is required" in query.edits[-1]
+
+
+def test_mark_added_past_date_is_required_when_same_day_event_is_missing(
+    tmp_path,
+) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    rule_id = _prepare_ready_plan_alert(
+        sqlite_path,
+        closes=[100, 80],
+        expected_date=date(2024, 1, 2),
+    )
+    handlers = build_command_handlers(
+        {123},
+        sqlite_path=sqlite_path,
+        now_factory=lambda: datetime(2024, 1, 3, 6, 0, tzinfo=UTC),
+    )
+    message = FakeMessage()
+
+    asyncio.run(
+        _handler_by_command(handlers, "mark_added").callback(
+            SimpleNamespace(
+                effective_user=SimpleNamespace(id=123),
+                effective_chat=SimpleNamespace(id=456),
+                effective_message=message,
+            ),
+            SimpleNamespace(args=[str(rule_id), "15"]),
+        )
+    )
+
+    assert "For a past addition" in message.replies[0]
+
+
+def test_mark_added_rejects_a_future_action_date(tmp_path) -> None:
+    message = FakeMessage()
+    handlers = build_command_handlers(
+        {123},
+        sqlite_path=tmp_path / "fund_alert_bot.sqlite3",
+        now_factory=lambda: datetime(2024, 1, 3, 6, 0, tzinfo=UTC),
+    )
+
+    asyncio.run(
+        _handler_by_command(handlers, "mark_added").callback(
+            SimpleNamespace(
+                effective_user=SimpleNamespace(id=123),
+                effective_chat=SimpleNamespace(id=456),
+                effective_message=message,
+            ),
+            SimpleNamespace(args=["1", "15", "2024-01-04"]),
+        )
+    )
+
+    assert message.replies == ["action_date must not be in the future"]
+
+
+def test_historical_manual_add_cannot_create_an_estimate() -> None:
+    connection = connect(":memory:")
+    try:
+        init_db(connection)
+        with pytest.raises(ValueError, match="Historical additions cannot"):
+            record_manual_addition(
+                connection,
+                rule_id=1,
+                cycle_id=1,
+                source_alert_event_id=1,
+                fund_symbol="000001",
+                tiers=(DrawdownTier(0.15, 5000, "0.15"),),
+                action_at=datetime(2024, 1, 3, 8, tzinfo=UTC),
+                action_date_override=date(2024, 1, 2),
+                create_estimate=True,
+                cutoff_time="15:00",
+                cutoff_choice="before",
+                effective_date="2024-01-02",
+            )
+    finally:
+        connection.close()
 
 
 def test_mark_added_calendar_outage_returns_actionable_error(tmp_path) -> None:
@@ -1994,12 +2275,22 @@ def test_auto_profit_preview_and_position_actions(tmp_path) -> None:
     assert "Position: exact; last sync" in active_plans_message.replies[0]
     assert "Position value: ¥130.00" in active_plans_message.replies[0]
 
-    partial_query = FakeCallbackQuery(f"profit_action:{event_id}:partial")
+    no_action_query = FakeCallbackQuery(f"profit_action:{event_id}:none")
     callback_update = SimpleNamespace(
         effective_user=SimpleNamespace(id=123),
         effective_chat=SimpleNamespace(id=456),
-        callback_query=partial_query,
+        callback_query=no_action_query,
     )
+    asyncio.run(
+        _callback_by_name(handlers, "position_profit_action_callback").callback(
+            callback_update,
+            SimpleNamespace(),
+        )
+    )
+    assert "already recorded when this reminder was created" in no_action_query.edits[0]
+
+    partial_query = FakeCallbackQuery(f"profit_action:{event_id}:partial")
+    callback_update.callback_query = partial_query
     asyncio.run(
         _callback_by_name(handlers, "position_profit_action_callback").callback(
             callback_update,
@@ -2070,7 +2361,7 @@ def test_auto_profit_rejects_qdii_before_saving(tmp_path) -> None:
     assert "does not use the domestic CN valuation calendar" in message.replies[0]
 
 
-def test_delete_command_reports_disabled_drawdown_plan(tmp_path) -> None:
+def test_delete_command_confirms_before_disabling_drawdown_plan(tmp_path) -> None:
     sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
     with open_connection(sqlite_path) as connection:
         init_db(connection)
@@ -2096,14 +2387,32 @@ def test_delete_command_reports_disabled_drawdown_plan(tmp_path) -> None:
 
     with open_connection(sqlite_path) as connection:
         rule = list_rules(connection)[0]
+    assert rule["enabled"] == 1
+    assert "Action: soft-disable" in message.replies[0]
+
+    query = FakeCallbackQuery(
+        message.reply_markups[0].inline_keyboard[0][0].callback_data
+    )
+    asyncio.run(
+        _callback_by_name(handlers, "delete_rule_callback").callback(
+            SimpleNamespace(
+                effective_user=SimpleNamespace(id=123),
+                effective_chat=SimpleNamespace(id=456),
+                callback_query=query,
+            ),
+            SimpleNamespace(),
+        )
+    )
+    with open_connection(sqlite_path) as connection:
+        rule = list_rules(connection)[0]
 
     assert rule["enabled"] == 0
-    assert "status=disabled" in format_rules_list([rule])
-    assert message.replies == [f"Disabled drawdown plan id={rule_id}"]
+    assert "Status: disabled" in format_rules_list([rule])
+    assert query.edits == [f"Disabled rule id={rule_id} (A500)."]
 
 
 @pytest.mark.parametrize("malformed", [False, True])
-def test_delete_command_keeps_legacy_open_fund_behavior(
+def test_delete_command_confirms_legacy_hard_delete(
     tmp_path,
     malformed: bool,
 ) -> None:
@@ -2139,8 +2448,25 @@ def test_delete_command_keeps_legacy_open_fund_behavior(
     )
 
     with open_connection(sqlite_path) as connection:
+        assert len(list_rules(connection)) == 1
+    assert "Action: permanently delete" in message.replies[0]
+
+    query = FakeCallbackQuery(
+        message.reply_markups[0].inline_keyboard[0][0].callback_data
+    )
+    asyncio.run(
+        _callback_by_name(handlers, "delete_rule_callback").callback(
+            SimpleNamespace(
+                effective_user=SimpleNamespace(id=123),
+                effective_chat=SimpleNamespace(id=456),
+                callback_query=query,
+            ),
+            SimpleNamespace(),
+        )
+    )
+    with open_connection(sqlite_path) as connection:
         assert list_rules(connection) == []
-    assert message.replies == [f"Deleted rule id={rule_id}"]
+    assert query.edits == [f"Deleted rule id={rule_id} (A500)."]
 
 
 def test_check_sends_due_dca_without_market_data_fetch(tmp_path) -> None:
@@ -2480,18 +2806,36 @@ def _handler_by_command(handlers: list[object], command: str) -> object:
     raise AssertionError(f"handler not found: {command}")
 
 
-def test_merged_dca_skip_callback_preserves_other_buttons(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_merged_dca_skip_requires_separate_confirmation_and_preserves_buttons(
+    tmp_path: Path,
 ) -> None:
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
     sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
-    monkeypatch.setattr(
-        "fund_alert_bot.commands.skip_scheduled_dca_occurrence",
-        lambda *_args, **_kwargs: "skipped",
-    )
+    with open_connection(sqlite_path) as connection:
+        init_db(connection)
+        rule_id = add_enhanced_dca_rule(
+            connection,
+            fund_symbol="000001",
+            name="A500",
+            weekday="THU",
+            amount=1000,
+            fee_mode="rate",
+            fee_value=0,
+            holiday_policy="next",
+        )
+        create_scheduled_dca_occurrence(
+            connection,
+            rule_id=rule_id,
+            fund_symbol="000001",
+            due_date="2024-01-04",
+            gross_amount=1000,
+            holiday_policy="next",
+            effective_date="2024-01-04",
+            skipped=False,
+        )
     handlers = build_command_handlers({123}, sqlite_path=sqlite_path)
-    first_data = "dca_skip:1:2024-01-04"
+    first_data = f"dca_skip:{rule_id}:2024-01-04"
     second_data = "dca_skip:2:2024-01-04"
     markup = InlineKeyboardMarkup(
         (
@@ -2500,9 +2844,11 @@ def test_merged_dca_skip_callback_preserves_other_buttons(
         )
     )
     query = FakeCallbackQuery(first_data, reply_markup=markup)
+    message = FakeMessage()
     update = SimpleNamespace(
         effective_user=SimpleNamespace(id=123),
         effective_chat=SimpleNamespace(id=456),
+        effective_message=message,
         callback_query=query,
     )
 
@@ -2512,12 +2858,27 @@ def test_merged_dca_skip_callback_preserves_other_buttons(
         )
     )
 
-    assert query.edits == ["Skipped fixed DCA occurrence 1 / 2024-01-04."]
+    assert query.edits == []
+    assert "Confirm failed DCA deduction" in message.replies[0]
     assert [
         button.callback_data
         for row in query.message.reply_markup.inline_keyboard
         for button in row
-    ] == [second_data]
+    ] == [first_data, second_data]
+
+    confirm_query = FakeCallbackQuery(
+        message.reply_markups[0].inline_keyboard[0][0].callback_data
+    )
+    update.callback_query = confirm_query
+    asyncio.run(
+        _callback_by_name(handlers, "dca_skip_confirm_callback").callback(
+            update, SimpleNamespace()
+        )
+    )
+    with open_connection(sqlite_path) as connection:
+        occurrence = get_scheduled_dca_occurrence(connection, rule_id, "2024-01-04")
+    assert occurrence["status"] == "skipped"
+    assert "Skipped fixed DCA occurrence" in confirm_query.edits[-1]
 
 
 def _drawdown_plan_callback(handlers: list[object]) -> object:

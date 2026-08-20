@@ -306,7 +306,7 @@ For every plan's `cn_etf` Reference ETF:
 6. Include the three Telegram actions **Added**, **Defer for today**, and
    **Skip for this cycle**. Added supports all or partial tier selection; Skip
    supports all or partial selection with confirmation. Include the exact
-   `/mark_added <plan_id> <tier_percentages>` fallback and a prominent warning
+   `/mark_added <plan_id> <tier_percentages> [YYYY-MM-DD]` fallback and a prominent warning
    that it records only a completed user action.
 7. Do not insert Tier Records automatically; the only allowed state mutation is
    initialization of a missing cycle from confirmed history.
@@ -483,7 +483,8 @@ Also display the derived `READY` or `SETUP_REQUIRED` state. Persist one per-fund
 `position_sync_required_since` marker only when a user records a manual addition
 that cannot be estimated because setup is incomplete. Any later successful
 Position Sync explicitly replaces the current platform position and clears that
-marker; do not reconstruct or apply the earlier purchase afterward.
+marker. A dated historical correction must match an eligible stored event in
+the active cycle and records no NAV, units, or cost estimate.
 
 ## Scheduled DCA position estimates
 
@@ -491,7 +492,7 @@ Keep the existing three-argument `/add_dca <name> <weekday> <amount>` command
 compatible as a reminder-only rule. Add the enhanced form:
 
 ```text
-/add_dca <fund_symbol> <name> <weekday> <gross_amount> <fee> [holiday:next|holiday:skip]
+/add_dca <fund_symbol> <name> <weekday> <gross_amount> <rate:<percent>%|fixed:<RMB>> [holiday:next|holiday:skip]
 ```
 
 Distinguish the legacy three-argument form from the enhanced five- or six-
