@@ -38,6 +38,7 @@ from fund_alert_bot.db import (
     list_retryable_position_profit_alert_events,
     list_retryable_standard_alert_events,
     open_connection,
+    prune_database,
 )
 from fund_alert_bot.market_data import (
     AkshareMarketDataProvider,
@@ -769,6 +770,17 @@ async def run_scheduled_fund_nav_process(
                 len(result.no_data_skips),
                 len(result.errors),
             )
+        try:
+            with open_connection(sqlite_path) as connection:
+                initialize_database(connection)
+                pruned = prune_database(connection, today=processing_date)
+            LOGGER.info(
+                "Database retention prune completed date=%s deleted=%s",
+                processing_date.isoformat(),
+                {table: count for table, count in pruned.items() if count},
+            )
+        except Exception:
+            LOGGER.exception("Database retention prune failed")
 
 
 async def run_scheduled_dca_check(

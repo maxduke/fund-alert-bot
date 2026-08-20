@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 from fund_alert_bot.commands import create_application, publish_bot_command_menu
 from fund_alert_bot.config import load_settings
-from fund_alert_bot.db import initialize_database, open_connection
+from fund_alert_bot.db import initialize_database, open_connection, prune_database
 from fund_alert_bot.i18n import set_language
 from fund_alert_bot.market_data import (
     AkshareMarketDataProvider,
@@ -51,8 +51,15 @@ def run() -> None:
         retry=settings.akshare_proxy_retry,
     )
 
+    startup_date = datetime.now(ZoneInfo(settings.timezone)).date()
     with open_connection(settings.sqlite_path) as connection:
         initialize_database(connection)
+        pruned = prune_database(connection, today=startup_date)
+    LOGGER.info(
+        "Startup database retention prune completed date=%s deleted=%s",
+        startup_date.isoformat(),
+        {table: count for table, count in pruned.items() if count},
+    )
 
     market_data_provider = AkshareMarketDataProvider(
         retries=settings.akshare_retries,

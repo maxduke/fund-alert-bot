@@ -427,6 +427,27 @@ def test_equal_peak_after_decline_starts_cycle_but_repeated_equal_does_not() -> 
     assert repeated.cycle_changed is False
 
 
+def test_equal_peak_uses_persisted_decline_after_history_is_pruned() -> None:
+    evaluation = evaluate_drawdown_plan(
+        _dated_history(["2020-01-01", "2026-01-01"], [100, 100]),
+        _config([(0.15, 5000)]),
+        reference_symbol="510300",
+        expected_date=date(2026, 1, 1),
+        active_cycle=ActiveDrawdownCycle(
+            1,
+            date(2020, 1, 1),
+            100,
+            date(2025, 12, 31),
+            saw_below_peak=True,
+        ),
+        recorded_tier_keys={"0.15"},
+    )
+
+    assert evaluation.cycle_changed is True
+    assert evaluation.peak_date == date(2026, 1, 1)
+    assert evaluation.saw_below_peak is False
+
+
 def test_downtime_crossing_that_recovered_is_not_backfilled() -> None:
     evaluation = evaluate_drawdown_plan(
         _history([100, 70, 90]),

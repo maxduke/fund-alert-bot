@@ -466,6 +466,7 @@ def evaluate_drawdown_plan_rule(
         peak_date=evaluation.peak_date.isoformat(),
         peak_price=evaluation.peak_price,
         evaluation_date=evaluation.latest_date.isoformat(),
+        saw_below_peak=evaluation.saw_below_peak,
         tiers_to_record=tiers_to_record,
         alert_factory=(None if not actionable_tiers else build_alert),
     )
@@ -1228,6 +1229,7 @@ def _load_drawdown_plan_state(
         peak_date=date.fromisoformat(str(active_row["peak_date"])),
         peak_price=float(active_row["peak_price"]),
         last_evaluated_date=date.fromisoformat(str(active_row["last_evaluated_date"])),
+        saw_below_peak=bool(active_row["saw_below_peak"]),
     )
     recorded = {
         str(row["tier_key"])
