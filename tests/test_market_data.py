@@ -120,6 +120,7 @@ def test_etf_history_normalizes_to_shared_schema() -> None:
             },
         )
     ]
+    assert provider.request_counts() == {"eastmoney:history": 1}
 
 
 def test_history_cache_reuses_identical_request_without_mutating_cached_data() -> None:
@@ -133,6 +134,7 @@ def test_history_cache_reuses_identical_request_without_mutating_cached_data() -
 
     assert second.loc[0, "close"] == 1.2
     assert [name for name, _kwargs in fake_ak.calls] == ["fund_etf_hist_em"]
+    assert provider.request_counts() == {"eastmoney:history": 1}
 
 
 def test_history_cache_reuses_wider_request_for_narrower_range() -> None:
@@ -157,6 +159,7 @@ def test_fund_type_uses_single_symbol_xueqiu_metadata_request() -> None:
     assert fake_ak.calls == [
         ("fund_individual_basic_info_xq", {"symbol": "110026", "timeout": 10})
     ]
+    assert provider.request_counts() == {"xueqiu:metadata": 1}
 
 
 def test_drawdown_plan_history_uses_qfq_eastmoney_without_sina_fallback() -> None:
@@ -520,6 +523,7 @@ def test_get_etf_realtime_quote_uses_eastmoney_contract() -> None:
         "0.159915",
     ]
     assert all(call[1]["timeout"] == 8 for call in calls)
+    assert provider.request_counts() == {"eastmoney:realtime": 2}
 
 
 def test_get_etf_realtime_quote_falls_back_to_sina() -> None:
@@ -547,6 +551,10 @@ def test_get_etf_realtime_quote_falls_back_to_sina() -> None:
     assert quote.source == "sina_fallback"
     assert quote.fetched_at == datetime(2024, 1, 4, 6, 50, tzinfo=UTC)
     assert len(calls) == 2
+    assert provider.request_counts() == {
+        "eastmoney:realtime": 1,
+        "sina:realtime": 1,
+    }
 
 
 def test_invalid_eastmoney_quote_falls_back_instead_of_fabricating_freshness() -> None:
@@ -903,6 +911,7 @@ def test_provider_retries_akshare_calls() -> None:
         "fund_etf_hist_em",
         "fund_etf_hist_em",
     ]
+    assert provider.request_counts() == {"eastmoney:history": 2}
 
 
 def test_provider_limits_eastmoney_retry_budget_separately() -> None:

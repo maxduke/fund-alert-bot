@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Collection
+from collections.abc import Collection, Iterator
+from contextlib import contextmanager
 from datetime import date, datetime, time, tzinfo
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -329,7 +330,10 @@ async def run_scheduled_before_close_check(
             )
             confirmed_end_date = None
 
-        with open_connection(sqlite_path) as connection:
+        with (
+            _request_count_log_scope(market_data_provider, phase="before_close"),
+            open_connection(sqlite_path) as connection,
+        ):
             initialize_database(connection)
             if confirmed_end_date is None:
                 drawdown_result = DrawdownCheckResult(
@@ -497,7 +501,10 @@ async def run_scheduled_market_check(
             )
             return
 
-        with open_connection(sqlite_path) as connection:
+        with (
+            _request_count_log_scope(market_data_provider, phase="after_close"),
+            open_connection(sqlite_path) as connection,
+        ):
             initialize_database(connection)
             drawdown_result = evaluate_drawdown_rules(
                 connection,
@@ -656,7 +663,10 @@ async def run_scheduled_fund_nav_process(
             allowed_user_ids=allowed_user_ids,
             notification_settings=notification_settings,
         )
-        with open_connection(sqlite_path) as connection:
+        with (
+            _request_count_log_scope(market_data_provider, phase="fund_nav"),
+            open_connection(sqlite_path) as connection,
+        ):
             initialize_database(connection)
             nav_cache: dict[tuple[str, date], Any] = {}
             nav_errors: dict[tuple[str, date], Exception] = {}
@@ -985,3 +995,60 @@ def _current_date(timezone: str | tzinfo) -> date:
     if isinstance(timezone, str):
         timezone = ZoneInfo(timezone)
     return datetime.now(tz=timezone).date()
+
+
+def _snapshot_request_counts(provider: object) -> dict[str, int] | None:
+    """Read provider-visible attempts; proxy-internal retries are not counted."""
+
+    request_counts = getattr(provider, "request_counts", None)
+    if not callable(request_counts):
+        return None
+    try:
+        snapshot = request_counts()
+    except Exception:  # noqa: BLE001
+        LOGGER.debug("Market-data request metrics unavailable", exc_info=True)
+        return None
+    if not isinstance(snapshot, dict):
+        return None
+    try:
+        return {str(key): int(value) for key, value in snapshot.items()}
+    except (TypeError, ValueError):
+        LOGGER.debug("Market-data request metrics malformed")
+        return None
+
+
+def _log_request_count_delta(
+    provider: object,
+    *,
+    before: dict[str, int] | None,
+    phase: str,
+) -> None:
+    """Log provider-visible deltas; proxy-internal retries are not counted."""
+
+    if before is None:
+        return
+    after = _snapshot_request_counts(provider)
+    if after is None:
+        return
+    delta = {
+        key: value - before.get(key, 0)
+        for key, value in after.items()
+        if value - before.get(key, 0) != 0
+    }
+    if delta:
+        LOGGER.info(
+            "Market-data provider-attempt summary phase=%s counts=%s",
+            phase,
+            delta,
+        )
+
+
+@contextmanager
+def _request_count_log_scope(provider: object, *, phase: str) -> Iterator[None]:
+    """Log provider-visible attempt deltas for one synchronous evaluation scope."""
+
+    before = _snapshot_request_counts(provider)
+    try:
+        yield
+    finally:
+        _log_request_count_delta(provider, before=before, phase=phase)

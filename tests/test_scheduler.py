@@ -1615,6 +1615,30 @@ class FakeMarketCalendar:
         return self._is_trading_day
 
 
+def test_request_metrics_are_optional_and_log_only_nonzero_deltas(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="fund_alert_bot.scheduler")
+    fake_provider = object()
+
+    assert scheduler._snapshot_request_counts(fake_provider) is None
+    scheduler._log_request_count_delta(
+        fake_provider,
+        before=None,
+        phase="after_close",
+    )
+
+    counts = {"eastmoney:history": 2, "sina:realtime": 1}
+    provider = SimpleNamespace(request_counts=lambda: counts)
+    with scheduler._request_count_log_scope(provider, phase="after_close"):
+        counts["eastmoney:history"] = 3
+
+    assert "phase=after_close" in caplog.text
+    assert "provider-attempt summary" in caplog.text
+    assert "'eastmoney:history': 1" in caplog.text
+    assert "sina:realtime" not in caplog.text
+
+
 class FakeScheduler:
     def __init__(self) -> None:
         self.jobs: dict[str, dict[str, object]] = {}
