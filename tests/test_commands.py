@@ -2579,6 +2579,11 @@ def test_drawdown_skip_callback_supports_one_tier_from_multi_tier_alert(
     query.data = tier_button.callback_data
     asyncio.run(callback.callback(update, SimpleNamespace()))
 
+    confirm_button = query.reply_markups[-1].inline_keyboard[0][0]
+    assert confirm_button.callback_data.endswith(":apply:tier:0")
+    query.data = confirm_button.callback_data
+    asyncio.run(callback.callback(update, SimpleNamespace()))
+
     with open_connection(sqlite_path) as connection:
         states = get_drawdown_tier_reminder_states(connection, 1)
 

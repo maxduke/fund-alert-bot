@@ -441,6 +441,7 @@ _ZH_TO_EN = {
     "确认跳过": "Confirm skip",
     "确认全部跳过": "Confirm skip all",
     "跳过 -": "Skip -",
+    "↩️ 返回选择": "↩️ Back to choices",
     "❌ 取消": "❌ Cancel",
     "• 标的：": "• Asset: ",
     "• 日期：": "• Date: ",

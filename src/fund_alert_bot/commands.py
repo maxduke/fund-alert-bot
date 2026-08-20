@@ -2595,7 +2595,7 @@ def build_command_handlers(
                                     f"跳过 -{format_plan_percent(tier.drawdown)}",
                                     callback_data=(
                                         f"drawdown_skip:{plan_id}:{event_id}:"
-                                        f"apply:tier:{index}"
+                                        f"confirm:tier:{index}"
                                     ),
                                 )
                             ]
@@ -2653,6 +2653,53 @@ def build_command_handlers(
                         query,
                         "Confirm skipping all currently actionable tiers? They will "
                         "not be reminded again in this drawdown cycle.",
+                        reply_markup=markup,
+                    )
+                    return
+                if action == "confirm":
+                    if len(parts) != 6 or parts[4] != "tier":
+                        raise ValueError("Invalid skip action.")
+                    tier_index = int(parts[5])
+                    selection = load_manual_add_selection(
+                        connection,
+                        plan_id=plan_id,
+                        event_id=event_id,
+                        action_date=action_date,
+                        select_all=False,
+                        tier_index=tier_index,
+                        ignore_already_added=True,
+                    )
+                    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+                    tier = selection.tiers[0]
+                    markup = InlineKeyboardMarkup(
+                        [
+                            [
+                                InlineKeyboardButton(
+                                    "✅ 确认跳过",
+                                    callback_data=(
+                                        f"drawdown_skip:{plan_id}:{event_id}:"
+                                        f"apply:tier:{tier_index}"
+                                    ),
+                                )
+                            ],
+                            [
+                                InlineKeyboardButton(
+                                    "↩️ 返回选择",
+                                    callback_data=(
+                                        f"drawdown_skip:{plan_id}:{event_id}:choose"
+                                    ),
+                                )
+                            ],
+                        ]
+                    )
+                    await _edit_message_text(
+                        query,
+                        "Confirm skipping "
+                        f"-{format_plan_percent(tier.drawdown)} "
+                        f"/ {format_plan_amount(tier.amount)}?\n\n"
+                        "This tier will not be reminded again in the current "
+                        "drawdown cycle.",
                         reply_markup=markup,
                     )
                     return
@@ -3670,7 +3717,10 @@ def build_command_handlers(
         ),
         CallbackQueryHandler(
             drawdown_skip_callback,
-            pattern=r"^drawdown_skip:[0-9]+:[0-9]+:(?:choose|cancel|confirm_all|apply:(?:all|tier:[0-9]+))$",
+            pattern=(
+                r"^drawdown_skip:[0-9]+:[0-9]+:(?:choose|cancel|confirm_all|"
+                r"confirm:tier:[0-9]+|apply:(?:all|tier:[0-9]+))$"
+            ),
         ),
         CallbackQueryHandler(
             manual_add_confirm_callback,
