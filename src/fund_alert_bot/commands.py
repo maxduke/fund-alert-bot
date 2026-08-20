@@ -14,9 +14,11 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from threading import Lock
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
+from fund_alert_bot.async_work import run_serialized
 from fund_alert_bot.checks import (
     DCA_RULE_TYPE,
     DRAW_DOWN_PLAN_RULE_TYPE,
@@ -1788,6 +1790,7 @@ def build_command_handlers(
     notification_settings: NotificationSettings | None = None,
     timezone: str = "Asia/Shanghai",
     now_factory: Callable[[], datetime] | None = None,
+    work_lock: Lock | None = None,
 ) -> list[Any]:
     """Build Telegram command handlers with an allowlist guard."""
     from telegram.ext import CallbackQueryHandler, CommandHandler
@@ -1798,6 +1801,8 @@ def build_command_handlers(
         market_data_provider = AkshareMarketDataProvider()
     if market_calendar is None:
         market_calendar = CNMarketCalendar()
+    if work_lock is None:
+        work_lock = Lock()
     plan_drafts: dict[str, DrawdownPlanDraft] = {}
     manual_add_drafts: dict[str, ManualAddDraft] = {}
     position_sync_drafts: dict[str, PositionSyncDraft] = {}
@@ -1865,42 +1870,113 @@ def build_command_handlers(
             return
 
         if command.cost == "auto":
-            metadata_reader = getattr(market_data_provider, "get_fund_type", None)
-            if not callable(metadata_reader):
-                await _reply_text(
-                    update,
-                    "The market-data provider cannot verify the fund's domestic "
-                    "calendar. No auto-cost Price-Gain rule was created.",
-                )
-                return
-            try:
-                fund_type = str(metadata_reader(command.symbol))
-            except MarketDataProviderError as exc:
-                await _reply_text(
-                    update,
-                    "Unable to verify the fund's domestic calendar from "
-                    f"metadata: {exc}. No rule was created; try again later.",
-                )
-                return
-            if "QDII" in fund_type.upper() or "海外" in fund_type:
-                await _reply_text(
-                    update,
-                    f"Fund type {fund_type} does not use the domestic CN "
-                    "valuation calendar; no auto-cost Price-Gain rule was created.",
-                )
-                return
 
-        with open_connection(sqlite_path) as connection:
-            initialize_database(connection)
-            try:
-                if command.cost == "auto":
+            def add_auto_profit() -> tuple[
+                str,
+                int | None,
+                str | None,
+                Any,
+                str | None,
+            ]:
+                metadata_reader = getattr(market_data_provider, "get_fund_type", None)
+                if not callable(metadata_reader):
+                    return "missing_metadata", None, None, None, None
+                try:
+                    fund_type = str(metadata_reader(command.symbol))
+                except MarketDataProviderError as exc:
+                    return "metadata_error", None, None, None, str(exc)
+                if "QDII" in fund_type.upper() or "海外" in fund_type:
+                    return "foreign_fund", None, fund_type, None, None
+
+                with open_connection(sqlite_path) as connection:
+                    initialize_database(connection)
                     rule_id = add_position_profit_rule(
                         connection,
                         fund_symbol=command.symbol,
                         name=command.name,
                         thresholds=command.thresholds,
                     )
-                else:
+                    preview = None
+                    preview_error = None
+                    try:
+                        position = get_position_snapshot(connection, command.symbol)
+                        cycle = get_active_position_cycle(connection, command.symbol)
+                        if (
+                            position is None
+                            or cycle is None
+                            or float(position["units"]) <= 0
+                        ):
+                            raise ValueError("positive Position Snapshot is missing")
+                        settings = get_fund_settings(connection, command.symbol)
+                        if (
+                            settings is not None
+                            and settings["position_sync_required_since"] is not None
+                        ) or position["position_sync_required_since"] is not None:
+                            raise ValueError("Position Sync is required")
+                        expected_date = latest_completed_open_date(
+                            market_calendar,
+                            _clock_now(clock).astimezone(timezone_info).date(),
+                        )
+                        nav = market_data_provider.get_fund_nav(
+                            Instrument(
+                                command.symbol,
+                                command.name,
+                                AssetType.CN_OPEN_FUND,
+                            ),
+                            nav_date=expected_date,
+                        )
+                        rule = next(
+                            row
+                            for row in db_list_rules(connection)
+                            if int(row["id"]) == rule_id
+                        )
+                        preview = build_position_profit_alert(
+                            rule,
+                            nav,
+                            position,
+                            position_cycle_id=int(cycle["id"]),
+                            recorded_threshold_keys=set(),
+                        )
+                    except (MarketDataProviderError, ValueError) as exc:
+                        preview_error = str(exc)
+                return "ok", rule_id, fund_type, preview, preview_error
+
+            try:
+                (
+                    status,
+                    rule_id,
+                    fund_type,
+                    preview,
+                    preview_error,
+                ) = await run_serialized(work_lock, add_auto_profit)
+            except sqlite3.IntegrityError as exc:
+                await _reply_text(update, str(exc))
+                return
+            if status == "missing_metadata":
+                await _reply_text(
+                    update,
+                    "The market-data provider cannot verify the fund's domestic "
+                    "calendar. No auto-cost Price-Gain rule was created.",
+                )
+                return
+            if status == "metadata_error":
+                await _reply_text(
+                    update,
+                    "Unable to verify the fund's domestic calendar from "
+                    f"metadata: {preview_error}. No rule was created; try again later.",
+                )
+                return
+            if status == "foreign_fund":
+                await _reply_text(
+                    update,
+                    f"Fund type {fund_type} does not use the domestic CN "
+                    "valuation calendar; no auto-cost Price-Gain rule was created.",
+                )
+                return
+        else:
+            try:
+                with open_connection(sqlite_path) as connection:
+                    initialize_database(connection)
                     rule_id = add_rule(
                         connection,
                         type=PROFIT_RULE_TYPE,
@@ -1912,51 +1988,6 @@ def build_command_handlers(
             except sqlite3.IntegrityError as exc:
                 await _reply_text(update, str(exc))
                 return
-
-            preview = None
-            preview_error = None
-            if command.cost == "auto":
-                try:
-                    position = get_position_snapshot(connection, command.symbol)
-                    cycle = get_active_position_cycle(connection, command.symbol)
-                    if (
-                        position is None
-                        or cycle is None
-                        or float(position["units"]) <= 0
-                    ):
-                        raise ValueError("positive Position Snapshot is missing")
-                    settings = get_fund_settings(connection, command.symbol)
-                    if (
-                        settings is not None
-                        and settings["position_sync_required_since"] is not None
-                    ) or position["position_sync_required_since"] is not None:
-                        raise ValueError("Position Sync is required")
-                    expected_date = latest_completed_open_date(
-                        market_calendar,
-                        _clock_now(clock).astimezone(timezone_info).date(),
-                    )
-                    nav = market_data_provider.get_fund_nav(
-                        Instrument(
-                            command.symbol,
-                            command.name,
-                            AssetType.CN_OPEN_FUND,
-                        ),
-                        nav_date=expected_date,
-                    )
-                    rule = next(
-                        row
-                        for row in db_list_rules(connection)
-                        if int(row["id"]) == rule_id
-                    )
-                    preview = build_position_profit_alert(
-                        rule,
-                        nav,
-                        position,
-                        position_cycle_id=int(cycle["id"]),
-                        recorded_threshold_keys=set(),
-                    )
-                except (MarketDataProviderError, ValueError) as exc:
-                    preview_error = str(exc)
 
         if command.cost != "auto":
             response = (
@@ -2006,46 +2037,23 @@ def build_command_handlers(
             return
 
         fund_type = None
+        settings_cutoff = None
+        position_ready = False
         if command.fund_symbol is not None:
-            metadata_reader = getattr(market_data_provider, "get_fund_type", None)
-            if not callable(metadata_reader):
-                await _reply_text(
-                    update,
-                    "The market-data provider cannot verify the fund's domestic "
-                    "calendar. No fixed DCA rule was created.",
-                )
-                return
-            try:
-                fund_type = str(metadata_reader(command.fund_symbol))
-            except MarketDataProviderError as exc:
-                await _reply_text(
-                    update,
-                    "Unable to verify the fund's domestic calendar from "
-                    f"metadata: {exc}. No rule was created; try again later.",
-                )
-                return
-            if "QDII" in fund_type.upper() or "海外" in fund_type:
-                await _reply_text(
-                    update,
-                    f"Fund type {fund_type} does not use the domestic CN "
-                    "valuation calendar; no fixed DCA rule was created.",
-                )
-                return
 
-        with open_connection(sqlite_path) as connection:
-            initialize_database(connection)
-            try:
-                if command.fund_symbol is None:
-                    rule_id = add_rule(
-                        connection,
-                        type=DCA_RULE_TYPE,
-                        symbol=command.name,
-                        name=command.name,
-                        asset_type="dca",
-                        params=dca_params(command),
-                    )
-                else:
-                    rule_id = add_enhanced_dca_rule(
+            def add_enhanced_dca() -> tuple[str, int, str, str, bool]:
+                metadata_reader = getattr(market_data_provider, "get_fund_type", None)
+                if not callable(metadata_reader):
+                    return "missing_metadata", 0, "", "", False
+                try:
+                    current_fund_type = str(metadata_reader(command.fund_symbol))
+                except MarketDataProviderError as exc:
+                    return "metadata_error", 0, "", str(exc), False
+                if "QDII" in current_fund_type.upper() or "海外" in current_fund_type:
+                    return "foreign_fund", 0, current_fund_type, "", False
+                with open_connection(sqlite_path) as connection:
+                    initialize_database(connection)
+                    current_rule_id = add_enhanced_dca_rule(
                         connection,
                         fund_symbol=command.fund_symbol,
                         name=command.name,
@@ -2054,6 +2062,67 @@ def build_command_handlers(
                         fee_mode=str(command.fee_mode),
                         fee_value=float(command.fee_value),
                         holiday_policy=str(command.holiday_policy),
+                    )
+                    current_settings = get_fund_settings(
+                        connection,
+                        command.fund_symbol,
+                    )
+                    current_position = get_position_snapshot(
+                        connection,
+                        command.fund_symbol,
+                    )
+                return (
+                    "ok",
+                    current_rule_id,
+                    current_fund_type,
+                    str(current_settings["subscription_cutoff"]),
+                    current_position is not None,
+                )
+
+            try:
+                (
+                    status,
+                    rule_id,
+                    fund_type,
+                    settings_cutoff,
+                    position_ready,
+                ) = await run_serialized(work_lock, add_enhanced_dca)
+            except sqlite3.IntegrityError as exc:
+                await _reply_text(update, str(exc))
+                return
+            if status == "missing_metadata":
+                await _reply_text(
+                    update,
+                    "The market-data provider cannot verify the fund's domestic "
+                    "calendar. No fixed DCA rule was created.",
+                )
+                return
+            if status == "metadata_error":
+                await _reply_text(
+                    update,
+                    "Unable to verify the fund's domestic calendar from "
+                    f"metadata: {settings_cutoff}. No rule was created; "
+                    "try again later.",
+                )
+                return
+            if status == "foreign_fund":
+                await _reply_text(
+                    update,
+                    f"Fund type {fund_type} does not use the domestic CN "
+                    "valuation calendar; no fixed DCA rule was created.",
+                )
+                return
+        else:
+            try:
+                with open_connection(sqlite_path) as connection:
+                    initialize_database(connection)
+                    rule_id = add_rule(
+                        connection,
+                        type=DCA_RULE_TYPE,
+                        symbol=command.name,
+                        name=command.name,
+                        asset_type="dca",
+                        params=dca_params(command),
                     )
             except sqlite3.IntegrityError as exc:
                 await _reply_text(update, str(exc))
@@ -2071,10 +2140,6 @@ def build_command_handlers(
                 if command.fee_mode == "rate"
                 else f"fixed:{format_plan_amount(float(command.fee_value))}"
             )
-            with open_connection(sqlite_path) as connection:
-                initialize_database(connection)
-                settings = get_fund_settings(connection, command.fund_symbol)
-                position = get_position_snapshot(connection, command.fund_symbol)
             response = "\n".join(
                 (
                     f"Added fixed DCA rule id={rule_id}",
@@ -2084,9 +2149,9 @@ def build_command_handlers(
                     f"Gross amount: {format_plan_amount(command.amount)}",
                     f"Shared subscription fee: {fee}",
                     f"Holiday policy: {command.holiday_policy}",
-                    f"Subscription cutoff: {settings['subscription_cutoff']}",
+                    f"Subscription cutoff: {settings_cutoff}",
                     "Position readiness: "
-                    + ("READY" if position is not None else "SETUP_REQUIRED"),
+                    + ("READY" if position_ready else "SETUP_REQUIRED"),
                     "Remember: run /sync_position before automatic estimates "
                     "can apply.",
                 )
@@ -2153,26 +2218,34 @@ def build_command_handlers(
             )
             return
 
-        with open_connection(sqlite_path) as connection:
-            initialize_database(connection)
-            conflict = find_enabled_drawdown_plan_conflict(
-                connection,
-                reference_symbol=command.reference_symbol,
-                investment_fund_symbol=command.investment_fund_symbol,
-            )
-            if conflict is not None:
-                await _reply_text(
-                    update,
-                    f"Plan conflict: enabled plan id={conflict['id']} already uses "
-                    "this Reference ETF or Investment Feeder Fund.",
+        def preview_drawdown_plan() -> tuple[int | None, str | None]:
+            with open_connection(sqlite_path) as connection:
+                initialize_database(connection)
+                conflict = find_enabled_drawdown_plan_conflict(
+                    connection,
+                    reference_symbol=command.reference_symbol,
+                    investment_fund_symbol=command.investment_fund_symbol,
                 )
-                return
-            preview = build_drawdown_plan_preview(
-                connection,
-                market_data_provider,
-                command,
-                today=_clock_now(clock).astimezone(timezone_info).date(),
+                if conflict is not None:
+                    return int(conflict["id"]), None
+                return None, build_drawdown_plan_preview(
+                    connection,
+                    market_data_provider,
+                    command,
+                    today=_clock_now(clock).astimezone(timezone_info).date(),
+                )
+
+        conflict_id, preview = await run_serialized(
+            work_lock,
+            preview_drawdown_plan,
+        )
+        if conflict_id is not None:
+            await _reply_text(
+                update,
+                f"Plan conflict: enabled plan id={conflict_id} already uses "
+                "this Reference ETF or Investment Feeder Fund.",
             )
+            return
 
         now = _clock_now(clock)
         purge_drafts(now)
@@ -2787,8 +2860,9 @@ def build_command_handlers(
                 "after the fund platform updates.",
             )
             return
-        effective_date = None
-        try:
+
+        def record_addition() -> tuple[int | None, tuple[str, ...], date | None]:
+            effective_date = None
             if create_estimate:
                 if not market_calendar.confirmed_status(now.date()):
                     raise ValueError("The action date is not a confirmed CN open day.")
@@ -2814,6 +2888,13 @@ def build_command_handlers(
                         None if effective_date is None else effective_date.isoformat()
                     ),
                 )
+            return estimate_id, tuple(recorded_keys), effective_date
+
+        try:
+            estimate_id, recorded_keys, effective_date = await run_serialized(
+                work_lock,
+                record_addition,
+            )
         except (MarketDataProviderError, ValueError, sqlite3.IntegrityError) as exc:
             await _edit_message_text(query, f"Addition was not recorded: {exc}")
             return
@@ -3057,21 +3138,42 @@ def build_command_handlers(
             await _reply_text(update, str(exc))
             return
 
-        with open_connection(sqlite_path) as connection:
-            initialize_database(connection)
-            pending_items = list_pending_position_items(
-                connection,
-                command.fund_symbol,
-            )
-            if not pending_items:
-                row = upsert_position_snapshot(
+        def sync_position_work() -> tuple[list[Any], Any, FundNav | None]:
+            with open_connection(sqlite_path) as connection:
+                initialize_database(connection)
+                current_pending_items = list_pending_position_items(
+                    connection,
+                    command.fund_symbol,
+                )
+                if current_pending_items:
+                    return current_pending_items, None, None
+                current_row = upsert_position_snapshot(
                     connection,
                     fund_symbol=command.fund_symbol,
                     units=command.units,
                     average_unit_cost=command.average_unit_cost,
                 )
-            else:
-                row = None
+                current_nav = None
+                if command.units > 0:
+                    try:
+                        current_nav = market_data_provider.get_fund_nav(
+                            Instrument(
+                                command.fund_symbol,
+                                command.fund_symbol,
+                                AssetType.CN_OPEN_FUND,
+                            )
+                        )
+                    except MarketDataProviderError:
+                        LOGGER.warning(
+                            "Unable to fetch latest feeder-fund NAV symbol=%s",
+                            command.fund_symbol,
+                        )
+                return [], current_row, current_nav
+
+        pending_items, row, nav = await run_serialized(
+            work_lock,
+            sync_position_work,
+        )
 
         if pending_items:
             user_id = get_update_user_id(update)
@@ -3158,21 +3260,6 @@ def build_command_handlers(
             )
             return
 
-        nav = None
-        if command.units > 0:
-            try:
-                nav = market_data_provider.get_fund_nav(
-                    Instrument(
-                        command.fund_symbol,
-                        command.fund_symbol,
-                        AssetType.CN_OPEN_FUND,
-                    )
-                )
-            except MarketDataProviderError:
-                LOGGER.warning(
-                    "Unable to fetch latest feeder-fund NAV symbol=%s",
-                    command.fund_symbol,
-                )
         await _reply_text(update, format_position_snapshot(row, nav))
 
     async def position_sync_callback(
@@ -3381,89 +3468,111 @@ def build_command_handlers(
             return
         force_refresh = args == ("refresh",)
         user_id = int(update.effective_user.id)
-        with open_connection(sqlite_path) as connection:
-            initialize_database(connection)
-            result = read_drawdown_plan_statuses(
-                connection,
-                market_data_provider,
-                end_date=_clock_now(clock).astimezone(timezone_info).date(),
-                force_refresh=force_refresh,
-            )
-            planned_funds = set(list_enabled_drawdown_plan_fund_symbols(connection))
-            dca_statuses = list_enhanced_dca_statuses(connection)
-            profit_statuses = list_position_profit_statuses(connection)
-            all_rules = db_list_rules(connection)
-            dca_funds = {str(row["fund_symbol"]) for row in dca_statuses}
-            evaluated_funds = {
-                status.config.investment_fund_symbol for status in result.statuses
-            } | dca_funds
-            position_rows = list_position_snapshots(connection)
-            unmatched_rows = [
-                row
-                for row in position_rows
-                if row["fund_symbol"] not in evaluated_funds
-            ]
-            unmatched_positions = []
-            for row in unmatched_rows:
-                nav = None
-                sync_required = (
-                    row["position_sync_required_since"] is not None
-                    or row["settings_sync_required_since"] is not None
+
+        def read_plans() -> tuple[Any, list[Any], list[Any], list[Any], list[Any]]:
+            with open_connection(sqlite_path) as connection:
+                initialize_database(connection)
+                current_result = read_drawdown_plan_statuses(
+                    connection,
+                    market_data_provider,
+                    end_date=_clock_now(clock).astimezone(timezone_info).date(),
+                    force_refresh=force_refresh,
                 )
-                if float(row["units"]) > 0 and not sync_required:
+                planned_funds = set(list_enabled_drawdown_plan_fund_symbols(connection))
+                current_dca_statuses = list_enhanced_dca_statuses(connection)
+                current_profit_statuses = list_position_profit_statuses(connection)
+                all_rules = db_list_rules(connection)
+                dca_funds = {str(row["fund_symbol"]) for row in current_dca_statuses}
+                evaluated_funds = {
+                    status.config.investment_fund_symbol
+                    for status in current_result.statuses
+                } | dca_funds
+                position_rows = list_position_snapshots(connection)
+                unmatched_rows = [
+                    row
+                    for row in position_rows
+                    if row["fund_symbol"] not in evaluated_funds
+                ]
+                current_unmatched_positions = []
+                for row in unmatched_rows:
+                    nav = None
+                    sync_required = (
+                        row["position_sync_required_since"] is not None
+                        or row["settings_sync_required_since"] is not None
+                    )
+                    if float(row["units"]) > 0 and not sync_required:
+                        try:
+                            nav = get_cached_or_fetch_fund_nav(
+                                connection,
+                                market_data_provider,
+                                str(row["fund_symbol"]),
+                                force_refresh=force_refresh,
+                            )
+                        except MarketDataProviderError:
+                            LOGGER.warning(
+                                "Unable to fetch standalone position NAV symbol=%s",
+                                row["fund_symbol"],
+                            )
+                    ownership = (
+                        "Drawdown Add Plan configured; market status unavailable"
+                        if row["fund_symbol"] in planned_funds
+                        else "no enabled Drawdown Add Plan"
+                    )
+                    current_unmatched_positions.append((row, nav, ownership))
+                known_funds = {
+                    status.config.investment_fund_symbol: status.name
+                    for status in current_result.statuses
+                }
+                for row in all_rules:
+                    if (
+                        not bool(row["enabled"])
+                        or row["type"] != DRAW_DOWN_PLAN_RULE_TYPE
+                    ):
+                        continue
                     try:
-                        nav = get_cached_or_fetch_fund_nav(
-                            connection,
-                            market_data_provider,
-                            str(row["fund_symbol"]),
-                            force_refresh=force_refresh,
-                        )
-                    except MarketDataProviderError:
-                        LOGGER.warning(
-                            "Unable to fetch standalone position NAV symbol=%s",
-                            row["fund_symbol"],
-                        )
-                ownership = (
-                    "Drawdown Add Plan configured; market status unavailable"
-                    if row["fund_symbol"] in planned_funds
-                    else "no enabled Drawdown Add Plan"
+                        params = _load_params(str(row["params_json"]))
+                        fund_symbol = str(params["investment_fund_symbol"])
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    known_funds.setdefault(fund_symbol, str(row["name"]))
+                known_funds.update(
+                    (str(row["fund_symbol"]), str(row["name"]))
+                    for row in current_dca_statuses
                 )
-                unmatched_positions.append((row, nav, ownership))
-            known_funds = {
-                status.config.investment_fund_symbol: status.name
-                for status in result.statuses
-            }
-            for row in all_rules:
-                if not bool(row["enabled"]) or row["type"] != DRAW_DOWN_PLAN_RULE_TYPE:
-                    continue
-                try:
-                    params = _load_params(str(row["params_json"]))
-                    fund_symbol = str(params["investment_fund_symbol"])
-                except (KeyError, TypeError, ValueError):
-                    continue
-                known_funds.setdefault(fund_symbol, str(row["name"]))
-            known_funds.update(
-                (str(row["fund_symbol"]), str(row["name"])) for row in dca_statuses
+                for row in position_rows:
+                    symbol = str(row["fund_symbol"])
+                    known_funds.setdefault(symbol, symbol)
+                profit_funds = {
+                    str(row["symbol"])
+                    for row in all_rules
+                    if bool(row["enabled"]) and is_auto_cost_profit_rule(row)
+                }
+                current_profit_setup_funds = sorted(
+                    (symbol, name)
+                    for symbol, name in known_funds.items()
+                    if symbol not in profit_funds
+                )
+            return (
+                current_result,
+                current_unmatched_positions,
+                current_dca_statuses,
+                current_profit_statuses,
+                current_profit_setup_funds,
             )
-            for row in position_rows:
-                symbol = str(row["fund_symbol"])
-                known_funds.setdefault(symbol, symbol)
-            profit_funds = {
-                str(row["symbol"])
-                for row in all_rules
-                if bool(row["enabled"]) and is_auto_cost_profit_rule(row)
-            }
-            profit_setup_funds = sorted(
-                (symbol, name)
-                for symbol, name in known_funds.items()
-                if symbol not in profit_funds
-            )
-            for key in tuple(profit_setup_names):
-                if key[0] == user_id:
-                    profit_setup_names.pop(key)
-            profit_setup_names.update(
-                ((user_id, symbol), name) for symbol, name in profit_setup_funds
-            )
+
+        (
+            result,
+            unmatched_positions,
+            dca_statuses,
+            profit_statuses,
+            profit_setup_funds,
+        ) = await run_serialized(work_lock, read_plans)
+        for key in tuple(profit_setup_names):
+            if key[0] == user_id:
+                profit_setup_names.pop(key)
+        profit_setup_names.update(
+            ((user_id, symbol), name) for symbol, name in profit_setup_funds
+        )
         markup = None
         if profit_setup_funds:
             from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -3572,53 +3681,67 @@ def build_command_handlers(
             return
 
         check_date = _clock_now(clock).astimezone(timezone_info).date()
-        try:
-            confirmed_end_date = latest_completed_open_date(
-                market_calendar,
-                check_date,
-            )
-        except MarketCalendarUnavailableError as exc:
-            LOGGER.warning(
-                "Skipping realtime drawdown row for /check because the "
-                "confirmed market date is unavailable: %s",
-                exc,
-            )
-            confirmed_end_date = None
 
-        with open_connection(sqlite_path) as connection:
-            initialize_database(connection)
-            if confirmed_end_date is None:
-                result = DrawdownCheckResult(
-                    checked_rules=0,
-                    notifications=[],
-                    skipped_duplicates=0,
-                    no_data_skips=[],
-                    errors=[],
-                    statuses=[],
+        def run_check() -> tuple[Any, Any, Any, Any]:
+            calendar = market_calendar
+            try:
+                confirmed_end_date = latest_completed_open_date(
+                    calendar,
+                    check_date,
                 )
-            else:
-                result = evaluate_drawdown_rules(
+            except MarketCalendarUnavailableError as exc:
+                LOGGER.warning(
+                    "Skipping realtime drawdown row for /check because the "
+                    "confirmed market date is unavailable: %s",
+                    exc,
+                )
+                confirmed_end_date = None
+
+            with open_connection(sqlite_path) as connection:
+                initialize_database(connection)
+                if confirmed_end_date is None:
+                    current_result = DrawdownCheckResult(
+                        checked_rules=0,
+                        notifications=[],
+                        skipped_duplicates=0,
+                        no_data_skips=[],
+                        errors=[],
+                        statuses=[],
+                    )
+                else:
+                    current_result = evaluate_drawdown_rules(
+                        connection,
+                        market_data_provider,
+                        include_latest=True,
+                        confirmed_end_date=confirmed_end_date,
+                    )
+                current_profit_result = evaluate_profit_rules(
                     connection,
                     market_data_provider,
-                    include_latest=True,
-                    confirmed_end_date=confirmed_end_date,
+                    evaluation_date=check_date,
+                    market_calendar=calendar,
                 )
-            profit_result = evaluate_profit_rules(
-                connection,
-                market_data_provider,
-                evaluation_date=check_date,
-                market_calendar=market_calendar,
+                current_dca_result = evaluate_dca_rules(
+                    connection,
+                    today=check_date,
+                    market_calendar=calendar,
+                )
+                current_plan_status_result = read_drawdown_plan_statuses(
+                    connection,
+                    market_data_provider,
+                    end_date=check_date,
+                )
+            return (
+                current_result,
+                current_profit_result,
+                current_dca_result,
+                current_plan_status_result,
             )
-            dca_result = evaluate_dca_rules(
-                connection,
-                today=check_date,
-                market_calendar=market_calendar,
-            )
-            plan_status_result = read_drawdown_plan_statuses(
-                connection,
-                market_data_provider,
-                end_date=check_date,
-            )
+
+        result, profit_result, dca_result, plan_status_result = await run_serialized(
+            work_lock,
+            run_check,
+        )
 
         notifications = [
             *result.notifications,
@@ -3768,6 +3891,7 @@ def register_command_handlers(
     market_calendar: MarketCalendar | None = None,
     notification_settings: NotificationSettings | None = None,
     timezone: str = "Asia/Shanghai",
+    work_lock: Lock | None = None,
 ) -> None:
     """Register supported Telegram command handlers."""
     for handler in build_command_handlers(
@@ -3777,6 +3901,7 @@ def register_command_handlers(
         market_calendar=market_calendar,
         notification_settings=notification_settings,
         timezone=timezone,
+        work_lock=work_lock,
     ):
         application.add_handler(handler)
 
@@ -3790,6 +3915,7 @@ def create_application(
     market_calendar: MarketCalendar | None = None,
     notification_settings: NotificationSettings | None = None,
     timezone: str = "Asia/Shanghai",
+    work_lock: Lock | None = None,
     post_init: Callable[
         [Application[Any, Any, Any, Any, Any, Any]],
         Awaitable[None],
@@ -3826,6 +3952,7 @@ def create_application(
         market_calendar=market_calendar,
         notification_settings=notification_settings,
         timezone=timezone,
+        work_lock=work_lock,
     )
     return application
 

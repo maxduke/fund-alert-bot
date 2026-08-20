@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import sys
 from datetime import datetime
+from threading import Lock
 from zoneinfo import ZoneInfo
 
 from fund_alert_bot.commands import create_application, publish_bot_command_menu
@@ -71,6 +72,7 @@ def run() -> None:
         eastmoney_retries=1 if proxy_active else None,
     )
     market_calendar = CNMarketCalendar()
+    work_lock = Lock()
     scheduler = create_scheduler(timezone=settings.timezone)
 
     async def start_scheduler(application) -> None:
@@ -103,19 +105,28 @@ def run() -> None:
             market_data_provider=market_data_provider,
             market_calendar=market_calendar,
             notification_settings=settings.notifications,
-        )
-        await run_scheduled_fund_nav_process(
-            application=application,
-            sqlite_path=settings.sqlite_path,
-            allowed_user_ids=settings.telegram_allowed_user_ids,
-            market_data_provider=market_data_provider,
-            market_calendar=market_calendar,
-            timezone=settings.timezone,
-            run_date=datetime.now(ZoneInfo(settings.timezone)).date(),
-            notification_settings=settings.notifications,
+            work_lock=work_lock,
         )
         scheduler.start()
         LOGGER.info("APScheduler started")
+
+        async def startup_catchup() -> None:
+            try:
+                await run_scheduled_fund_nav_process(
+                    application=application,
+                    sqlite_path=settings.sqlite_path,
+                    allowed_user_ids=settings.telegram_allowed_user_ids,
+                    market_data_provider=market_data_provider,
+                    market_calendar=market_calendar,
+                    timezone=settings.timezone,
+                    run_date=datetime.now(ZoneInfo(settings.timezone)).date(),
+                    notification_settings=settings.notifications,
+                    work_lock=work_lock,
+                )
+            except Exception:
+                LOGGER.exception("Startup feeder-fund NAV catch-up failed")
+
+        application.create_task(startup_catchup())
 
     async def stop_scheduler(application) -> None:
         del application
@@ -131,6 +142,7 @@ def run() -> None:
         market_calendar=market_calendar,
         notification_settings=settings.notifications,
         timezone=settings.timezone,
+        work_lock=work_lock,
         post_init=start_scheduler,
         post_shutdown=stop_scheduler,
     )
