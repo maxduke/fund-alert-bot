@@ -109,7 +109,10 @@ class AkshareMarketDataProvider(MarketDataProvider):
         self._request_counts: dict[str, int] = {}
 
     def request_counts(self) -> dict[str, int]:
-        """Return a snapshot of external market-data request attempts."""
+        """Return provider-visible logical attempts.
+
+        Proxy-internal retries are not counted.
+        """
 
         return self._request_counts.copy()
 

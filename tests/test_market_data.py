@@ -911,6 +911,7 @@ def test_provider_retries_akshare_calls() -> None:
         "fund_etf_hist_em",
         "fund_etf_hist_em",
     ]
+    assert provider.request_counts() == {"eastmoney:history": 2}
 
 
 def test_provider_limits_eastmoney_retry_budget_separately() -> None:

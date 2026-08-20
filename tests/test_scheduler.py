@@ -1630,15 +1630,11 @@ def test_request_metrics_are_optional_and_log_only_nonzero_deltas(
 
     counts = {"eastmoney:history": 2, "sina:realtime": 1}
     provider = SimpleNamespace(request_counts=lambda: counts)
-    before = scheduler._snapshot_request_counts(provider)
-    counts["eastmoney:history"] = 3
-    scheduler._log_request_count_delta(
-        provider,
-        before=before,
-        phase="after_close",
-    )
+    with scheduler._request_count_log_scope(provider, phase="after_close"):
+        counts["eastmoney:history"] = 3
 
     assert "phase=after_close" in caplog.text
+    assert "provider-attempt summary" in caplog.text
     assert "'eastmoney:history': 1" in caplog.text
     assert "sina:realtime" not in caplog.text
 
