@@ -1366,14 +1366,39 @@ def get_drawdown_plan_action_event(
     for tier_key in required_tier_keys:
         filters.append(
             """
-            EXISTS (
-                SELECT 1
-                FROM json_each(e.payload_json, '$.crossed_tiers') AS tier
-                WHERE json_extract(tier.value, '$.key') = ?
+            (
+                (
+                    json_type(e.payload_json, '$.actionable_tiers') = 'array'
+                    AND EXISTS (
+                        SELECT 1
+                        FROM json_each(e.payload_json, '$.actionable_tiers') AS tier
+                        WHERE json_extract(tier.value, '$.key') = ?
+                    )
+                    AND (
+                        COALESCE(
+                            json_type(e.payload_json, '$.crossed_tiers'), ''
+                        ) != 'array'
+                        OR EXISTS (
+                            SELECT 1
+                            FROM json_each(e.payload_json, '$.crossed_tiers') AS tier
+                            WHERE json_extract(tier.value, '$.key') = ?
+                        )
+                    )
+                )
+                OR (
+                    COALESCE(
+                        json_type(e.payload_json, '$.actionable_tiers'), ''
+                    ) != 'array'
+                    AND EXISTS (
+                        SELECT 1
+                        FROM json_each(e.payload_json, '$.crossed_tiers') AS tier
+                        WHERE json_extract(tier.value, '$.key') = ?
+                    )
+                )
             )
             """
         )
-        values.append(tier_key)
+        values.extend((tier_key, tier_key, tier_key))
     return connection.execute(
         f"""
         SELECT
@@ -1387,7 +1412,10 @@ def get_drawdown_plan_action_event(
         FROM alert_events AS e
         JOIN rules AS r ON r.id = e.rule_id
         WHERE {" AND ".join(filters)}
-            AND json_type(e.payload_json, '$.crossed_tiers') = 'array'
+            AND (
+                json_type(e.payload_json, '$.actionable_tiers') = 'array'
+                OR json_type(e.payload_json, '$.crossed_tiers') = 'array'
+            )
         ORDER BY e.id DESC
         LIMIT 1
         """,
@@ -1466,9 +1494,10 @@ def record_manual_addition(
         if event is None or int(event["rule_id"]) != rule_id:
             raise sqlite3.IntegrityError("Manual-add event does not match the plan.")
         payload = json.loads(str(event["payload_json"]))
-        eligible_tiers = {
-            str(item["key"]): item for item in payload.get("crossed_tiers", ())
-        }
+        eligible_payload = payload.get(
+            "actionable_tiers", payload.get("crossed_tiers", ())
+        )
+        eligible_tiers = {str(item["key"]): item for item in eligible_payload}
         selected_keys = tuple(str(tier.key) for tier in tiers)
         if (
             int(payload.get("cycle_id", -1)) != cycle_id
@@ -1614,6 +1643,14 @@ def record_manual_addition(
                 )
                 for tier in new_tiers
             ],
+        )
+        connection.executemany(
+            """
+            UPDATE drawdown_tier_reminder_states
+            SET skipped_for_cycle = 0, updated_at = ?
+            WHERE cycle_id = ? AND tier_key = ?
+            """,
+            [(now, cycle_id, str(tier.key)) for tier in new_tiers],
         )
         connection.executemany(
             """
@@ -2577,12 +2614,22 @@ def get_active_drawdown_cycle(
 def list_drawdown_tier_records(
     connection: sqlite3.Connection,
     cycle_id: int,
+    *,
+    source: str | None = None,
 ) -> list[sqlite3.Row]:
-    """Return durable tier records for one cycle."""
+    """Return durable tier records for one cycle, optionally by source."""
+
+    filters = ["cycle_id = ?"]
+    values: list[object] = [cycle_id]
+    if source is not None:
+        if source not in {"close_confirmed", "user_marked_added"}:
+            raise ValueError("Unsupported drawdown tier record source.")
+        filters.append("source = ?")
+        values.append(source)
 
     return list(
         connection.execute(
-            """
+            f"""
             SELECT
                 id,
                 cycle_id,
@@ -2594,10 +2641,10 @@ def list_drawdown_tier_records(
                 alert_event_id,
                 created_at
             FROM drawdown_tier_records
-            WHERE cycle_id = ?
+            WHERE {" AND ".join(filters)}
             ORDER BY drawdown
             """,
-            (cycle_id,),
+            values,
         ).fetchall()
     )
 
@@ -2760,17 +2807,23 @@ def persist_drawdown_plan_evaluation(
     peak_price: float,
     evaluation_date: str,
     tiers: Sequence[Any] = (),
+    tiers_to_record: Sequence[Any] | None = None,
     tier_source: str = "close_confirmed",
     alert: Any | None = None,
+    alert_factory: Any | None = None,
 ) -> tuple[int, int | None]:
-    """Atomically persist cycle state, tier records, and one aggregate event."""
+    """Atomically persist cycle state, tier facts, and an optional event."""
 
     if tier_source not in {"close_confirmed", "user_marked_added"}:
         raise ValueError("Unsupported drawdown tier record source.")
-    if bool(tiers) != (alert is not None):
-        raise ValueError(
-            "An aggregate alert is required exactly when tiers are stored."
-        )
+    if tiers_to_record is not None and tiers:
+        raise ValueError("Pass tiers or tiers_to_record, not both.")
+    records = tuple(tiers if tiers_to_record is None else tiers_to_record)
+    if alert is not None and alert_factory is not None:
+        raise ValueError("Pass alert or alert_factory, not both.")
+    record_keys = tuple(str(tier.key) for tier in records)
+    if len(set(record_keys)) != len(record_keys):
+        raise sqlite3.IntegrityError("Duplicate drawdown tier records.")
 
     connection.execute("BEGIN IMMEDIATE")
     try:
@@ -2840,10 +2893,21 @@ def persist_drawdown_plan_evaluation(
             )
             cycle_id = active_id
 
+        resolved_alert = alert_factory(cycle_id) if alert_factory is not None else alert
         event_id: int | None = None
-        if alert is not None:
-            payload = dict(alert.get("payload") or {})
+        alert_tier_keys: set[str] | None = None
+        if resolved_alert is not None:
+            payload = dict(resolved_alert.get("payload") or {})
             payload["cycle_id"] = cycle_id
+            alert_tiers = payload.get("actionable_tiers")
+            if alert_tiers is None:
+                alert_tiers = payload.get("crossed_tiers")
+            if isinstance(alert_tiers, (list, tuple)):
+                alert_tier_keys = {
+                    str(item["key"])
+                    for item in alert_tiers
+                    if isinstance(item, dict) and "key" in item
+                }
             cursor = connection.execute(
                 """
                 INSERT INTO alert_events (
@@ -2858,14 +2922,15 @@ def persist_drawdown_plan_evaluation(
                 """,
                 (
                     rule_id,
-                    str(alert["alert_key"]),
-                    str(alert["title"]),
-                    str(alert["message"]),
+                    str(resolved_alert["alert_key"]),
+                    str(resolved_alert["title"]),
+                    str(resolved_alert["message"]),
                     _json_text(payload),
                     now,
                 ),
             )
             event_id = int(cursor.lastrowid)
+        if records:
             connection.executemany(
                 """
                 INSERT INTO drawdown_tier_records (
@@ -2879,6 +2944,24 @@ def persist_drawdown_plan_evaluation(
                     created_at
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(cycle_id, tier_key) DO UPDATE SET
+                    drawdown = excluded.drawdown,
+                    amount = excluded.amount,
+                    source = CASE
+                        WHEN excluded.source = 'close_confirmed'
+                        THEN excluded.source
+                        ELSE drawdown_tier_records.source
+                    END,
+                    data_date = CASE
+                        WHEN excluded.source = 'close_confirmed'
+                        THEN excluded.data_date
+                        ELSE drawdown_tier_records.data_date
+                    END,
+                    alert_event_id = CASE
+                        WHEN excluded.source = 'close_confirmed'
+                        THEN excluded.alert_event_id
+                        ELSE drawdown_tier_records.alert_event_id
+                    END
                 """,
                 [
                     (
@@ -2888,10 +2971,15 @@ def persist_drawdown_plan_evaluation(
                         float(tier.amount),
                         tier_source,
                         evaluation_date,
-                        event_id,
+                        (
+                            event_id
+                            if alert_tier_keys is None
+                            or str(tier.key) in alert_tier_keys
+                            else None
+                        ),
                         now,
                     )
-                    for tier in tiers
+                    for tier in records
                 ],
             )
         connection.commit()

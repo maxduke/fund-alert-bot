@@ -360,6 +360,17 @@ def evaluate_drawdown_plan_realtime(
     )
 
 
+def _tier_payload(tiers: Sequence[DrawdownTier]) -> list[dict[str, object]]:
+    return [
+        {
+            "key": tier.key,
+            "drawdown": tier.drawdown,
+            "amount": tier.amount,
+        }
+        for tier in tiers
+    ]
+
+
 def build_drawdown_plan_pre_alert(
     *,
     rule_id: int,
@@ -370,48 +381,88 @@ def build_drawdown_plan_pre_alert(
     config: DrawdownPlanConfig,
     evaluation: DrawdownPlanEvaluation,
     quote: RealtimeQuote,
+    actionable_tiers: Sequence[DrawdownTier] | None = None,
+    pending_tiers: Sequence[DrawdownTier] = (),
 ) -> dict[str, object] | None:
     """Build one provisional before-close reminder without consuming tiers."""
 
-    tiers = evaluation.newly_crossed_tiers
+    newly_tiers = evaluation.newly_crossed_tiers
+    tiers = newly_tiers if actionable_tiers is None else tuple(actionable_tiers)
+    pending = tuple(pending_tiers)
     if not tiers:
         return None
-    tier_lines = [
-        f"-{format_plan_percent(tier.drawdown)} → {format_plan_amount(tier.amount)}"
-        for tier in tiers
-    ]
-    quote_time = quote.fetched_at.astimezone(ZoneInfo("Asia/Shanghai"))
-    message = "\n".join(
-        (
-            f"⚠️ Buy-plan pre-alert — {name}",
-            "",
-            "Realtime estimate before close",
-            f"Market date: {evaluation.latest_date.isoformat()}",
-            f"Reference ETF: {reference_symbol}",
-            f"Investment fund: {config.investment_fund_symbol}",
-            f"Realtime drawdown: -{evaluation.drawdown:.1%}",
-            f"Recent confirmed peak: {evaluation.peak_price:.6g}",
-            f"Realtime price: {evaluation.latest_price:.6g}",
-            f"Peak date: {evaluation.peak_date.isoformat()}",
-            f"Quote source: {evaluation.source}",
-            f"Quote time: {quote_time.isoformat(timespec='seconds')}",
-            "",
-            "🎯 Tiers currently reached:",
-            *tier_lines,
-            "",
-            "Configured additional amount: "
-            f"{format_plan_amount(evaluation.total_amount)}",
-            "",
-            "📈 Long-term trend from confirmed closes",
-            *_format_trend(config, evaluation),
-            "",
-            "Final confirmation will use closing data.",
-            "Only after you actually subscribe, record it with:",
-            f"/mark_added {rule_id} {_tier_command_text(tiers)}",
-            "If you add today, remember to sync the fund position after units settle.",
-            "This is a reminder only. No trade has been placed.",
+    total_amount = sum((tier.amount for tier in tiers), start=0)
+    mixed = bool(pending) or tuple(tiers) != tuple(newly_tiers)
+    if mixed:
+        tier_lines: list[str] = []
+        if pending:
+            tier_lines.extend(
+                [
+                    "⏳ Previously triggered, still pending",
+                    *(
+                        f"-{format_plan_percent(tier.drawdown)} → "
+                        f"{format_plan_amount(tier.amount)}"
+                        for tier in pending
+                    ),
+                ]
+            )
+        newly_actionable = tuple(
+            tier for tier in newly_tiers if tier.key in {item.key for item in tiers}
         )
+        if newly_actionable:
+            if tier_lines:
+                tier_lines.append("")
+            tier_lines.extend(
+                [
+                    "🆕 Newly reached in this realtime estimate",
+                    *(
+                        f"-{format_plan_percent(tier.drawdown)} → "
+                        f"{format_plan_amount(tier.amount)}"
+                        for tier in newly_actionable
+                    ),
+                ]
+            )
+    else:
+        tier_lines = [
+            "🎯 Tiers currently reached:",
+            *(
+                f"-{format_plan_percent(tier.drawdown)} → "
+                f"{format_plan_amount(tier.amount)}"
+                for tier in tiers
+            ),
+        ]
+    quote_time = quote.fetched_at.astimezone(ZoneInfo("Asia/Shanghai"))
+    amount_label = (
+        "All currently actionable amount" if mixed else "Configured additional amount"
     )
+    message_lines = [
+        f"⚠️ Buy-plan pre-alert — {name}",
+        "",
+        "Realtime estimate before close",
+        f"Market date: {evaluation.latest_date.isoformat()}",
+        f"Reference ETF: {reference_symbol}",
+        f"Investment fund: {config.investment_fund_symbol}",
+        f"Realtime drawdown: -{evaluation.drawdown:.1%}",
+        f"Recent confirmed peak: {evaluation.peak_price:.6g}",
+        f"Realtime price: {evaluation.latest_price:.6g}",
+        f"Peak date: {evaluation.peak_date.isoformat()}",
+        f"Quote source: {evaluation.source}",
+        f"Quote time: {quote_time.isoformat(timespec='seconds')}",
+        "",
+        *tier_lines,
+        "",
+        f"{amount_label}: {format_plan_amount(total_amount)}",
+        "",
+        "📈 Long-term trend from confirmed closes",
+        *_format_trend(config, evaluation),
+        "",
+        "Final confirmation will use closing data.",
+        "Only after you actually subscribe, record it with:",
+        f"/mark_added {rule_id} {_tier_command_text(tiers)}",
+        "If you add today, remember to sync the fund position after units settle.",
+        "This is a reminder only. No trade has been placed.",
+    ]
+    message = "\n".join(message_lines)
     return {
         "alert_key": (
             f"{rule_id}:drawdown_plan:pre_alert:{evaluation.latest_date.isoformat()}"
@@ -432,15 +483,11 @@ def build_drawdown_plan_pre_alert(
             "peak_price": evaluation.peak_price,
             "latest_price": evaluation.latest_price,
             "drawdown": evaluation.drawdown,
-            "crossed_tiers": [
-                {
-                    "key": tier.key,
-                    "drawdown": tier.drawdown,
-                    "amount": tier.amount,
-                }
-                for tier in tiers
-            ],
-            "total_amount": evaluation.total_amount,
+            "crossed_tiers": _tier_payload(tiers),
+            "newly_crossed_tiers": _tier_payload(newly_tiers),
+            "pending_tiers": _tier_payload(pending),
+            "actionable_tiers": _tier_payload(tiers),
+            "total_amount": total_amount,
             "sma_window": config.sma_window,
             "sma": evaluation.sma,
             "above_sma": evaluation.above_sma,
@@ -458,17 +505,18 @@ def build_drawdown_plan_alert(
     name: str,
     config: DrawdownPlanConfig,
     evaluation: DrawdownPlanEvaluation,
+    cycle_id: int | None = None,
+    actionable_tiers: Sequence[DrawdownTier] | None = None,
+    pending_tiers: Sequence[DrawdownTier] = (),
 ) -> dict[str, object] | None:
-    """Build one aggregate reminder for newly reached tiers."""
+    """Build one aggregate reminder for actionable tiers."""
 
-    tiers = evaluation.newly_crossed_tiers
+    newly_tiers = evaluation.newly_crossed_tiers
+    tiers = newly_tiers if actionable_tiers is None else tuple(actionable_tiers)
+    pending = tuple(pending_tiers)
     if not tiers:
         return None
 
-    tier_lines = [
-        f"-{format_plan_percent(tier.drawdown)} → {format_plan_amount(tier.amount)}"
-        for tier in tiers
-    ]
     trend_lines = _format_trend(config, evaluation)
     expected_coverage_start = evaluation.latest_date - timedelta(
         days=config.lookback_days - 1
@@ -480,46 +528,95 @@ def build_drawdown_plan_alert(
             f"{evaluation.coverage_start.isoformat()} "
             f"(shorter than {config.lookback_days} calendar days)",
         )
-    message = "\n".join(
-        (
-            f"📉 Buy-plan reminder — {name}",
-            "",
-            f"Data date: {evaluation.latest_date.isoformat()}",
-            f"Reference ETF: {reference_symbol}",
-            f"Investment fund: {config.investment_fund_symbol}",
-            f"Current drawdown: -{evaluation.drawdown:.1%}",
-            f"Recent peak: {evaluation.peak_price:.6g}",
-            f"Current: {evaluation.latest_price:.6g}",
-            f"Peak date: {evaluation.peak_date.isoformat()}",
-            f"Source: {evaluation.source} (qfq close)",
-            *coverage_lines,
-            "",
-            "🎯 Newly triggered tier" + ("s:" if len(tiers) > 1 else ":"),
-            *tier_lines,
-            "",
-            "Total additional amount now due: "
-            f"{format_plan_amount(evaluation.total_amount)}",
-            "",
-            "📈 Long-term trend",
-            *trend_lines,
-            "",
-            "Regular DCA continues separately.",
-            "Only after you actually subscribe, record it with:",
-            f"/mark_added {rule_id} {_tier_command_text(tiers)}",
-            "This is a reminder only. No trade has been placed.",
-        )
+    mixed = bool(pending) or tuple(tiers) != tuple(newly_tiers)
+    actionable_keys = {tier.key for tier in tiers}
+    total_label = (
+        "Total actionable amount now due"
+        if mixed
+        else "Total additional amount now due"
     )
+    if mixed:
+        tier_sections: list[str] = []
+        if pending:
+            tier_sections.extend(
+                [
+                    "⏳ Previously triggered, still pending",
+                    *(
+                        f"-{format_plan_percent(tier.drawdown)} → "
+                        f"{format_plan_amount(tier.amount)}"
+                        for tier in pending
+                    ),
+                ]
+            )
+        newly_actionable = tuple(
+            tier for tier in newly_tiers if tier.key in actionable_keys
+        )
+        if newly_actionable:
+            if tier_sections:
+                tier_sections.append("")
+            tier_sections.extend(
+                [
+                    "🆕 Newly confirmed today",
+                    *(
+                        f"-{format_plan_percent(tier.drawdown)} → "
+                        f"{format_plan_amount(tier.amount)}"
+                        for tier in newly_actionable
+                    ),
+                ]
+            )
+    else:
+        tier_sections = [
+            "🎯 Newly triggered tier" + ("s:" if len(tiers) > 1 else ":"),
+            *(
+                f"-{format_plan_percent(tier.drawdown)} → "
+                f"{format_plan_amount(tier.amount)}"
+                for tier in tiers
+            ),
+        ]
+    message_lines = [
+        f"📉 Buy-plan reminder — {name}",
+        "",
+        f"Data date: {evaluation.latest_date.isoformat()}",
+        f"Reference ETF: {reference_symbol}",
+        f"Investment fund: {config.investment_fund_symbol}",
+        f"Current drawdown: -{evaluation.drawdown:.1%}",
+        f"Recent peak: {evaluation.peak_price:.6g}",
+        f"Current: {evaluation.latest_price:.6g}",
+        f"Peak date: {evaluation.peak_date.isoformat()}",
+        f"Source: {evaluation.source} (qfq close)",
+        *coverage_lines,
+        "",
+        *tier_sections,
+        "",
+        f"{total_label}: "
+        f"{format_plan_amount(sum((tier.amount for tier in tiers), start=0))}",
+        "",
+        "📈 Long-term trend",
+        *trend_lines,
+        "",
+        "Regular DCA continues separately.",
+        "Only after you actually subscribe, record it with:",
+        f"/mark_added {rule_id} {_tier_command_text(tiers)}",
+        "This is a reminder only. No trade has been placed.",
+    ]
+    message = "\n".join(message_lines)
     tier_keys = ",".join(tier.key for tier in tiers)
+    total_amount = sum((tier.amount for tier in tiers), start=0)
     return {
         "alert_key": (
-            f"{rule_id}:drawdown_plan:peak:{evaluation.peak_date.isoformat()}:"
-            f"tiers:{tier_keys}"
+            f"{rule_id}:drawdown_plan:action:{cycle_id}:{evaluation.latest_date.isoformat()}"
+            if cycle_id is not None
+            else (
+                f"{rule_id}:drawdown_plan:peak:{evaluation.peak_date.isoformat()}:"
+                f"tiers:{tier_keys}"
+            )
         ),
         "title": f"Buy-plan reminder — {name}",
         "message": message,
         "payload": {
             "phase": "after_close",
             "rule_id": rule_id,
+            "cycle_id": cycle_id,
             "reference_symbol": reference_symbol,
             "investment_fund_symbol": config.investment_fund_symbol,
             "data_date": evaluation.latest_date.isoformat(),
@@ -530,15 +627,11 @@ def build_drawdown_plan_alert(
             "latest_price": evaluation.latest_price,
             "drawdown": evaluation.drawdown,
             "coverage_start": evaluation.coverage_start.isoformat(),
-            "crossed_tiers": [
-                {
-                    "key": tier.key,
-                    "drawdown": tier.drawdown,
-                    "amount": tier.amount,
-                }
-                for tier in tiers
-            ],
-            "total_amount": evaluation.total_amount,
+            "crossed_tiers": _tier_payload(tiers),
+            "newly_crossed_tiers": _tier_payload(newly_tiers),
+            "pending_tiers": _tier_payload(pending),
+            "actionable_tiers": _tier_payload(tiers),
+            "total_amount": total_amount,
             "sma_window": config.sma_window,
             "sma": evaluation.sma,
             "above_sma": evaluation.above_sma,
@@ -608,6 +701,35 @@ def validate_drawdown_plan_notification_size(
             config=config,
             evaluation=replace(evaluation, source="sina_fallback"),
             quote=quote,
+        ),
+    )
+    pending_tiers = config.tiers[:-1] if len(config.tiers) > 1 else config.tiers
+    mixed_evaluation = replace(
+        evaluation,
+        newly_crossed_tiers=(config.tiers[-1],) if len(config.tiers) > 1 else (),
+        total_amount=sum((tier.amount for tier in config.tiers), start=0),
+    )
+    alerts += (
+        build_drawdown_plan_alert(
+            rule_id=2**63 - 1,
+            reference_symbol=reference_symbol,
+            name=name,
+            config=config,
+            evaluation=mixed_evaluation,
+            actionable_tiers=config.tiers,
+            pending_tiers=pending_tiers,
+        ),
+        build_drawdown_plan_pre_alert(
+            rule_id=2**63 - 1,
+            cycle_id=2**63 - 1,
+            reference_symbol=reference_symbol,
+            name=name,
+            confirmed_date=date(2099, 12, 30),
+            config=config,
+            evaluation=replace(mixed_evaluation, source="sina_fallback"),
+            quote=quote,
+            actionable_tiers=config.tiers,
+            pending_tiers=pending_tiers,
         ),
     )
     if any(

@@ -744,6 +744,51 @@ def test_before_close_catches_up_missed_confirmed_plan_tiers(tmp_path: Path) -> 
     assert any("/sync_position" in row["message"] for row in events)
 
 
+def test_before_close_realerts_unresolved_confirmed_tier(tmp_path: Path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    _add_drawdown_plan(sqlite_path)
+    with open_connection(sqlite_path) as connection:
+        confirmed = evaluate_drawdown_plan_rule(
+            connection,
+            list_rules(connection)[0],
+            _plan_history([100, 84]),
+            expected_date=date(2024, 1, 2),
+        )
+        assert confirmed.notification is not None
+
+    application = FakeApplication()
+    provider = FakeProvider(
+        _plan_history([100, 84]),
+        realtime_quote=RealtimeQuote(
+            symbol="510300",
+            price=83,
+            previous_close=84,
+            volume=100,
+            amount=1000,
+            source="eastmoney",
+            fetched_at=datetime(2024, 1, 3, 6, 50, tzinfo=ZoneInfo("UTC")),
+        ),
+    )
+
+    asyncio.run(
+        scheduler.run_scheduled_before_close_check(
+            application=application,
+            sqlite_path=sqlite_path,
+            allowed_user_ids={123},
+            market_data_provider=provider,
+            market_calendar=FakeMarketCalendar(is_trading_day=True),
+            timezone="Asia/Shanghai",
+            run_date=date(2024, 1, 3),
+        )
+    )
+
+    assert len(application.bot.messages) == 1
+    text = application.bot.messages[0]["text"]
+    assert "Previously triggered, still pending" in text
+    assert "-15% → ¥5,000" in text
+    assert "All currently actionable amount: ¥5,000" in text
+
+
 def test_failed_before_close_prealert_is_not_retried_after_expiry(
     tmp_path: Path,
 ) -> None:

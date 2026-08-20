@@ -51,6 +51,7 @@ from fund_alert_bot.db import (
     connect,
     get_active_drawdown_cycle,
     get_active_position_cycle,
+    get_drawdown_tier_reminder_states,
     get_fund_settings,
     get_position_snapshot,
     init_db,
@@ -2513,3 +2514,113 @@ def _prepare_ready_plan_alert(
         )
     assert result.notification is not None
     return rule_id
+
+
+def test_drawdown_defer_callback_persists_same_day_snooze(tmp_path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    rule_id = _prepare_ready_plan_alert(
+        sqlite_path,
+        closes=[100, 80],
+        expected_date=date(2024, 1, 2),
+    )
+    handlers = build_command_handlers(
+        {123},
+        sqlite_path=sqlite_path,
+        now_factory=lambda: datetime(2024, 1, 2, 6, 0, tzinfo=UTC),
+    )
+    query = FakeCallbackQuery(f"drawdown_defer:{rule_id}:1:all")
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        callback_query=query,
+    )
+
+    asyncio.run(
+        _callback_by_name(handlers, "drawdown_defer_callback").callback(
+            update, SimpleNamespace()
+        )
+    )
+    with open_connection(sqlite_path) as connection:
+        states = get_drawdown_tier_reminder_states(connection, 1)
+        action_count = connection.execute(
+            "SELECT COUNT(*) FROM manual_add_actions"
+        ).fetchone()[0]
+
+    assert states["0.15"]["snoozed_market_date"] == "2024-01-02"
+    assert states["0.2"]["snoozed_market_date"] == "2024-01-02"
+    assert action_count == 0
+    assert "Deferred for today" in query.edits[-1]
+
+
+def test_drawdown_skip_callback_supports_one_tier_from_multi_tier_alert(
+    tmp_path,
+) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    rule_id = _prepare_ready_plan_alert(
+        sqlite_path,
+        closes=[100, 80],
+        expected_date=date(2024, 1, 2),
+    )
+    handlers = build_command_handlers(
+        {123},
+        sqlite_path=sqlite_path,
+        now_factory=lambda: datetime(2024, 1, 2, 6, 0, tzinfo=UTC),
+    )
+    query = FakeCallbackQuery(f"drawdown_skip:{rule_id}:1:choose")
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        callback_query=query,
+    )
+    callback = _callback_by_name(handlers, "drawdown_skip_callback")
+
+    asyncio.run(callback.callback(update, SimpleNamespace()))
+    tier_button = query.reply_markups[-1].inline_keyboard[1][0]
+    query.data = tier_button.callback_data
+    asyncio.run(callback.callback(update, SimpleNamespace()))
+
+    confirm_button = query.reply_markups[-1].inline_keyboard[0][0]
+    assert confirm_button.callback_data.endswith(":apply:tier:0")
+    query.data = confirm_button.callback_data
+    asyncio.run(callback.callback(update, SimpleNamespace()))
+
+    with open_connection(sqlite_path) as connection:
+        states = get_drawdown_tier_reminder_states(connection, 1)
+
+    assert states["0.15"]["skipped_for_cycle"] == 1
+    assert states.get("0.2") is None
+    assert "Skipped for this drawdown cycle" in query.edits[-1]
+
+
+def test_plans_reports_confirmed_pending_tiers(tmp_path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    _prepare_ready_plan_alert(
+        sqlite_path,
+        closes=[100, 80],
+        expected_date=date(2024, 1, 2),
+    )
+    handlers = build_command_handlers(
+        {123},
+        sqlite_path=sqlite_path,
+        market_data_provider=FakeProvider(
+            _plan_history([100, 80, 79]),
+            nav=FundNav("000001", date(2024, 1, 3), 1.2, "test"),
+        ),
+        now_factory=lambda: datetime(2024, 1, 3, 9, 0, tzinfo=UTC),
+    )
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        effective_message=message,
+    )
+
+    asyncio.run(
+        _handler_by_command(handlers, "plans").callback(
+            update, SimpleNamespace(bot=FakeBot(), args=[])
+        )
+    )
+
+    pending_summary = "Triggered, still pending: -15% / ¥5,000, -20% / ¥10,000"
+    assert pending_summary in message.replies[0]
+    assert "Next open tier: all tiers already reminded" in message.replies[0]
