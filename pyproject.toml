@@ -11,11 +11,11 @@ requires-python = ">=3.12"
 dependencies = [
     "akshare==1.18.91",
     "akshare-proxy-patch==0.5.0",
-    "apscheduler",
-    "pandas",
+    "apscheduler<4",
+    "pandas<3",
     "python-dotenv",
-    "python-telegram-bot",
-    "requests",
+    "python-telegram-bot<23",
+    "requests<3",
 ]
 
 [project.optional-dependencies]

@@ -7,14 +7,17 @@ from collections.abc import Collection, Iterator
 from contextlib import contextmanager
 from datetime import date, datetime, time, tzinfo
 from pathlib import Path
+from threading import Lock
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
+from fund_alert_bot.async_work import run_serialized
 from fund_alert_bot.checks import (
     AlertNotification,
     DrawdownCheckResult,
     DrawdownPlanCheckResult,
     ManualAddSettlementResult,
+    ProfitCheckResult,
     RuleNoDataSkip,
     build_dca_notification_summary,
     evaluate_dca_rules,
@@ -30,7 +33,7 @@ from fund_alert_bot.checks import (
     process_scheduled_dca_occurrences,
     reserve_drawdown_plan_data_unavailable_notice,
 )
-from fund_alert_bot.config import NotificationSettings
+from fund_alert_bot.config import NotificationSettings, parse_hhmm_time
 from fund_alert_bot.db import (
     initialize_database,
     list_enabled_rules,
@@ -38,6 +41,7 @@ from fund_alert_bot.db import (
     list_retryable_position_profit_alert_events,
     list_retryable_standard_alert_events,
     open_connection,
+    prune_database,
 )
 from fund_alert_bot.market_data import (
     AkshareMarketDataProvider,
@@ -98,21 +102,7 @@ def parse_fund_nav_process_time(raw_value: str) -> time:
 
 
 def _parse_hhmm_time(raw_value: str, *, name: str) -> time:
-    pieces = raw_value.strip().split(":")
-    if len(pieces) != 2:
-        raise ValueError(f"{name} must use HH:MM")
-
-    raw_hour, raw_minute = pieces
-    try:
-        hour = int(raw_hour)
-        minute = int(raw_minute)
-    except ValueError as exc:
-        raise ValueError(f"{name} must use HH:MM") from exc
-
-    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
-        raise ValueError(f"{name} must be a valid 24-hour time")
-
-    return time(hour=hour, minute=minute)
+    return time.fromisoformat(parse_hhmm_time(raw_value, name=name))
 
 
 def create_weekday_after_close_trigger(
@@ -160,6 +150,7 @@ def register_jobs(
     market_data_provider: MarketDataProvider | None = None,
     market_calendar: MarketCalendar | None = None,
     notification_settings: NotificationSettings | None = None,
+    work_lock: Lock | None = None,
 ) -> None:
     """Register scheduled alert jobs."""
 
@@ -171,6 +162,8 @@ def register_jobs(
         market_data_provider = AkshareMarketDataProvider()
     if market_calendar is None:
         market_calendar = CNMarketCalendar()
+    if work_lock is None:
+        work_lock = Lock()
 
     scheduler.add_job(
         run_scheduled_market_check,
@@ -188,6 +181,7 @@ def register_jobs(
             "market_calendar": market_calendar,
             "timezone": timezone,
             "notification_settings": notification_settings,
+            "work_lock": work_lock,
         },
         replace_existing=True,
         coalesce=True,
@@ -217,6 +211,7 @@ def register_jobs(
             "market_calendar": market_calendar,
             "timezone": timezone,
             "notification_settings": notification_settings,
+            "work_lock": work_lock,
         },
         replace_existing=True,
         coalesce=True,
@@ -245,6 +240,7 @@ def register_jobs(
             "market_calendar": market_calendar,
             "timezone": timezone,
             "notification_settings": notification_settings,
+            "work_lock": work_lock,
         },
         replace_existing=True,
         coalesce=True,
@@ -273,6 +269,7 @@ def register_jobs(
             "timezone": timezone,
             "market_calendar": market_calendar,
             "notification_settings": notification_settings,
+            "work_lock": work_lock,
         },
         replace_existing=True,
         coalesce=True,
@@ -296,6 +293,7 @@ async def run_scheduled_before_close_check(
     market_calendar: MarketCalendar | None = None,
     run_date: date | None = None,
     notification_settings: NotificationSettings | None = None,
+    work_lock: Lock | None = None,
 ) -> None:
     """Run a before-close realtime drawdown check and send notifications."""
 
@@ -307,93 +305,111 @@ async def run_scheduled_before_close_check(
     drawdown_result = None
     plan_result = None
     try:
-        if market_calendar is None:
-            market_calendar = CNMarketCalendar()
-        if not market_calendar.is_trading_day(check_date):
+
+        def evaluate() -> (
+            tuple[
+                DrawdownCheckResult,
+                DrawdownPlanCheckResult,
+                AlertNotification | None,
+            ]
+            | None
+        ):
+            calendar = market_calendar or CNMarketCalendar()
+            if not calendar.is_trading_day(check_date):
+                return None
+
+            try:
+                confirmed_end_date = latest_completed_open_date(
+                    calendar,
+                    check_date,
+                )
+            except MarketCalendarUnavailableError as exc:
+                LOGGER.warning(
+                    "Skipping realtime drawdown row because the confirmed market "
+                    "date is unavailable: %s",
+                    exc,
+                )
+                confirmed_end_date = None
+
+            with (
+                _request_count_log_scope(market_data_provider, phase="before_close"),
+                open_connection(sqlite_path) as connection,
+            ):
+                initialize_database(connection)
+                if confirmed_end_date is None:
+                    current_drawdown_result = DrawdownCheckResult(
+                        checked_rules=0,
+                        notifications=[],
+                        skipped_duplicates=0,
+                        no_data_skips=[],
+                        errors=[],
+                        statuses=[],
+                    )
+                else:
+                    current_drawdown_result = evaluate_drawdown_rules(
+                        connection,
+                        market_data_provider,
+                        today=check_date,
+                        require_new_data_date=check_date,
+                        include_latest=True,
+                        confirmed_end_date=confirmed_end_date,
+                    )
+                plan_rules = [
+                    row
+                    for row in list_enabled_rules(connection)
+                    if row["type"] == "drawdown_plan"
+                ]
+                try:
+                    confirmed_plan_day = bool(plan_rules) and calendar.confirmed_status(
+                        check_date
+                    )
+                    confirmed_date = confirmed_end_date if confirmed_plan_day else None
+                except MarketCalendarUnavailableError as exc:
+                    current_plan_result = DrawdownPlanCheckResult(
+                        checked_rules=len(plan_rules),
+                        notifications=[],
+                        no_data_skips=[
+                            RuleNoDataSkip(
+                                rule_id=int(row["id"]),
+                                symbol=str(row["symbol"]),
+                                message=str(exc),
+                            )
+                            for row in plan_rules
+                        ],
+                        errors=[],
+                    )
+                else:
+                    current_plan_result = (
+                        evaluate_drawdown_plan_prealerts(
+                            connection,
+                            market_data_provider,
+                            market_date=check_date,
+                            confirmed_date=confirmed_date,
+                        )
+                        if confirmed_date is not None
+                        else DrawdownPlanCheckResult(len(plan_rules), [], [], [])
+                    )
+                current_data_notice = reserve_drawdown_plan_data_unavailable_notice(
+                    connection,
+                    evaluation_date=check_date,
+                    result=current_plan_result,
+                    phase="before_close",
+                )
+            return (
+                current_drawdown_result,
+                current_plan_result,
+                current_data_notice,
+            )
+
+        evaluated = await run_serialized(work_lock, evaluate)
+        if evaluated is None:
             LOGGER.info(
                 "Scheduled realtime drawdown check skipped date=%s "
                 "reason=market_closed",
                 check_date.isoformat(),
             )
             return
-
-        try:
-            confirmed_end_date = latest_completed_open_date(
-                market_calendar,
-                check_date,
-            )
-        except MarketCalendarUnavailableError as exc:
-            LOGGER.warning(
-                "Skipping realtime drawdown row because the confirmed market "
-                "date is unavailable: %s",
-                exc,
-            )
-            confirmed_end_date = None
-
-        with (
-            _request_count_log_scope(market_data_provider, phase="before_close"),
-            open_connection(sqlite_path) as connection,
-        ):
-            initialize_database(connection)
-            if confirmed_end_date is None:
-                drawdown_result = DrawdownCheckResult(
-                    checked_rules=0,
-                    notifications=[],
-                    skipped_duplicates=0,
-                    no_data_skips=[],
-                    errors=[],
-                    statuses=[],
-                )
-            else:
-                drawdown_result = evaluate_drawdown_rules(
-                    connection,
-                    market_data_provider,
-                    today=check_date,
-                    require_new_data_date=check_date,
-                    include_latest=True,
-                    confirmed_end_date=confirmed_end_date,
-                )
-            plan_rules = [
-                row
-                for row in list_enabled_rules(connection)
-                if row["type"] == "drawdown_plan"
-            ]
-            try:
-                confirmed_plan_day = bool(
-                    plan_rules
-                ) and market_calendar.confirmed_status(check_date)
-                confirmed_date = confirmed_end_date if confirmed_plan_day else None
-            except MarketCalendarUnavailableError as exc:
-                plan_result = DrawdownPlanCheckResult(
-                    checked_rules=len(plan_rules),
-                    notifications=[],
-                    no_data_skips=[
-                        RuleNoDataSkip(
-                            rule_id=int(row["id"]),
-                            symbol=str(row["symbol"]),
-                            message=str(exc),
-                        )
-                        for row in plan_rules
-                    ],
-                    errors=[],
-                )
-            else:
-                plan_result = (
-                    evaluate_drawdown_plan_prealerts(
-                        connection,
-                        market_data_provider,
-                        market_date=check_date,
-                        confirmed_date=confirmed_date,
-                    )
-                    if confirmed_date is not None
-                    else DrawdownPlanCheckResult(len(plan_rules), [], [], [])
-                )
-            data_notice = reserve_drawdown_plan_data_unavailable_notice(
-                connection,
-                evaluation_date=check_date,
-                result=plan_result,
-                phase="before_close",
-            )
+        drawdown_result, plan_result, data_notice = evaluated
 
         for status in drawdown_result.statuses:
             LOGGER.info(
@@ -466,6 +482,7 @@ async def run_scheduled_market_check(
     market_calendar: MarketCalendar | None = None,
     run_date: date | None = None,
     notification_settings: NotificationSettings | None = None,
+    work_lock: Lock | None = None,
 ) -> None:
     """Run scheduled after-close market reminders and send notifications."""
 
@@ -491,71 +508,91 @@ async def run_scheduled_market_check(
             allowed_user_ids=allowed_user_ids,
             notification_settings=notification_settings,
         )
-        if market_calendar is None:
-            market_calendar = CNMarketCalendar()
-        if not market_calendar.is_trading_day(check_date):
+
+        def evaluate() -> (
+            tuple[
+                DrawdownCheckResult,
+                DrawdownPlanCheckResult,
+                ProfitCheckResult,
+                AlertNotification | None,
+            ]
+            | None
+        ):
+            calendar = market_calendar or CNMarketCalendar()
+            if not calendar.is_trading_day(check_date):
+                return None
+
+            with (
+                _request_count_log_scope(market_data_provider, phase="after_close"),
+                open_connection(sqlite_path) as connection,
+            ):
+                initialize_database(connection)
+                current_drawdown_result = evaluate_drawdown_rules(
+                    connection,
+                    market_data_provider,
+                    today=check_date,
+                    require_new_data_date=check_date,
+                )
+                plan_rules = [
+                    row
+                    for row in list_enabled_rules(connection)
+                    if row["type"] == "drawdown_plan"
+                ]
+                try:
+                    confirmed_plan_day = bool(plan_rules) and calendar.confirmed_status(
+                        check_date
+                    )
+                except MarketCalendarUnavailableError as exc:
+                    current_plan_result = DrawdownPlanCheckResult(
+                        checked_rules=len(plan_rules),
+                        notifications=[],
+                        no_data_skips=[
+                            RuleNoDataSkip(
+                                rule_id=int(row["id"]),
+                                symbol=str(row["symbol"]),
+                                message=str(exc),
+                            )
+                            for row in plan_rules
+                        ],
+                        errors=[],
+                    )
+                else:
+                    current_plan_result = (
+                        evaluate_drawdown_plan_rules(
+                            connection,
+                            market_data_provider,
+                            expected_date=check_date,
+                        )
+                        if confirmed_plan_day
+                        else DrawdownPlanCheckResult(len(plan_rules), [], [], [])
+                    )
+                current_profit_result = evaluate_profit_rules(
+                    connection,
+                    market_data_provider,
+                    evaluation_date=check_date,
+                    market_calendar=calendar,
+                )
+                current_data_notice = reserve_drawdown_plan_data_unavailable_notice(
+                    connection,
+                    evaluation_date=check_date,
+                    result=current_plan_result,
+                )
+            return (
+                current_drawdown_result,
+                current_plan_result,
+                current_profit_result,
+                current_data_notice,
+            )
+
+        evaluated = await run_serialized(work_lock, evaluate)
+        if evaluated is None:
             LOGGER.info(
                 "Scheduled market reminder check skipped for date=%s: "
                 "CN market is not trading.",
                 check_date.isoformat(),
             )
             return
-
-        with (
-            _request_count_log_scope(market_data_provider, phase="after_close"),
-            open_connection(sqlite_path) as connection,
-        ):
-            initialize_database(connection)
-            drawdown_result = evaluate_drawdown_rules(
-                connection,
-                market_data_provider,
-                today=check_date,
-                require_new_data_date=check_date,
-            )
-            plan_rules = [
-                row
-                for row in list_enabled_rules(connection)
-                if row["type"] == "drawdown_plan"
-            ]
-            try:
-                confirmed_plan_day = bool(
-                    plan_rules
-                ) and market_calendar.confirmed_status(check_date)
-            except MarketCalendarUnavailableError as exc:
-                plan_result = DrawdownPlanCheckResult(
-                    checked_rules=len(plan_rules),
-                    notifications=[],
-                    no_data_skips=[
-                        RuleNoDataSkip(
-                            rule_id=int(row["id"]),
-                            symbol=str(row["symbol"]),
-                            message=str(exc),
-                        )
-                        for row in plan_rules
-                    ],
-                    errors=[],
-                )
-            else:
-                plan_result = (
-                    evaluate_drawdown_plan_rules(
-                        connection,
-                        market_data_provider,
-                        expected_date=check_date,
-                    )
-                    if confirmed_plan_day
-                    else DrawdownPlanCheckResult(len(plan_rules), [], [], [])
-                )
-            profit_result = evaluate_profit_rules(
-                connection,
-                market_data_provider,
-                evaluation_date=check_date,
-                market_calendar=market_calendar,
-            )
-            data_notice = reserve_drawdown_plan_data_unavailable_notice(
-                connection,
-                evaluation_date=check_date,
-                result=plan_result,
-            )
+        drawdown_result, plan_result, profit_result, data_notice = evaluated
 
         for skip in [
             *drawdown_result.no_data_skips,
@@ -637,6 +674,7 @@ async def run_scheduled_fund_nav_process(
     timezone: str | tzinfo,
     run_date: date | None = None,
     notification_settings: NotificationSettings | None = None,
+    work_lock: Lock | None = None,
 ) -> None:
     """Settle pending manual additions from exact-date feeder-fund NAVs."""
 
@@ -663,72 +701,87 @@ async def run_scheduled_fund_nav_process(
             allowed_user_ids=allowed_user_ids,
             notification_settings=notification_settings,
         )
-        with (
-            _request_count_log_scope(market_data_provider, phase="fund_nav"),
-            open_connection(sqlite_path) as connection,
-        ):
-            initialize_database(connection)
-            nav_cache: dict[tuple[str, date], Any] = {}
-            nav_errors: dict[tuple[str, date], Exception] = {}
-            dca_result = process_scheduled_dca_occurrences(
-                connection,
-                market_data_provider,
-                market_calendar,
-                processing_date=processing_date,
-                nav_cache=nav_cache,
-                nav_errors=nav_errors,
-            )
-            manual_result = process_manual_add_estimates(
-                connection,
-                market_data_provider,
-                market_calendar,
-                processing_date=processing_date,
-                nav_cache=nav_cache,
-                nav_errors=nav_errors,
-            )
-            position_profit_result = evaluate_position_profit_rules(
-                connection,
-                market_data_provider,
-                market_calendar,
-                processing_date=processing_date,
-                nav_cache=nav_cache,
-                nav_errors=nav_errors,
-            )
-            settlement_result = ManualAddSettlementResult(
-                checked_estimates=(
-                    dca_result.checked_estimates + manual_result.checked_estimates
-                ),
-                notifications=manual_result.notifications,
-                no_data_skips=[
-                    *dca_result.no_data_skips,
-                    *manual_result.no_data_skips,
-                ],
-                errors=[*dca_result.errors, *manual_result.errors],
-            )
-            result = ManualAddSettlementResult(
-                checked_estimates=settlement_result.checked_estimates,
-                notifications=settlement_result.notifications,
-                no_data_skips=[
-                    *settlement_result.no_data_skips,
-                    *position_profit_result.no_data_skips,
-                ],
-                errors=[*settlement_result.errors, *position_profit_result.errors],
-            )
-            affected_by_date: dict[date, list[Any]] = {}
-            for item in [*result.no_data_skips, *result.errors]:
-                affected_by_date.setdefault(
-                    item.data_date or processing_date, []
-                ).append(item)
-            fund_nav_notices = []
-            for data_date, affected in sorted(affected_by_date.items()):
-                notice = reserve_drawdown_plan_data_unavailable_notice(
+
+        def evaluate() -> tuple[
+            ManualAddSettlementResult,
+            ProfitCheckResult,
+            list[AlertNotification],
+        ]:
+            with (
+                _request_count_log_scope(market_data_provider, phase="fund_nav"),
+                open_connection(sqlite_path) as connection,
+            ):
+                initialize_database(connection)
+                nav_cache: dict[tuple[str, date], Any] = {}
+                nav_errors: dict[tuple[str, date], Exception] = {}
+                dca_result = process_scheduled_dca_occurrences(
                     connection,
-                    evaluation_date=data_date,
-                    result=ManualAddSettlementResult(0, [], affected, []),
-                    phase="fund_nav",
+                    market_data_provider,
+                    market_calendar,
+                    processing_date=processing_date,
+                    nav_cache=nav_cache,
+                    nav_errors=nav_errors,
                 )
-                if notice is not None:
-                    fund_nav_notices.append(notice)
+                manual_result = process_manual_add_estimates(
+                    connection,
+                    market_data_provider,
+                    market_calendar,
+                    processing_date=processing_date,
+                    nav_cache=nav_cache,
+                    nav_errors=nav_errors,
+                )
+                position_profit_result = evaluate_position_profit_rules(
+                    connection,
+                    market_data_provider,
+                    market_calendar,
+                    processing_date=processing_date,
+                    nav_cache=nav_cache,
+                    nav_errors=nav_errors,
+                )
+                settlement_result = ManualAddSettlementResult(
+                    checked_estimates=(
+                        dca_result.checked_estimates + manual_result.checked_estimates
+                    ),
+                    notifications=manual_result.notifications,
+                    no_data_skips=[
+                        *dca_result.no_data_skips,
+                        *manual_result.no_data_skips,
+                    ],
+                    errors=[*dca_result.errors, *manual_result.errors],
+                )
+                current_result = ManualAddSettlementResult(
+                    checked_estimates=settlement_result.checked_estimates,
+                    notifications=settlement_result.notifications,
+                    no_data_skips=[
+                        *settlement_result.no_data_skips,
+                        *position_profit_result.no_data_skips,
+                    ],
+                    errors=[
+                        *settlement_result.errors,
+                        *position_profit_result.errors,
+                    ],
+                )
+                affected_by_date: dict[date, list[Any]] = {}
+                for item in [*current_result.no_data_skips, *current_result.errors]:
+                    affected_by_date.setdefault(
+                        item.data_date or processing_date, []
+                    ).append(item)
+                fund_nav_notices = []
+                for data_date, affected in sorted(affected_by_date.items()):
+                    notice = reserve_drawdown_plan_data_unavailable_notice(
+                        connection,
+                        evaluation_date=data_date,
+                        result=ManualAddSettlementResult(0, [], affected, []),
+                        phase="fund_nav",
+                    )
+                    if notice is not None:
+                        fund_nav_notices.append(notice)
+            return current_result, position_profit_result, fund_nav_notices
+
+        result, position_profit_result, fund_nav_notices = await run_serialized(
+            work_lock,
+            evaluate,
+        )
         for skip in result.no_data_skips:
             LOGGER.info(
                 "Fund NAV unavailable rule_id=%s symbol=%s: %s",
@@ -770,6 +823,21 @@ async def run_scheduled_fund_nav_process(
                 len(result.errors),
             )
 
+        def prune() -> dict[str, int]:
+            with open_connection(sqlite_path) as connection:
+                initialize_database(connection)
+                return prune_database(connection, today=processing_date)
+
+        try:
+            pruned = await run_serialized(work_lock, prune)
+            LOGGER.info(
+                "Database retention prune completed date=%s deleted=%s",
+                processing_date.isoformat(),
+                {table: count for table, count in pruned.items() if count},
+            )
+        except Exception:
+            LOGGER.exception("Database retention prune failed")
+
 
 async def run_scheduled_dca_check(
     *,
@@ -780,6 +848,7 @@ async def run_scheduled_dca_check(
     market_calendar: MarketCalendar | None = None,
     run_date: date | None = None,
     notification_settings: NotificationSettings | None = None,
+    work_lock: Lock | None = None,
 ) -> None:
     """Run the scheduled DCA reminder check and send due notifications."""
 
@@ -794,13 +863,17 @@ async def run_scheduled_dca_check(
             action_date=check_date,
             notification_settings=notification_settings,
         )
-        with open_connection(sqlite_path) as connection:
-            initialize_database(connection)
-            result = evaluate_dca_rules(
-                connection,
-                today=check_date,
-                market_calendar=market_calendar,
-            )
+
+        def evaluate() -> Any:
+            with open_connection(sqlite_path) as connection:
+                initialize_database(connection)
+                return evaluate_dca_rules(
+                    connection,
+                    today=check_date,
+                    market_calendar=market_calendar or CNMarketCalendar(),
+                )
+
+        result = await run_serialized(work_lock, evaluate)
 
         for error in result.errors:
             LOGGER.warning(

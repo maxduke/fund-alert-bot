@@ -945,7 +945,7 @@ def test_standard_notification_retry_survives_restart_and_keeps_current_dca_acti
             asset_type="cn_open_fund",
             params={"weekday": "monday", "amount": 500},
         )
-        assert replacement_rule_id == legacy_dca_rule_id
+        assert replacement_rule_id > legacy_dca_rule_id
         connection.execute(
             """
             INSERT INTO scheduled_dca_occurrences (

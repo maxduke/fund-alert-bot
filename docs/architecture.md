@@ -43,6 +43,11 @@ Responsible for SQLite schema management and persistence of:
 
 Storage code should hide raw SQL from alert evaluation and notification modules where practical.
 
+SQLite history is bounded by a conservative retention pass at startup and
+after the daily NAV process. Terminal history is normally retained for 400
+days; enabled-rule windows, active-cycle peaks, latest fund NAVs, pending work,
+and still-relevant deduplication state are preserved even when older.
+
 ### Alert Evaluation
 
 Responsible for deciding whether a reminder should be emitted.
@@ -93,7 +98,10 @@ Environment -> Configuration -> Scheduler
 
 Alert evaluation may read prior state from storage and write updated state after each run.
 Notification dispatch records whether each reserved alert was delivered,
-failed, or is still pending so transient delivery failures can be retried.
+failed, or is still pending for each concrete channel target. Claims use a
+short SQLite lease so overlapping jobs do not send the same target twice;
+retries address only unfinished targets, and the aggregate event is complete
+only when every frozen target succeeds.
 
 ## Explicit Non-Goals
 

@@ -29,6 +29,8 @@ from fund_alert_bot.config import (
     parse_allowed_user_ids,
     parse_bool_env,
     parse_bot_language,
+    parse_hhmm_time,
+    parse_http_url,
     parse_non_negative_float_env,
     parse_positive_int_env,
 )
@@ -82,6 +84,121 @@ def test_scheduler_settings_from_environment(monkeypatch) -> None:
     assert settings.after_close_check_time == "17:10"
     assert settings.dca_reminder_time == "09:30"
     assert settings.fund_nav_process_time == "08:45"
+
+
+@pytest.mark.parametrize(
+    ("env_name", "raw_value"),
+    [
+        ("AFTER_CLOSE_CHECK_TIME", "24:00"),
+        ("BEFORE_CLOSE_CHECK_TIME", "12:60"),
+        ("DCA_REMINDER_TIME", "9:30"),
+        ("FUND_NAV_PROCESS_TIME", "08:3"),
+    ],
+)
+def test_load_settings_rejects_invalid_schedule_times(
+    monkeypatch,
+    env_name: str,
+    raw_value: str,
+) -> None:
+    monkeypatch.setenv(env_name, raw_value)
+
+    with pytest.raises(ValueError, match=env_name):
+        load_settings(load_env_file=False)
+
+
+def test_load_settings_accepts_and_normalizes_schedule_boundaries(monkeypatch) -> None:
+    monkeypatch.setenv("AFTER_CLOSE_CHECK_TIME", " 00:00 ")
+    monkeypatch.setenv("BEFORE_CLOSE_CHECK_TIME", "23:59")
+
+    settings = load_settings(load_env_file=False)
+
+    assert settings.after_close_check_time == "00:00"
+    assert settings.before_close_check_time == "23:59"
+
+
+def test_load_settings_rejects_unknown_timezone(monkeypatch) -> None:
+    monkeypatch.setenv("TZ", "Not/A_Timezone")
+
+    with pytest.raises(ValueError, match="TZ must be a valid IANA timezone"):
+        load_settings(load_env_file=False)
+
+
+@pytest.mark.parametrize(
+    ("enabled_name", "missing_name"),
+    [
+        ("BARK_ENABLED", "BARK_DEVICE_KEY"),
+        ("NTFY_ENABLED", "NTFY_TOPIC"),
+        ("WEBHOOK_ENABLED", "WEBHOOK_URL"),
+    ],
+)
+def test_enabled_notification_channels_require_configuration(
+    monkeypatch,
+    enabled_name: str,
+    missing_name: str,
+) -> None:
+    monkeypatch.setenv(enabled_name, "true")
+    monkeypatch.delenv(missing_name, raising=False)
+    if enabled_name == "BARK_ENABLED":
+        monkeypatch.setenv("BARK_SERVER_URL", "https://bark.example.test")
+        expected = "BARK_SERVER_URL and BARK_DEVICE_KEY are required"
+    elif enabled_name == "NTFY_ENABLED":
+        monkeypatch.setenv("NTFY_SERVER_URL", "https://ntfy.example.test")
+        expected = "NTFY_SERVER_URL and NTFY_TOPIC are required"
+    else:
+        expected = "WEBHOOK_URL is required"
+
+    with pytest.raises(ValueError, match=expected):
+        load_settings(load_env_file=False)
+
+
+@pytest.mark.parametrize(
+    ("env_name", "enabled_name"),
+    [
+        ("BARK_SERVER_URL", "BARK_ENABLED"),
+        ("NTFY_SERVER_URL", "NTFY_ENABLED"),
+        ("WEBHOOK_URL", "WEBHOOK_ENABLED"),
+    ],
+)
+def test_notification_urls_require_http_or_https(
+    monkeypatch,
+    env_name: str,
+    enabled_name: str,
+) -> None:
+    monkeypatch.setenv(enabled_name, "true")
+    monkeypatch.setenv(env_name, "ftp://example.test/hook")
+    if enabled_name == "BARK_ENABLED":
+        monkeypatch.setenv("BARK_DEVICE_KEY", "secret")
+    elif enabled_name == "NTFY_ENABLED":
+        monkeypatch.setenv("NTFY_TOPIC", "topic")
+
+    with pytest.raises(ValueError, match=f"{env_name} must be"):
+        load_settings(load_env_file=False)
+
+
+def test_load_settings_strips_non_secret_string_values(monkeypatch) -> None:
+    monkeypatch.setenv("TZ", " Asia/Shanghai ")
+    monkeypatch.setenv("BARK_SERVER_URL", " https://bark.example.test ")
+    monkeypatch.setenv("BARK_DEVICE_KEY", " key ")
+    monkeypatch.setenv("BARK_ENABLED", "true")
+
+    settings = load_settings(load_env_file=False)
+
+    assert settings.timezone == "Asia/Shanghai"
+    assert settings.notifications.bark_server_url == "https://bark.example.test"
+    assert settings.notifications.bark_device_key == "key"
+
+
+def test_parse_hhmm_time_accepts_only_two_digit_values() -> None:
+    assert parse_hhmm_time(" 23:59 ", name="TIME") == "23:59"
+    with pytest.raises(ValueError, match="TIME must use HH:MM"):
+        parse_hhmm_time("9:30", name="TIME")
+
+
+def test_parse_http_url_rejects_missing_host_without_echoing_value() -> None:
+    secret_url = "https://"
+    with pytest.raises(ValueError, match="URL must be") as error:
+        parse_http_url(secret_url, name="URL")
+    assert secret_url not in str(error.value)
 
 
 def test_bot_language_defaults_to_chinese_and_accepts_english(monkeypatch) -> None:

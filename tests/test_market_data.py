@@ -17,7 +17,7 @@ from fund_alert_bot.market_data import (
     PriceBasis,
     UnsupportedAssetTypeError,
 )
-from fund_alert_bot.market_data.normalize import NORMALIZED_COLUMNS
+from fund_alert_bot.market_data.normalize import NORMALIZED_COLUMNS, normalize_history
 
 
 class FakeAkshare:
@@ -262,6 +262,88 @@ def test_open_fund_history_uses_unit_nav_as_close_and_filters_by_date() -> None:
             },
         )
     ]
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        (column, value)
+        for column in ("open", "high", "low", "close")
+        for value in (float("nan"), float("inf"), 0, -1)
+    ],
+)
+def test_price_history_rejects_non_positive_or_non_finite_ohlc(
+    column: str, value: float
+) -> None:
+    raw_data = _english_price_history().iloc[[1]].copy()
+    raw_data.loc[raw_data.index[0], column] = value
+
+    with pytest.raises(MarketDataNormalizeError):
+        normalize_history(raw_data, AssetType.CN_ETF, source="test")
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        (column, value)
+        for column in ("volume", "amount")
+        for value in ("not-a-number", float("inf"), -1)
+    ],
+)
+def test_price_history_rejects_invalid_present_volume_or_amount(
+    column: str, value: object
+) -> None:
+    raw_data = _english_price_history().iloc[[1]].copy()
+    raw_data.loc[raw_data.index[0], column] = value
+
+    with pytest.raises(MarketDataNormalizeError):
+        normalize_history(raw_data, AssetType.CN_ETF, source="test")
+
+
+def test_price_history_allows_missing_volume_and_amount() -> None:
+    raw_data = _english_price_history().iloc[[1]].copy()
+    raw_data.loc[raw_data.index[0], ["volume", "amount"]] = None
+
+    normalized = normalize_history(raw_data, AssetType.CN_ETF, source="test")
+
+    assert pd.isna(normalized.loc[0, "volume"])
+    assert pd.isna(normalized.loc[0, "amount"])
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"high": 1.9},
+        {"low": 2.2},
+        {"high": 1.0, "low": 1.1},
+    ],
+)
+def test_price_history_rejects_inconsistent_ohlc(changes: dict[str, float]) -> None:
+    raw_data = _english_price_history().iloc[[1]].copy()
+    for column, value in changes.items():
+        raw_data.loc[raw_data.index[0], column] = value
+
+    with pytest.raises(MarketDataNormalizeError):
+        normalize_history(raw_data, AssetType.CN_ETF, source="test")
+
+
+@pytest.mark.parametrize("source", ["", "   "])
+def test_history_rejects_empty_source(source: str) -> None:
+    with pytest.raises(MarketDataNormalizeError):
+        normalize_history(_english_price_history(), AssetType.CN_ETF, source=source)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), 0, -1])
+def test_open_fund_history_rejects_invalid_nav(value: float) -> None:
+    raw_data = pd.DataFrame(
+        {
+            "净值日期": ["2024-01-02"],
+            "单位净值": [value],
+        }
+    )
+
+    with pytest.raises(MarketDataNormalizeError):
+        normalize_history(raw_data, AssetType.CN_OPEN_FUND, source="test")
 
 
 def test_index_history_formats_exchange_symbol_and_normalizes() -> None:
@@ -778,9 +860,9 @@ def test_fund_nav_fails_closed_for_missing_exact_date_or_invalid_value() -> None
     )
     instrument = Instrument("000001", "Example Open Fund", AssetType.CN_OPEN_FUND)
 
-    with pytest.raises(EmptyMarketDataError):
+    with pytest.raises(MarketDataNormalizeError):
         provider.get_fund_nav(instrument, "2024-01-01")
-    with pytest.raises(EmptyMarketDataError):
+    with pytest.raises(MarketDataNormalizeError):
         provider.get_fund_nav(instrument, "2024-01-02")
 
 
@@ -1065,10 +1147,10 @@ def test_cached_invalid_nav_does_not_extend_eastmoney_cooldown(
     )
     instrument = Instrument("000001", "Fund", AssetType.CN_OPEN_FUND)
 
-    with pytest.raises(EmptyMarketDataError):
+    with pytest.raises(MarketDataNormalizeError):
         provider.get_fund_nav(instrument)
     now[0] = 29
-    with pytest.raises(EmptyMarketDataError):
+    with pytest.raises(MarketDataNormalizeError):
         provider.get_fund_nav(instrument)
     now[0] = 31
 

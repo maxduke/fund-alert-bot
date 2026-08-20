@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1357,6 +1357,75 @@ def test_sync_position_paginates_large_pending_preview(tmp_path, monkeypatch) ->
     )
     assert "Review all 100 pending additions" in message.replies[-1]
     assert len(message.reply_markups) == 1
+
+
+def test_position_sync_entry_purges_expired_draft_before_old_callback(
+    tmp_path, monkeypatch
+) -> None:
+    pending_items = [
+        {
+            "key": "action:1:0.15",
+            "kind": "manual add requiring sync",
+            "date": "2024-01-02",
+            "amount": 5000,
+        }
+    ]
+    monkeypatch.setattr(
+        "fund_alert_bot.commands.list_pending_position_items",
+        lambda connection, fund_symbol: pending_items,
+    )
+    now = [datetime(2024, 1, 2, 8, tzinfo=UTC)]
+    handlers = build_command_handlers(
+        {123},
+        sqlite_path=tmp_path / "fund_alert_bot.sqlite3",
+        now_factory=lambda: now[0],
+    )
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        effective_message=FakeMessage(),
+    )
+    sync_handler = _handler_by_command(handlers, "sync_position")
+
+    asyncio.run(
+        sync_handler.callback(
+            update,
+            SimpleNamespace(args=["000001", "1100", "1.1"]),
+        )
+    )
+    old_token = (
+        update.effective_message.reply_markups[0]
+        .inline_keyboard[0][0]
+        .callback_data.split(":")[1]
+    )
+
+    now[0] += timedelta(minutes=11)
+    update.effective_message = FakeMessage()
+    asyncio.run(
+        sync_handler.callback(
+            update,
+            SimpleNamespace(args=["000001", "1100", "1.1"]),
+        )
+    )
+
+    monkeypatch.setattr(
+        "fund_alert_bot.commands.reconcile_position_snapshot",
+        lambda *args, **kwargs: pytest.fail("expired draft reached the database"),
+    )
+    query = FakeCallbackQuery(f"position_sync:{old_token}:included")
+    callback_update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        callback_query=query,
+    )
+    asyncio.run(
+        _callback_by_name(handlers, "position_sync_callback").callback(
+            callback_update,
+            SimpleNamespace(),
+        )
+    )
+
+    assert query.edits == ["This position confirmation expired. Rerun /sync_position."]
 
 
 def test_partial_position_sync_changes_nothing(tmp_path) -> None:

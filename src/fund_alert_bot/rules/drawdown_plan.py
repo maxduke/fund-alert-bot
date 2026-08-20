@@ -59,6 +59,7 @@ class ActiveDrawdownCycle:
     peak_date: date
     peak_price: float
     last_evaluated_date: date
+    saw_below_peak: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +81,7 @@ class DrawdownPlanEvaluation:
     cycle_changed: bool
     newly_crossed_tiers: tuple[DrawdownTier, ...]
     total_amount: int | float
+    saw_below_peak: bool = False
 
 
 def derive_tier_action_state(
@@ -211,12 +213,27 @@ def evaluate_drawdown_plan(
             latest_date=latest_date,
             lookback_days=config.lookback_days,
         )
+        saw_below_peak = any(
+            float(row.close) < peak_price
+            and not math.isclose(
+                float(row.close),
+                peak_price,
+                rel_tol=_PRICE_RELATIVE_TOLERANCE,
+                abs_tol=_PRICE_ABSOLUTE_TOLERANCE,
+            )
+            for row in frame.loc[frame["date"] > pd.Timestamp(peak_date)].itertuples(
+                index=False
+            )
+        )
         cycle_initialized = True
         cycle_changed = False
     else:
         if latest_date < active_cycle.last_evaluated_date:
             raise ValueError("Confirmed history is older than the active cycle state.")
-        peak_date, peak_price, cycle_changed = _recover_cycle(frame, active_cycle)
+        peak_date, peak_price, cycle_changed, saw_below_peak = _recover_cycle(
+            frame,
+            active_cycle,
+        )
         cycle_initialized = False
 
     drawdown = max(0.0, 1 - latest_price / peak_price)
@@ -252,6 +269,7 @@ def evaluate_drawdown_plan(
         cycle_changed=cycle_changed,
         newly_crossed_tiers=crossed,
         total_amount=total_amount,
+        saw_below_peak=saw_below_peak,
     )
 
 
@@ -903,7 +921,7 @@ def _initial_peak(
     latest_date: date,
     lookback_days: int,
 ) -> tuple[date, float]:
-    start = pd.Timestamp(latest_date) - pd.Timedelta(days=lookback_days - 1)
+    start = pd.Timestamp(latest_date - timedelta(days=int(lookback_days) - 1))
     window = frame.loc[frame["date"].between(start, pd.Timestamp(latest_date))]
     if window.empty:
         raise ValueError("Confirmed history has no prices in the lookback window.")
@@ -915,7 +933,7 @@ def _initial_peak(
 def _recover_cycle(
     frame: pd.DataFrame,
     active_cycle: ActiveDrawdownCycle,
-) -> tuple[date, float, bool]:
+) -> tuple[date, float, bool, bool]:
     _require_positive_finite(active_cycle.peak_price, "active cycle peak price")
     peak_timestamp = pd.Timestamp(active_cycle.peak_date)
     peak_rows = frame.loc[frame["date"] == peak_timestamp]
@@ -924,7 +942,7 @@ def _recover_cycle(
 
     peak_date = active_cycle.peak_date
     peak_price = float(peak_rows.iloc[-1]["close"])
-    saw_below = False
+    saw_below = active_cycle.saw_below_peak
     changed = False
     for row in frame.loc[frame["date"] > peak_timestamp].itertuples(index=False):
         current_date = row.date.date()
@@ -947,7 +965,7 @@ def _recover_cycle(
             changed = True
         elif current_price < peak_price and not equal_peak:
             saw_below = True
-    return peak_date, peak_price, changed
+    return peak_date, peak_price, changed, saw_below
 
 
 def _require_positive_finite(value: object, name: str) -> None:
