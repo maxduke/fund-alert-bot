@@ -257,7 +257,17 @@ AKSHARE_PROXY_RETRY=1
 AKSHARE_HISTORY_CACHE_TTL_SECONDS=300
 ```
 
-The patch is installed at process startup, before the first lazy AKShare import.
+At process startup, before the first lazy AKShare import, the bot checks the
+token balance at the proxy service. The patch is installed only when the
+response is a valid positive balance. If the balance is zero, invalid, or
+cannot be verified, the patch stays disabled, direct data sources are used,
+and the enabled notification channels receive a startup warning; recharge or
+fix the token and restart the bot.
+The vendor currently provides this balance lookup over HTTP only, so setting
+`AKSHARE_PROXY_ENABLED=true` sends the reusable token in a plaintext URL that
+may be visible to network intermediaries and provider/access logs. Enable it
+only if you explicitly accept that risk and trust the network path; prefer a
+vendor-supported HTTPS endpoint with header/body credentials when available.
 It hooks only the Eastmoney domains used by this bot; Sina fallback and Xueqiu
 metadata remain direct requests. Concurrent `fast` pagination is deliberately
 disabled because it can multiply paid requests. Keep the retry value low and

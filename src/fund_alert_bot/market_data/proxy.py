@@ -3,10 +3,20 @@
 from __future__ import annotations
 
 import logging
+import math
+from numbers import Real
+from urllib.parse import quote
+
+import requests
 
 LOGGER = logging.getLogger(__name__)
 
 _PROXY_GATEWAY = "101.201.173.125"
+# The vendor currently exposes this lookup over HTTP only, sending the reusable
+# token in the URL without transport encryption; use a vendor HTTPS endpoint
+# with header/body credentials here if one becomes available.
+_PROXY_BALANCE_URL = "http://101.201.173.125:47001/api/token/{token}"
+_PROXY_BALANCE_TIMEOUT_SECONDS = 5
 _EASTMONEY_HOOK_DOMAINS = (
     "fund.eastmoney.com",
     "push2.eastmoney.com",
@@ -32,6 +42,9 @@ def install_akshare_proxy(
     if retry < 1:
         raise ValueError("AKSHARE_PROXY_RETRY must be a positive integer")
 
+    if not _has_positive_proxy_balance(auth_token):
+        return False
+
     try:
         import akshare_proxy_patch
     except ImportError as exc:  # pragma: no cover - dependency is packaged
@@ -54,3 +67,31 @@ def install_akshare_proxy(
         retry,
     )
     return True
+
+
+def _has_positive_proxy_balance(auth_token: str) -> bool:
+    """Return whether the paid proxy reports a finite positive balance."""
+
+    try:
+        response = requests.get(
+            _PROXY_BALANCE_URL.format(token=quote(auth_token, safe="")),
+            timeout=_PROXY_BALANCE_TIMEOUT_SECONDS,
+        )
+        if not 200 <= response.status_code < 300:
+            reason = "http_status"
+        else:
+            payload = response.json()
+            balance = payload.get("balance") if isinstance(payload, dict) else None
+            if (
+                isinstance(balance, Real)
+                and not isinstance(balance, bool)
+                and math.isfinite(float(balance))
+                and balance > 0
+            ):
+                return True
+            reason = "invalid_balance"
+    except (requests.RequestException, ValueError, TypeError, OverflowError):
+        reason = "request_or_response_error"
+
+    LOGGER.warning("AKShare paid proxy balance check failed reason=%s", reason)
+    return False

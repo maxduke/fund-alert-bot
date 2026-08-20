@@ -139,6 +139,25 @@ def test_chinese_localizes_test_notification_title() -> None:
         set_language("en")
 
 
+def test_chinese_localizes_proxy_balance_warning() -> None:
+    set_language("zh-CN")
+    try:
+        assert localize_text(
+            "Paid proxy not enabled\n"
+            "The paid proxy was not enabled because its balance is insufficient "
+            "or could not be verified.\n"
+            "Direct data sources will be used.\n"
+            "Recharge or fix the proxy token, then restart the bot."
+        ) == (
+            "付费代理未启用\n"
+            "付费代理未启用，因为积分不足或无法验证余额。\n"
+            "将使用直连数据源。\n"
+            "请充值或修复代理 Token，然后重启 Bot。"
+        )
+    finally:
+        set_language("en")
+
+
 def test_chinese_localizes_dynamic_rule_not_found_suffix() -> None:
     set_language("zh-CN")
     try:
