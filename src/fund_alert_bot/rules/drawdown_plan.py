@@ -921,7 +921,7 @@ def _initial_peak(
     latest_date: date,
     lookback_days: int,
 ) -> tuple[date, float]:
-    start = pd.Timestamp(latest_date) - pd.Timedelta(days=lookback_days - 1)
+    start = pd.Timestamp(latest_date - timedelta(days=int(lookback_days) - 1))
     window = frame.loc[frame["date"].between(start, pd.Timestamp(latest_date))]
     if window.empty:
         raise ValueError("Confirmed history has no prices in the lookback window.")

@@ -2419,7 +2419,10 @@ def _append_latest_row(
 
     latest_row = {column: latest.get(column) for column in history.columns}
     latest_row["date"] = latest_date.normalize()
-    frame = pd.concat([history, pd.DataFrame([latest_row])], ignore_index=True)
+    latest_frame = pd.DataFrame([latest_row]).dropna(axis="columns", how="all")
+    frame = pd.concat([history, latest_frame], ignore_index=True).reindex(
+        columns=history.columns
+    )
     frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
     frame = frame.dropna(subset=["date"])
     return (
