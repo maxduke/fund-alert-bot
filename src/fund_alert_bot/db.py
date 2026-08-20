@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import sqlite3
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -70,7 +71,7 @@ def init_db(connection: sqlite3.Connection) -> None:
         );
 
         CREATE TABLE IF NOT EXISTS rules (
-            id INTEGER PRIMARY KEY,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
             type TEXT NOT NULL,
             symbol TEXT NOT NULL,
             name TEXT NOT NULL,
@@ -82,7 +83,7 @@ def init_db(connection: sqlite3.Connection) -> None:
         );
 
         CREATE TABLE IF NOT EXISTS alert_events (
-            id INTEGER PRIMARY KEY,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
             rule_id INTEGER NOT NULL,
             alert_key TEXT NOT NULL UNIQUE,
             title TEXT NOT NULL,
@@ -332,6 +333,7 @@ def init_db(connection: sqlite3.Connection) -> None:
         """
     )
     delivery_columns_added = _ensure_alert_event_delivery_columns(connection)
+    _migrate_monotonic_ids(connection)
     _ensure_drawdown_cycle_columns(connection)
     _ensure_fund_settings_columns(connection)
     now = _utc_now_text()
@@ -4215,6 +4217,250 @@ def _ensure_alert_event_delivery_columns(connection: sqlite3.Connection) -> bool
                 f"ALTER TABLE alert_events ADD COLUMN {column} {definition}"
             )
     return delivery_columns_added
+
+
+_MONOTONIC_ID_TABLES = ("rules", "alert_events")
+
+
+def _migrate_monotonic_ids(connection: sqlite3.Connection) -> None:
+    """Upgrade legacy rowids without ever reusing rule or event IDs.
+
+    SQLite cannot add AUTOINCREMENT to an existing table in place.  The table
+    is therefore rebuilt from its original schema while foreign-key checks are
+    disabled outside the migration transaction.  Child tables keep referring
+    to the original table names because those names are never renamed away.
+    """
+
+    schemas = {
+        table: _table_schema_sql(connection, table) for table in _MONOTONIC_ID_TABLES
+    }
+    targets = [
+        (table, schema)
+        for table, schema in schemas.items()
+        if schema is not None and not _schema_has_autoincrement(schema)
+    ]
+    if not targets:
+        return
+
+    # PRAGMA foreign_keys is a connection setting and is ignored mid-
+    # transaction.  Finish any setup DML before changing it.
+    connection.commit()
+    original_foreign_keys = bool(
+        connection.execute("PRAGMA foreign_keys").fetchone()[0]
+    )
+    migration_committed = False
+    try:
+        connection.execute("PRAGMA foreign_keys = OFF")
+        if connection.execute("PRAGMA foreign_keys").fetchone()[0] != 0:
+            raise RuntimeError("Could not disable SQLite foreign-key checks.")
+
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            for table, schema in targets:
+                _rebuild_table_with_autoincrement(
+                    connection,
+                    table=table,
+                    schema_sql=schema,
+                )
+                _seed_autoincrement_high_water(connection, table)
+            _assert_foreign_keys_clean(connection)
+            connection.commit()
+            migration_committed = True
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+
+        # Successful upgrades leave FK enforcement enabled, even if a caller
+        # happened to open this legacy connection with it disabled.
+        connection.execute("PRAGMA foreign_keys = ON")
+        if connection.execute("PRAGMA foreign_keys").fetchone()[0] != 1:
+            raise RuntimeError("Could not enable SQLite foreign-key checks.")
+        _assert_foreign_keys_clean(connection)
+    except Exception:
+        if connection.in_transaction:
+            connection.rollback()
+        raise
+    finally:
+        if connection.in_transaction:
+            connection.rollback()
+        desired_foreign_keys = (
+            "ON" if migration_committed else ("ON" if original_foreign_keys else "OFF")
+        )
+        connection.execute(f"PRAGMA foreign_keys = {desired_foreign_keys}")
+
+
+def _table_schema_sql(
+    connection: sqlite3.Connection,
+    table: str,
+) -> str | None:
+    row = connection.execute(
+        """
+        SELECT sql
+        FROM sqlite_master
+        WHERE type = 'table' AND name = ?
+        """,
+        (table,),
+    ).fetchone()
+    if row is None or row[0] is None:
+        return None
+    return str(row[0])
+
+
+def _schema_has_autoincrement(schema_sql: str) -> bool:
+    return re.search(r"\bAUTOINCREMENT\b", schema_sql, re.IGNORECASE) is not None
+
+
+def _rebuild_table_with_autoincrement(
+    connection: sqlite3.Connection,
+    *,
+    table: str,
+    schema_sql: str,
+) -> None:
+    """Copy one table using its own schema, changing only its integer key."""
+
+    temporary_table = f"{table}__autoincrement_migration"
+    table_columns = [
+        str(row[1])
+        for row in connection.execute(f"PRAGMA table_info({_quote_identifier(table)})")
+    ]
+    if not table_columns:
+        raise RuntimeError(f"Cannot migrate missing or empty schema for {table!r}.")
+
+    temporary_schema = _migration_schema_sql(
+        schema_sql,
+        table=table,
+        temporary_table=temporary_table,
+    )
+    connection.execute(temporary_schema)
+    columns = ", ".join(_quote_identifier(column) for column in table_columns)
+    connection.execute(
+        f"INSERT INTO {_quote_identifier(temporary_table)} ({columns}) "
+        f"SELECT {columns} FROM {_quote_identifier(table)}"
+    )
+    connection.execute(f"DROP TABLE {_quote_identifier(table)}")
+    connection.execute(
+        f"ALTER TABLE {_quote_identifier(temporary_table)} "
+        f"RENAME TO {_quote_identifier(table)}"
+    )
+
+
+def _migration_schema_sql(
+    schema_sql: str,
+    *,
+    table: str,
+    temporary_table: str,
+) -> str:
+    table_pattern = re.compile(
+        rf"(\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?)("
+        rf'"{re.escape(table)}"|`{re.escape(table)}`|'
+        rf"\[{re.escape(table)}\]|{re.escape(table)})(\b)",
+        re.IGNORECASE,
+    )
+    table_match = table_pattern.search(schema_sql)
+    if table_match is None:
+        raise RuntimeError(f"Unsupported SQLite schema for {table!r}.")
+
+    name_token = table_match.group(2)
+    if name_token.startswith('"'):
+        temporary_token = f'"{temporary_table}"'
+    elif name_token.startswith("`"):
+        temporary_token = f"`{temporary_table}`"
+    elif name_token.startswith("["):
+        temporary_token = f"[{temporary_table}]"
+    else:
+        temporary_token = temporary_table
+    migrated = (
+        schema_sql[: table_match.start(2)]
+        + temporary_token
+        + schema_sql[table_match.end(2) :]
+    )
+    id_pattern = re.compile(
+        r"(\bid\s+INTEGER\s+PRIMARY\s+KEY)(?!\s+AUTOINCREMENT)",
+        re.IGNORECASE,
+    )
+    migrated, replacements = id_pattern.subn(r"\1 AUTOINCREMENT", migrated, count=1)
+    if replacements != 1:
+        raise RuntimeError(f"Unsupported integer primary key schema for {table!r}.")
+    return migrated
+
+
+def _quote_identifier(identifier: str) -> str:
+    return '"' + identifier.replace('"', '""') + '"'
+
+
+def _assert_foreign_keys_clean(connection: sqlite3.Connection) -> None:
+    violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+    if violations:
+        raise sqlite3.IntegrityError(
+            f"SQLite foreign-key check failed after schema migration: {violations!r}"
+        )
+
+
+def _seed_autoincrement_high_water(
+    connection: sqlite3.Connection,
+    table: str,
+) -> None:
+    """Keep IDs above references to rows removed before this migration."""
+
+    references = {
+        "rules": (
+            ("alert_events", "rule_id"),
+            ("drawdown_cycles", "rule_id"),
+            ("position_profit_thresholds", "rule_id"),
+            ("position_profit_evaluations", "rule_id"),
+            ("manual_add_estimates", "rule_id"),
+            ("scheduled_dca_occurrences", "rule_id"),
+        ),
+        "alert_events": (
+            ("notification_deliveries", "event_id"),
+            ("drawdown_tier_records", "alert_event_id"),
+            ("position_profit_thresholds", "alert_event_id"),
+            ("manual_add_estimates", "source_alert_event_id"),
+            ("manual_add_estimates", "settlement_alert_event_id"),
+            ("manual_add_actions", "source_alert_event_id"),
+        ),
+    }[table]
+    high_water = _max_column_value(connection, table, "id")
+    for reference_table, reference_column in references:
+        high_water = max(
+            high_water,
+            _max_column_value(connection, reference_table, reference_column),
+        )
+    if high_water <= 0:
+        return
+    cursor = connection.execute(
+        """
+        UPDATE sqlite_sequence
+        SET seq = ?
+        WHERE name = ? AND COALESCE(seq, 0) < ?
+        """,
+        (high_water, table, high_water),
+    )
+    if (
+        cursor.rowcount == 0
+        and connection.execute(
+            "SELECT 1 FROM sqlite_sequence WHERE name = ?",
+            (table,),
+        ).fetchone()
+        is None
+    ):
+        connection.execute(
+            "INSERT INTO sqlite_sequence (name, seq) VALUES (?, ?)",
+            (table, high_water),
+        )
+
+
+def _max_column_value(
+    connection: sqlite3.Connection,
+    table: str,
+    column: str,
+) -> int:
+    row = connection.execute(
+        f"SELECT MAX({_quote_identifier(column)}) FROM {_quote_identifier(table)}"
+    ).fetchone()
+    value = row[0]
+    return 0 if value is None else int(value)
 
 
 def _ensure_drawdown_cycle_columns(connection: sqlite3.Connection) -> None:

@@ -334,6 +334,244 @@ def test_init_adds_position_tables_without_changing_existing_rules(
     assert [row["id"] for row in rules] == [rule_id]
 
 
+def test_init_migrates_legacy_ids_without_breaking_foreign_keys(
+    tmp_path: Path,
+) -> None:
+    sqlite_path = tmp_path / "legacy.sqlite3"
+
+    with open_connection(sqlite_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE rules (
+                id INTEGER PRIMARY KEY,
+                type TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                name TEXT NOT NULL,
+                asset_type TEXT NOT NULL,
+                params_json TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE alert_events (
+                id INTEGER PRIMARY KEY,
+                rule_id INTEGER NOT NULL,
+                alert_key TEXT NOT NULL UNIQUE,
+                title TEXT NOT NULL,
+                message TEXT NOT NULL,
+                payload_json TEXT,
+                triggered_at TEXT NOT NULL
+            );
+            INSERT INTO rules (
+                id, type, symbol, name, asset_type, params_json,
+                created_at, updated_at
+            ) VALUES
+                (10, 'dca_reminder', '000001', 'Old one', 'cn_open_fund', '{}',
+                    '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00'),
+                (20, 'dca_reminder', '000002', 'Old two', 'cn_open_fund', '{}',
+                    '2026-01-02T00:00:00+00:00', '2026-01-02T00:00:00+00:00');
+            INSERT INTO alert_events (
+                id, rule_id, alert_key, title, message, triggered_at
+            ) VALUES
+                (30, 10, 'old-event-1', 'Old event', 'one',
+                    '2026-01-01T00:00:00+00:00'),
+                (40, 20, 'old-event-2', 'Old event', 'two',
+                    '2026-01-02T00:00:00+00:00');
+            DELETE FROM rules WHERE id = 20;
+            """
+        )
+        connection.commit()
+
+        init_db(connection)
+        connection.execute(
+            """
+            INSERT INTO notification_deliveries (
+                event_id, target_key, channel, created_at, updated_at
+            ) VALUES (30, 'telegram:1', 'telegram', ?, ?)
+            """,
+            ("2026-01-02T00:00:00+00:00", "2026-01-02T00:00:00+00:00"),
+        )
+        connection.commit()
+
+        rules_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'rules'"
+        ).fetchone()[0]
+        events_sql = connection.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'alert_events'"
+        ).fetchone()[0]
+        assert "AUTOINCREMENT" in rules_sql.upper()
+        assert "AUTOINCREMENT" in events_sql.upper()
+        assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM sqlite_sequence "
+                "WHERE name IN ('rules', 'alert_events')"
+            ).fetchone()[0]
+            == 2
+        )
+        assert [
+            row["id"] for row in connection.execute("SELECT * FROM rules ORDER BY id")
+        ] == [10]
+        assert [
+            row["id"]
+            for row in connection.execute("SELECT * FROM alert_events ORDER BY id")
+        ] == [30, 40]
+        assert (
+            connection.execute(
+                "SELECT notification_status FROM alert_events WHERE id = 30"
+            ).fetchone()[0]
+            == ALERT_NOTIFICATION_PENDING
+        )
+        assert (
+            connection.execute("PRAGMA table_info(rules)").fetchall()[-3]["dflt_value"]
+            == "1"
+        )
+        assert {
+            row["table"]
+            for row in connection.execute("PRAGMA foreign_key_list(drawdown_cycles)")
+        } == {"rules"}
+        assert {
+            row["table"]
+            for row in connection.execute(
+                "PRAGMA foreign_key_list(notification_deliveries)"
+            )
+        } == {"alert_events"}
+
+        connection.execute("DELETE FROM alert_events WHERE id = 40")
+        connection.commit()
+        new_rule_id = add_rule(
+            connection,
+            type="dca_reminder",
+            symbol="000003",
+            name="New rule",
+            asset_type="cn_open_fund",
+            params={},
+        )
+        new_event_id = add_alert_event(
+            connection,
+            rule_id=new_rule_id,
+            alert_key="new-event-1",
+            title="New event",
+            message="new",
+        )
+        assert new_rule_id > 20
+        assert new_event_id > 40
+        connection.execute("DELETE FROM alert_events WHERE id = ?", (new_event_id,))
+        connection.commit()
+        next_event_id = add_alert_event(
+            connection,
+            rule_id=new_rule_id,
+            alert_key="new-event-2",
+            title="New event",
+            message="newer",
+        )
+        assert next_event_id > new_event_id
+        assert (
+            connection.execute(
+                "SELECT 1 FROM notification_deliveries WHERE event_id = 30"
+            ).fetchone()
+            is not None
+        )
+
+        init_db(connection)
+        repeat_rule_id = add_rule(
+            connection,
+            type="dca_reminder",
+            symbol="000004",
+            name="Repeat rule",
+            asset_type="cn_open_fund",
+            params={},
+        )
+        repeat_event_id = add_alert_event(
+            connection,
+            rule_id=repeat_rule_id,
+            alert_key="new-event-3",
+            title="New event",
+            message="repeat",
+        )
+
+    assert repeat_rule_id > new_rule_id
+    assert repeat_event_id > next_event_id
+
+
+def test_legacy_id_migration_rolls_back_and_restores_foreign_keys(
+    tmp_path: Path,
+) -> None:
+    sqlite_path = tmp_path / "broken-legacy.sqlite3"
+
+    with open_connection(sqlite_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE rules (
+                id INTEGER PRIMARY KEY,
+                type TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                name TEXT NOT NULL,
+                asset_type TEXT NOT NULL,
+                params_json TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE alert_events (
+                id INTEGER PRIMARY KEY,
+                rule_id INTEGER NOT NULL,
+                alert_key TEXT NOT NULL UNIQUE,
+                title TEXT NOT NULL,
+                message TEXT NOT NULL,
+                payload_json TEXT,
+                triggered_at TEXT NOT NULL
+            );
+            CREATE TABLE drawdown_cycles (
+                id INTEGER PRIMARY KEY,
+                rule_id INTEGER NOT NULL REFERENCES rules(id),
+                peak_date TEXT NOT NULL,
+                initial_peak_price REAL NOT NULL,
+                peak_price REAL NOT NULL,
+                last_evaluated_date TEXT NOT NULL,
+                end_date TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            INSERT INTO rules (
+                id, type, symbol, name, asset_type, params_json,
+                created_at, updated_at
+            ) VALUES (7, 'dca_reminder', '000001', 'Broken', 'cn_open_fund', '{}',
+                      '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00');
+            """
+        )
+        connection.commit()
+        connection.execute("PRAGMA foreign_keys = OFF")
+        connection.execute(
+            """
+            INSERT INTO drawdown_cycles (
+                rule_id, peak_date, initial_peak_price, peak_price,
+                last_evaluated_date, created_at, updated_at
+            ) VALUES (999, '2026-01-01', 1, 1, '2026-01-01', ?, ?)
+            """,
+            ("2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
+        )
+        connection.commit()
+
+        with pytest.raises(sqlite3.IntegrityError, match="foreign-key check"):
+            init_db(connection)
+
+        assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 0
+        assert (
+            connection.execute("SELECT sql FROM sqlite_master WHERE name = 'rules'")
+            .fetchone()[0]
+            .upper()
+            .count("AUTOINCREMENT")
+            == 0
+        )
+        assert (
+            connection.execute("SELECT rule_id FROM drawdown_cycles").fetchone()[0]
+            == 999
+        )
+
+
 def test_position_sync_accepts_exact_closed_pair_and_resets_estimate_state() -> None:
     connection = connect(":memory:")
     try:
