@@ -308,7 +308,7 @@ def test_prune_expires_known_dated_events_but_keeps_unknown_dedupe_keys() -> Non
             asset_type="cn_etf",
             params={"investment_fund_symbol": "000001", "tiers": []},
         )
-        add_alert_event(
+        expired_event_id = add_alert_event(
             connection,
             rule_id=rule_id,
             alert_key="1:drawdown_plan:after_close:2020-01-01",
@@ -316,6 +316,10 @@ def test_prune_expires_known_dated_events_but_keeps_unknown_dedupe_keys() -> Non
             message="old dated event",
             payload={"phase": "after_close"},
             triggered_at="2020-01-01",
+        )
+        connection.execute(
+            "UPDATE alert_events SET notification_status = 'sent' WHERE id = ?",
+            (expired_event_id,),
         )
         add_alert_event(
             connection,
@@ -333,5 +337,64 @@ def test_prune_expires_known_dated_events_but_keeps_unknown_dedupe_keys() -> Non
         assert [row["alert_key"] for row in remaining] == [
             "future-alert-type:dedupe-key"
         ]
+    finally:
+        connection.close()
+
+
+def test_prune_preserves_every_undelivered_alert_and_target() -> None:
+    connection = connect(":memory:")
+    try:
+        init_db(connection)
+        today = date(2026, 1, 1)
+        rule_id = add_rule(
+            connection,
+            type="drawdown_plan",
+            symbol="510300",
+            name="Plan",
+            asset_type="cn_etf",
+            params={"investment_fund_symbol": "000001", "tiers": []},
+        )
+        delivery_states = (
+            ("pending", "pending"),
+            ("failed", "failed"),
+            ("pending", "sending"),
+            ("sent", "sending"),
+        )
+        for index, (event_status, delivery_status) in enumerate(delivery_states):
+            event_id = add_alert_event(
+                connection,
+                rule_id=rule_id,
+                alert_key=f"1:drawdown_plan:after_close:2020-01-0{index + 1}",
+                title="Drawdown plan reminder",
+                message="undelivered",
+                payload={"phase": "after_close"},
+                triggered_at=f"2020-01-0{index + 1}",
+            )
+            connection.execute(
+                "UPDATE alert_events SET notification_status = ? WHERE id = ?",
+                (event_status, event_id),
+            )
+            connection.execute(
+                """
+                INSERT INTO notification_deliveries (
+                    event_id, target_key, channel, status, created_at, updated_at
+                ) VALUES (?, ?, 'telegram', ?, '2020-01-01', '2020-01-01')
+                """,
+                (event_id, f"telegram:{index}", delivery_status),
+            )
+        connection.commit()
+
+        counts = prune_database(connection, today=today)
+
+        assert counts["alert_events"] == 0
+        assert (
+            connection.execute("SELECT COUNT(*) FROM alert_events").fetchone()[0] == 4
+        )
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM notification_deliveries"
+            ).fetchone()[0]
+            == 4
+        )
     finally:
         connection.close()

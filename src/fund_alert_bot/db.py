@@ -812,11 +812,22 @@ def _prune_alert_events(
     rows = connection.execute(
         """
         SELECT id, rule_id, alert_key, title, payload_json
-        FROM alert_events
-        WHERE substr(triggered_at, 1, 10) < ?
-        ORDER BY id
+        FROM alert_events AS event
+        WHERE substr(event.triggered_at, 1, 10) < ?
+            AND event.notification_status = ?
+            AND NOT EXISTS (
+                SELECT 1
+                FROM notification_deliveries AS delivery
+                WHERE delivery.event_id = event.id
+                    AND delivery.status != ?
+            )
+        ORDER BY event.id
         """,
-        (cutoff.isoformat(),),
+        (
+            cutoff.isoformat(),
+            ALERT_NOTIFICATION_SENT,
+            NOTIFICATION_DELIVERY_SENT,
+        ),
     ).fetchall()
     for row in rows:
         event_id = int(row["id"])
