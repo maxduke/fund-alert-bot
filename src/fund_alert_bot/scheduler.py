@@ -299,6 +299,7 @@ async def run_scheduled_before_close_check(
     """Run a before-close realtime drawdown check and send notifications."""
 
     check_date = run_date or _current_date(timezone)
+    request_counts_before = _snapshot_request_counts(market_data_provider)
     LOGGER.info(
         "Scheduled realtime drawdown check started date=%s",
         check_date.isoformat(),
@@ -436,6 +437,11 @@ async def run_scheduled_before_close_check(
         LOGGER.exception("Scheduled realtime drawdown check failed")
         raise
     finally:
+        _log_request_count_delta(
+            market_data_provider,
+            before=request_counts_before,
+            phase="before_close",
+        )
         if drawdown_result is None or plan_result is None:
             LOGGER.info("Scheduled realtime drawdown check ended")
         else:
@@ -466,6 +472,7 @@ async def run_scheduled_market_check(
     """Run scheduled after-close market reminders and send notifications."""
 
     check_date = run_date or _current_date(timezone)
+    request_counts_before = _snapshot_request_counts(market_data_provider)
     LOGGER.info(
         "Scheduled market reminder check started for date=%s",
         check_date.isoformat(),
@@ -589,6 +596,11 @@ async def run_scheduled_market_check(
         LOGGER.exception("Scheduled market reminder check failed")
         raise
     finally:
+        _log_request_count_delta(
+            market_data_provider,
+            before=request_counts_before,
+            phase="after_close",
+        )
         if drawdown_result is None or plan_result is None or profit_result is None:
             LOGGER.info("Scheduled market reminder check ended")
         else:
@@ -634,6 +646,7 @@ async def run_scheduled_fund_nav_process(
     """Settle pending manual additions from exact-date feeder-fund NAVs."""
 
     processing_date = run_date or _current_date(timezone)
+    request_counts_before = _snapshot_request_counts(market_data_provider)
     LOGGER.info("Feeder-fund NAV processing started date=%s", processing_date)
     result = None
     try:
@@ -748,6 +761,11 @@ async def run_scheduled_fund_nav_process(
         LOGGER.exception("Feeder-fund NAV processing failed")
         raise
     finally:
+        _log_request_count_delta(
+            market_data_provider,
+            before=request_counts_before,
+            phase="fund_nav",
+        )
         if result is None:
             LOGGER.info("Feeder-fund NAV processing ended")
         else:
@@ -985,3 +1003,45 @@ def _current_date(timezone: str | tzinfo) -> date:
     if isinstance(timezone, str):
         timezone = ZoneInfo(timezone)
     return datetime.now(tz=timezone).date()
+
+
+def _snapshot_request_counts(provider: object) -> dict[str, int] | None:
+    """Read optional provider request metrics without constraining test fakes."""
+
+    request_counts = getattr(provider, "request_counts", None)
+    if not callable(request_counts):
+        return None
+    try:
+        snapshot = request_counts()
+    except Exception:  # noqa: BLE001
+        LOGGER.debug("Market-data request metrics unavailable", exc_info=True)
+        return None
+    if not isinstance(snapshot, dict):
+        return None
+    try:
+        return {str(key): int(value) for key, value in snapshot.items()}
+    except (TypeError, ValueError):
+        LOGGER.debug("Market-data request metrics malformed")
+        return None
+
+
+def _log_request_count_delta(
+    provider: object,
+    *,
+    before: dict[str, int] | None,
+    phase: str,
+) -> None:
+    """Log nonzero external request deltas for one scheduler phase."""
+
+    if before is None:
+        return
+    after = _snapshot_request_counts(provider)
+    if after is None:
+        return
+    delta = {
+        key: value - before.get(key, 0)
+        for key, value in after.items()
+        if value - before.get(key, 0) != 0
+    }
+    if delta:
+        LOGGER.info("Market-data request summary phase=%s counts=%s", phase, delta)

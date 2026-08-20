@@ -106,6 +106,15 @@ class AkshareMarketDataProvider(MarketDataProvider):
         # Keep Sina cooldowns isolated per symbol. A transient failure for one
         # ETF must not suppress fallback quotes for every other plan.
         self._sina_failed_at: dict[str, float] = {}
+        self._request_counts: dict[str, int] = {}
+
+    def request_counts(self) -> dict[str, int]:
+        """Return a snapshot of external market-data request attempts."""
+
+        return self._request_counts.copy()
+
+    def _count_request(self, kind: str) -> None:
+        self._request_counts[kind] = self._request_counts.get(kind, 0) + 1
 
     def get_history(
         self,
@@ -247,6 +256,7 @@ class AkshareMarketDataProvider(MarketDataProvider):
         failed_at = self._sina_failed_at.get(symbol)
         self._raise_if_source_cooling_down("Sina", failed_at)
         try:
+            self._count_request("sina:realtime")
             response = self._http_get(
                 _SINA_QUOTE_URL.format(symbol=_format_sina_etf_symbol(symbol)),
                 headers={"Referer": "https://finance.sina.com.cn"},
@@ -333,6 +343,7 @@ class AkshareMarketDataProvider(MarketDataProvider):
 
         frame = self._call_with_retry(
             self._akshare.fund_individual_basic_info_xq,
+            request_kind="xueqiu:metadata",
             symbol=_strip_exchange_prefix(symbol),
             timeout=10,
         )
@@ -415,6 +426,7 @@ class AkshareMarketDataProvider(MarketDataProvider):
             return cached
         self._raise_if_source_cooling_down("Eastmoney", self._eastmoney_failed_at)
         try:
+            self._count_request("eastmoney:realtime")
             response = self._http_get(
                 _EASTMONEY_QUOTE_URL,
                 params={
@@ -568,6 +580,7 @@ class AkshareMarketDataProvider(MarketDataProvider):
         try:
             raw_data = self._call_eastmoney_with_retry(
                 self._akshare.fund_open_fund_info_em,
+                request_kind="eastmoney:nav",
                 symbol=symbol,
                 indicator="\u5355\u4f4d\u51c0\u503c\u8d70\u52bf",
             )
@@ -621,6 +634,7 @@ class AkshareMarketDataProvider(MarketDataProvider):
         return (
             self._call_with_retry(
                 ak_module.fund_etf_hist_sina,
+                request_kind="sina:history",
                 symbol=_format_sina_etf_symbol(instrument.symbol),
             ),
             "akshare",
@@ -632,12 +646,15 @@ class AkshareMarketDataProvider(MarketDataProvider):
         func: Callable[..., pd.DataFrame],
         *,
         attempts: int | None = None,
+        request_kind: str | None = None,
         **kwargs: object,
     ) -> pd.DataFrame:
         last_error: Exception | None = None
         retry_count = self._retries if attempts is None else attempts
         for attempt in range(1, retry_count + 1):
             try:
+                if request_kind is not None:
+                    self._count_request(request_kind)
                 return func(**kwargs)
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
@@ -653,6 +670,8 @@ class AkshareMarketDataProvider(MarketDataProvider):
     def _call_eastmoney_with_retry(
         self,
         func: Callable[..., pd.DataFrame],
+        *,
+        request_kind: str = "eastmoney:history",
         **kwargs: object,
     ) -> pd.DataFrame:
         self._raise_if_source_cooling_down("Eastmoney", self._eastmoney_failed_at)
@@ -660,6 +679,7 @@ class AkshareMarketDataProvider(MarketDataProvider):
             result = self._call_with_retry(
                 func,
                 attempts=self._eastmoney_retries,
+                request_kind=request_kind,
                 **kwargs,
             )
         except MarketDataFetchError:
