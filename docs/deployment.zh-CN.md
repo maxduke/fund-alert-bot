@@ -127,7 +127,9 @@ AKSHARE_PROXY_RETRY=1
 AKSHARE_HISTORY_CACHE_TTL_SECONDS=300
 ```
 
-容器已经包含固定版本
+Bot 启动时会在第一次延迟导入 AKShare 前检查 Token 积分，只有有效正余额才会
+安装补丁。余额为零、格式无效或无法验证时，补丁保持关闭，Bot 使用直连数据源，
+并通过已启用的通知渠道发送提醒；充值或修复 Token 后请重启容器。容器已经包含固定版本
 [`akshare-proxy-patch==0.5.0`](https://github.com/HelloYie/akshare-proxy-patch)，运行时不需要再安装。
 Bot 只代理自身使用的东方财富域名，并始终关闭插件的并发 `fast` 模式。较低的
 重试次数和短时进程内缓存是控制付费请求的有意设置。启用代理后，东方财富重试

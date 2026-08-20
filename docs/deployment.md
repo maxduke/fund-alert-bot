@@ -134,7 +134,11 @@ AKSHARE_PROXY_RETRY=1
 AKSHARE_HISTORY_CACHE_TTL_SECONDS=300
 ```
 
-The container already includes the pinned
+At startup, before the first lazy AKShare import, the bot checks the token's
+balance. It installs the patch only for a valid positive balance. A zero,
+invalid, or unverifiable balance leaves the patch disabled, uses direct data
+sources, and sends a warning through the enabled notification channels;
+recharge or fix the token and restart the container. The container already includes the pinned
 [`akshare-proxy-patch==0.5.0`](https://github.com/HelloYie/akshare-proxy-patch);
 no runtime `pip install` is needed. The bot hooks only its Eastmoney domains and
 keeps the patch's concurrent `fast` mode off. A low retry count and the bot's

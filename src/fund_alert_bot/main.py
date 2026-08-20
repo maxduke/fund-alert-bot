@@ -16,6 +16,7 @@ from fund_alert_bot.market_data import (
     CNMarketCalendar,
     install_akshare_proxy,
 )
+from fund_alert_bot.notifications.service import build_notification_service
 from fund_alert_bot.scheduler import (
     create_scheduler,
     register_jobs,
@@ -44,7 +45,7 @@ def run() -> None:
     configure_logging()
     settings = load_settings()
     set_language(settings.bot_language)
-    install_akshare_proxy(
+    proxy_active = install_akshare_proxy(
         enabled=settings.akshare_proxy_enabled,
         auth_token=settings.akshare_proxy_auth_token,
         retry=settings.akshare_proxy_retry,
@@ -60,13 +61,28 @@ def run() -> None:
         history_cache_ttl_seconds=settings.akshare_history_cache_ttl_seconds,
         # The proxy patch owns retries for paid Eastmoney requests. Keeping
         # this provider budget at one avoids multiplying proxy attempts.
-        eastmoney_retries=1 if settings.akshare_proxy_enabled else None,
+        eastmoney_retries=1 if proxy_active else None,
     )
     market_calendar = CNMarketCalendar()
     scheduler = create_scheduler(timezone=settings.timezone)
 
     async def start_scheduler(application) -> None:
         await publish_bot_command_menu(application)
+        if settings.akshare_proxy_enabled and not proxy_active:
+            notification_service = build_notification_service(
+                settings=settings.notifications,
+                telegram_bot=application.bot,
+                telegram_chat_ids=settings.telegram_allowed_user_ids,
+            )
+            await notification_service.send_alert(
+                title="Paid proxy not enabled",
+                body=(
+                    "The paid proxy was not enabled because its balance is "
+                    "insufficient or could not be verified.\n"
+                    "Direct data sources will be used.\n"
+                    "Recharge or fix the proxy token, then restart the bot."
+                ),
+            )
         register_jobs(
             scheduler,
             application=application,
@@ -129,8 +145,8 @@ def run() -> None:
         settings.fund_nav_process_time,
         settings.timezone,
         settings.bot_language,
-        settings.akshare_proxy_enabled,
-        1 if settings.akshare_proxy_enabled else settings.akshare_retries,
+        proxy_active,
+        1 if proxy_active else settings.akshare_retries,
         settings.akshare_history_cache_ttl_seconds,
     )
 

@@ -41,6 +41,15 @@ _EN_TO_ZH = {
     "No rules configured": "尚未配置规则",
     "No investment plans or positions configured.": "尚未配置投资计划或持仓。",
     "No enabled notification channels.": "没有已启用的通知渠道。",
+    "Paid proxy not enabled": "付费代理未启用",
+    (
+        "The paid proxy was not enabled because its balance is insufficient or "
+        "could not be verified."
+    ): "付费代理未启用，因为积分不足或无法验证余额。",
+    "Direct data sources will be used.": "将使用直连数据源。",
+    "Recharge or fix the proxy token, then restart the bot.": (
+        "请充值或修复代理 Token，然后重启 Bot。"
+    ),
     "Configured rules:": "已配置规则：",
     "Check summary": "检查摘要",
     "Checked": "已检查",
