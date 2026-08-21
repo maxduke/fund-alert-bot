@@ -483,8 +483,11 @@ Also display the derived `READY` or `SETUP_REQUIRED` state. Persist one per-fund
 `position_sync_required_since` marker only when a user records a manual addition
 that cannot be estimated because setup is incomplete. Any later successful
 Position Sync explicitly replaces the current platform position and clears that
-marker. A dated historical correction must match an eligible stored event in
-the active cycle and records no NAV, units, or cost estimate.
+marker. A dated historical correction must select close-confirmed tiers from the
+active cycle that were reached on or before the actual subscription date. It
+records no NAV, units, or cost estimate. If the user explicitly confirms that a
+later exact Position Sync already includes the subscription, record the action
+as reconciled without changing the position or reopening the sync requirement.
 
 ## Scheduled DCA position estimates
 
@@ -612,8 +615,9 @@ Add estimated units to the prior units and the gross amount to the prior total
 cost, then derive average unit cost. Apply the occurrence once in a SQLite
 transaction, retaining the due date, NAV date, and estimated status across
 restart. If the NAV is missing or stale, leave the occurrence pending and do not
-guess. Position value is `units * latest published unit NAV`; never substitute
-the Reference ETF price or cumulative NAV.
+guess. Position value is `units * latest published unit NAV`; a cached NAV older
+than the latest completed trading day must be refreshed or rejected as stale.
+Never substitute the Reference ETF price or cumulative NAV.
 
 Do not reserve an alert event for a successfully applied scheduled DCA estimate.
 Expose its last due date, effective NAV date, gross amount, estimated added

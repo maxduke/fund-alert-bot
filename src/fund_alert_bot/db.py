@@ -6,7 +6,7 @@ import json
 import math
 import re
 import sqlite3
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -14,8 +14,13 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
-from fund_alert_bot.rules.drawdown_plan import format_plan_amount, format_plan_percent
+from fund_alert_bot.rules.drawdown_plan import (
+    format_plan_amount,
+    format_plan_percent,
+    parse_drawdown_plan_config,
+)
 
 ALERT_NOTIFICATION_PENDING = "pending"
 ALERT_NOTIFICATION_SENT = "sent"
@@ -33,6 +38,7 @@ NOTIFICATION_DELIVERY_SENDING = "sending"
 NOTIFICATION_DELIVERY_SENT = "sent"
 NOTIFICATION_DELIVERY_FAILED = "failed"
 NOTIFICATION_DELIVERY_CLAIM_LEASE_SECONDS = 120
+_CN_TIMEZONE = ZoneInfo("Asia/Shanghai")
 
 
 def connect(sqlite_path: str | Path) -> sqlite3.Connection:
@@ -2127,6 +2133,7 @@ def list_manual_add_actions(
                 source_alert_event_id,
                 estimate_id,
                 action_date,
+                reconciled_at,
                 created_at
             FROM manual_add_actions
             WHERE cycle_id = ?
@@ -2151,6 +2158,8 @@ def record_manual_addition(
     cutoff_time: str | None = None,
     cutoff_choice: str | None = None,
     effective_date: str | None = None,
+    source_alert_event_ids: Mapping[str, int] | None = None,
+    position_already_included: bool = False,
 ) -> tuple[int | None, tuple[str, ...]]:
     """Record selected tiers and optionally one fee-aware pending estimate."""
 
@@ -2158,6 +2167,10 @@ def record_manual_addition(
         raise ValueError("At least one drawdown tier must be selected.")
     if action_date_override is not None and create_estimate:
         raise ValueError("Historical additions cannot create position estimates.")
+    if position_already_included and (action_date_override is None or create_estimate):
+        raise ValueError(
+            "Only historical additions can use an already-included position."
+        )
     if create_estimate and (
         cutoff_time is None
         or cutoff_choice not in {"before", "after"}
@@ -2169,49 +2182,180 @@ def record_manual_addition(
     action_date = (
         action_at.date() if action_date_override is None else action_date_override
     ).isoformat()
+    source_event_ids = {
+        str(key): int(value) for key, value in (source_alert_event_ids or {}).items()
+    }
     now = _utc_now_text()
     connection.execute("BEGIN IMMEDIATE")
     try:
         rule = connection.execute(
-            "SELECT enabled FROM rules WHERE id = ? AND type = 'drawdown_plan'",
+            """
+            SELECT enabled, symbol, asset_type, params_json
+            FROM rules
+            WHERE id = ? AND type = 'drawdown_plan'
+            """,
             (rule_id,),
         ).fetchone()
         active = get_active_drawdown_cycle(connection, rule_id)
-        event = connection.execute(
-            "SELECT rule_id, payload_json FROM alert_events WHERE id = ?",
-            (source_alert_event_id,),
-        ).fetchone()
         if rule is None or not bool(rule["enabled"]):
             raise sqlite3.IntegrityError("Drawdown plan is no longer enabled.")
         if active is None or int(active["id"]) != cycle_id:
             raise sqlite3.IntegrityError("Drawdown plan cycle changed.")
-        if event is None or int(event["rule_id"]) != rule_id:
-            raise sqlite3.IntegrityError("Manual-add event does not match the plan.")
-        payload = json.loads(str(event["payload_json"]))
-        eligible_payload = payload.get(
-            "actionable_tiers", payload.get("crossed_tiers", ())
-        )
-        eligible_tiers = {str(item["key"]): item for item in eligible_payload}
         selected_keys = tuple(str(tier.key) for tier in tiers)
-        if (
-            int(payload.get("cycle_id", -1)) != cycle_id
-            or str(payload.get("data_date")) != action_date
-            or str(payload.get("investment_fund_symbol")) != fund_symbol
-            or len(set(selected_keys)) != len(selected_keys)
-            or not set(selected_keys).issubset(eligible_tiers)
-            or any(
-                not math.isclose(
-                    float(tier.drawdown),
-                    float(eligible_tiers[str(tier.key)]["drawdown"]),
+        if len(set(selected_keys)) != len(selected_keys):
+            raise sqlite3.IntegrityError("Duplicate drawdown tiers were selected.")
+        if action_date_override is None:
+            event = connection.execute(
+                "SELECT rule_id, payload_json FROM alert_events WHERE id = ?",
+                (source_alert_event_id,),
+            ).fetchone()
+            if event is None or int(event["rule_id"]) != rule_id:
+                raise sqlite3.IntegrityError(
+                    "Manual-add event does not match the plan."
                 )
-                or not math.isclose(
-                    float(tier.amount),
-                    float(eligible_tiers[str(tier.key)]["amount"]),
-                )
-                for tier in tiers
+            payload = json.loads(str(event["payload_json"]))
+            eligible_payload = payload.get(
+                "actionable_tiers", payload.get("crossed_tiers", ())
             )
-        ):
-            raise sqlite3.IntegrityError("Manual-add event is no longer eligible.")
+            eligible_tiers = {str(item["key"]): item for item in eligible_payload}
+            if (
+                int(payload.get("cycle_id", -1)) != cycle_id
+                or str(payload.get("data_date")) != action_date
+                or str(payload.get("investment_fund_symbol")) != fund_symbol
+                or not set(selected_keys).issubset(eligible_tiers)
+                or any(
+                    not math.isclose(
+                        float(tier.drawdown),
+                        float(eligible_tiers[str(tier.key)]["drawdown"]),
+                    )
+                    or not math.isclose(
+                        float(tier.amount),
+                        float(eligible_tiers[str(tier.key)]["amount"]),
+                    )
+                    for tier in tiers
+                )
+            ):
+                raise sqlite3.IntegrityError("Manual-add event is no longer eligible.")
+        else:
+            try:
+                config = parse_drawdown_plan_config(
+                    reference_symbol=str(rule["symbol"]),
+                    asset_type=str(rule["asset_type"]),
+                    params=json.loads(str(rule["params_json"])),
+                )
+                configured_tiers = {tier.key: tier for tier in config.tiers}
+            except (TypeError, ValueError, json.JSONDecodeError):
+                raise sqlite3.IntegrityError(
+                    "Drawdown plan configuration changed; rerun /mark_added."
+                ) from None
+            if (
+                any(
+                    key not in configured_tiers
+                    or not math.isclose(
+                        float(tier.drawdown),
+                        float(configured_tiers[key].drawdown),
+                        rel_tol=1e-9,
+                        abs_tol=1e-12,
+                    )
+                    or not math.isclose(
+                        float(tier.amount),
+                        float(configured_tiers[key].amount),
+                        rel_tol=1e-9,
+                        abs_tol=1e-12,
+                    )
+                    for key, tier in ((str(tier.key), tier) for tier in tiers)
+                )
+                or config.investment_fund_symbol != fund_symbol
+            ):
+                raise sqlite3.IntegrityError(
+                    "Historical tiers no longer match the current plan."
+                )
+            if any(key not in source_event_ids for key in selected_keys):
+                raise sqlite3.IntegrityError(
+                    "Historical tier provenance is missing; rerun /mark_added."
+                )
+            records = {
+                str(row["tier_key"]): row
+                for row in connection.execute(
+                    """
+                    SELECT tier_key, drawdown, amount, data_date, alert_event_id
+                    FROM drawdown_tier_records
+                    WHERE cycle_id = ? AND source = 'close_confirmed'
+                    """,
+                    (cycle_id,),
+                ).fetchall()
+            }
+            for tier in tiers:
+                key = str(tier.key)
+                record = records.get(key)
+                source_id = source_event_ids[key]
+                if record is None or int(record["alert_event_id"] or 0) != source_id:
+                    raise sqlite3.IntegrityError(
+                        "Historical tier record changed; rerun /mark_added."
+                    )
+                try:
+                    trigger_date = date.fromisoformat(str(record["data_date"]))
+                except ValueError:
+                    raise sqlite3.IntegrityError(
+                        "Historical tier record has an invalid trigger date."
+                    ) from None
+                if trigger_date > action_date_override:
+                    raise sqlite3.IntegrityError(
+                        "A selected tier was not triggered by its action date."
+                    )
+                if not (
+                    math.isclose(
+                        float(record["drawdown"]),
+                        float(tier.drawdown),
+                        rel_tol=1e-9,
+                        abs_tol=1e-12,
+                    )
+                    and math.isclose(
+                        float(record["amount"]),
+                        float(tier.amount),
+                        rel_tol=1e-9,
+                        abs_tol=1e-12,
+                    )
+                ):
+                    raise sqlite3.IntegrityError(
+                        "Historical tier no longer matches the current plan."
+                    )
+                event = connection.execute(
+                    "SELECT rule_id, payload_json FROM alert_events WHERE id = ?",
+                    (source_id,),
+                ).fetchone()
+                if event is None or int(event["rule_id"]) != rule_id:
+                    raise sqlite3.IntegrityError(
+                        "Historical tier source event does not match the plan."
+                    )
+                try:
+                    payload = json.loads(str(event["payload_json"]))
+                    eligible_payload = payload.get(
+                        "actionable_tiers", payload.get("crossed_tiers", ())
+                    )
+                    eligible_tier = next(
+                        item
+                        for item in eligible_payload
+                        if isinstance(item, dict) and str(item.get("key")) == key
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError, StopIteration):
+                    raise sqlite3.IntegrityError(
+                        "Historical tier source event is no longer eligible."
+                    ) from None
+                if (
+                    int(payload.get("cycle_id", -1)) != cycle_id
+                    or str(payload.get("data_date")) != str(record["data_date"])
+                    or str(payload.get("investment_fund_symbol")) != fund_symbol
+                    or not math.isclose(
+                        float(eligible_tier["drawdown"]), float(tier.drawdown)
+                    )
+                    or not math.isclose(
+                        float(eligible_tier["amount"]), float(tier.amount)
+                    )
+                ):
+                    raise sqlite3.IntegrityError(
+                        "Historical tier source event is no longer eligible."
+                    )
 
         existing_keys = {
             str(row["tier_key"])
@@ -2224,6 +2368,38 @@ def record_manual_addition(
         if not new_tiers:
             connection.commit()
             return None, ()
+
+        reconciled_at = None
+        if position_already_included:
+            position = get_position_snapshot(connection, fund_symbol)
+            if position is None or int(position["is_estimated"]) != 0:
+                raise sqlite3.IntegrityError(
+                    "An exact position snapshot is required before this historical "
+                    "correction can be marked as included."
+                )
+            settings = get_fund_settings(connection, fund_symbol)
+            if position["position_sync_required_since"] is not None or (
+                settings is not None
+                and settings["position_sync_required_since"] is not None
+            ):
+                raise sqlite3.IntegrityError(
+                    "The exact position still has unreconciled additions. "
+                    "Run /sync_position before marking this correction as included."
+                )
+            try:
+                reconciled_at = str(position["last_synced_at"])
+                synced_at = datetime.fromisoformat(reconciled_at.replace("Z", "+00:00"))
+                if synced_at.tzinfo is None:
+                    synced_at = synced_at.replace(tzinfo=UTC)
+                snapshot_date = synced_at.astimezone(_CN_TIMEZONE).date()
+            except (TypeError, ValueError, OverflowError):
+                raise sqlite3.IntegrityError(
+                    "The exact position snapshot has an invalid sync timestamp."
+                ) from None
+            if snapshot_date < action_date_override:
+                raise sqlite3.IntegrityError(
+                    "The exact position snapshot predates the historical addition."
+                )
 
         estimate_id: int | None = None
         if create_estimate:
@@ -2284,7 +2460,7 @@ def record_manual_addition(
                 ),
             )
             estimate_id = int(cursor.lastrowid)
-        else:
+        elif not position_already_included:
             connection.execute(
                 """
                 INSERT INTO fund_settings (
@@ -2322,17 +2498,19 @@ def record_manual_addition(
                 source_alert_event_id,
                 estimate_id,
                 action_date,
+                reconciled_at,
                 created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
                     cycle_id,
                     str(tier.key),
-                    source_alert_event_id,
+                    source_event_ids.get(str(tier.key), source_alert_event_id),
                     estimate_id,
                     action_date,
+                    reconciled_at,
                     now,
                 )
                 for tier in new_tiers
@@ -2367,7 +2545,7 @@ def record_manual_addition(
                     float(tier.drawdown),
                     float(tier.amount),
                     action_date,
-                    source_alert_event_id,
+                    source_event_ids.get(str(tier.key), source_alert_event_id),
                     now,
                 )
                 for tier in new_tiers

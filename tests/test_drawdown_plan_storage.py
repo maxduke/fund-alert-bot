@@ -13,6 +13,7 @@ from fund_alert_bot.checks import (
     derive_plan_readiness,
     evaluate_drawdown_plan_rule,
     evaluate_drawdown_plan_rules,
+    get_cached_or_fetch_fund_nav,
     process_manual_add_estimates,
     read_drawdown_plan_statuses,
 )
@@ -22,6 +23,7 @@ from fund_alert_bot.db import (
     apply_manual_add_estimate,
     delete_rule,
     get_active_drawdown_cycle,
+    get_cached_fund_nav,
     get_drawdown_tier_reminder_states,
     get_fund_settings,
     get_position_snapshot,
@@ -38,9 +40,15 @@ from fund_alert_bot.db import (
     record_manual_addition,
     snooze_drawdown_tiers_for_date,
     upsert_fund_fee,
+    upsert_fund_nav,
     upsert_position_snapshot,
 )
-from fund_alert_bot.market_data import AssetType, FundNav, Instrument, PriceBasis
+from fund_alert_bot.market_data import (
+    AssetType,
+    FundNav,
+    Instrument,
+    PriceBasis,
+)
 from fund_alert_bot.rules.drawdown_plan import DrawdownTier
 
 
@@ -441,6 +449,142 @@ def test_cached_fund_nav_is_used_for_read_only_plan_status(tmp_path: Path) -> No
             end_date=date(2024, 1, 2),
         )
 
+    assert nav_calls == ["000001"]
+
+
+def test_latest_cached_fund_nav_is_reused_when_it_meets_minimum_date(
+    tmp_path: Path,
+) -> None:
+    sqlite_path = tmp_path / "bot.sqlite3"
+    provider = FakePlanProvider(_history([100, 80]))
+    nav_calls: list[str] = []
+
+    def get_fund_nav(instrument: Instrument, **kwargs: object) -> FundNav:
+        del kwargs
+        nav_calls.append(instrument.symbol)
+        return FundNav(instrument.symbol, date(2024, 1, 3), 2, "provider")
+
+    provider.get_fund_nav = get_fund_nav  # type: ignore[method-assign]
+    with open_connection(sqlite_path) as connection:
+        initialize_database(connection)
+        upsert_fund_nav(
+            connection,
+            fund_symbol="000001",
+            nav_date=date(2024, 1, 3),
+            unit_nav=2,
+            source="cached",
+        )
+        nav = get_cached_or_fetch_fund_nav(
+            connection,
+            provider,
+            "000001",
+            minimum_date=date(2024, 1, 2),
+        )
+
+    assert nav.date == date(2024, 1, 3)
+    assert nav.source == "cached"
+    assert nav_calls == []
+
+
+def test_stale_latest_cached_fund_nav_is_refreshed_and_persisted(
+    tmp_path: Path,
+) -> None:
+    sqlite_path = tmp_path / "bot.sqlite3"
+    provider = FakePlanProvider(_history([100, 80]))
+    provider.get_fund_nav = lambda instrument, **kwargs: FundNav(  # type: ignore[method-assign]
+        instrument.symbol,
+        date(2024, 1, 3),
+        2.5,
+        "provider",
+    )
+    with open_connection(sqlite_path) as connection:
+        initialize_database(connection)
+        upsert_fund_nav(
+            connection,
+            fund_symbol="000001",
+            nav_date=date(2024, 1, 1),
+            unit_nav=2,
+            source="cached",
+        )
+        nav = get_cached_or_fetch_fund_nav(
+            connection,
+            provider,
+            "000001",
+            minimum_date=date(2024, 1, 3),
+        )
+        cached = get_cached_fund_nav(connection, "000001")
+
+    assert nav.date == date(2024, 1, 3)
+    assert nav.value == 2.5
+    assert cached is not None
+    assert cached["nav_date"] == "2024-01-03"
+
+
+def test_stale_provider_nav_skips_plan_valuation(tmp_path: Path) -> None:
+    sqlite_path = tmp_path / "bot.sqlite3"
+    _add_plan(sqlite_path)
+    provider = FakePlanProvider(_history([100, 80]))
+    provider.get_fund_nav = lambda instrument, **kwargs: FundNav(  # type: ignore[method-assign]
+        instrument.symbol,
+        date(2024, 1, 1),
+        2,
+        "provider",
+    )
+    with open_connection(sqlite_path) as connection:
+        upsert_fund_fee(
+            connection,
+            fund_symbol="000001",
+            fee_mode="rate",
+            fee_value=0,
+        )
+        upsert_position_snapshot(
+            connection,
+            fund_symbol="000001",
+            units=100,
+            average_unit_cost=1,
+        )
+        result = read_drawdown_plan_statuses(
+            connection,
+            provider,
+            end_date=date(2024, 1, 2),
+            minimum_fund_nav_date=date(2024, 1, 2),
+        )
+
+    assert len(result.statuses) == 1
+    assert result.statuses[0].fund_nav is None
+    assert len(result.no_data_skips) == 1
+    assert "required at least 2024-01-02" in result.no_data_skips[0].message
+
+
+def test_force_refresh_ignores_sufficiently_recent_latest_nav(tmp_path: Path) -> None:
+    sqlite_path = tmp_path / "bot.sqlite3"
+    provider = FakePlanProvider(_history([100, 80]))
+    nav_calls: list[str] = []
+
+    def get_fund_nav(instrument: Instrument, **kwargs: object) -> FundNav:
+        del kwargs
+        nav_calls.append(instrument.symbol)
+        return FundNav(instrument.symbol, date(2024, 1, 4), 3, "provider")
+
+    provider.get_fund_nav = get_fund_nav  # type: ignore[method-assign]
+    with open_connection(sqlite_path) as connection:
+        initialize_database(connection)
+        upsert_fund_nav(
+            connection,
+            fund_symbol="000001",
+            nav_date=date(2024, 1, 3),
+            unit_nav=2,
+            source="cached",
+        )
+        nav = get_cached_or_fetch_fund_nav(
+            connection,
+            provider,
+            "000001",
+            minimum_date=date(2024, 1, 2),
+            force_refresh=True,
+        )
+
+    assert nav.date == date(2024, 1, 4)
     assert nav_calls == ["000001"]
 
 
