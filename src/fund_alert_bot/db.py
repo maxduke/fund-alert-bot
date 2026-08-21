@@ -2342,9 +2342,15 @@ def record_manual_addition(
                     raise sqlite3.IntegrityError(
                         "Historical tier source event is no longer eligible."
                     ) from None
+                try:
+                    event_date = date.fromisoformat(str(payload.get("data_date")))
+                except (TypeError, ValueError):
+                    raise sqlite3.IntegrityError(
+                        "Historical tier source event has an invalid data date."
+                    ) from None
                 if (
                     int(payload.get("cycle_id", -1)) != cycle_id
-                    or str(payload.get("data_date")) != str(record["data_date"])
+                    or event_date < trigger_date
                     or str(payload.get("investment_fund_symbol")) != fund_symbol
                     or not math.isclose(
                         float(eligible_tier["drawdown"]), float(tier.drawdown)
@@ -4182,6 +4188,18 @@ def persist_drawdown_plan_evaluation(
                     )
                     for tier in records
                 ],
+            )
+        if event_id is not None and alert_tier_keys:
+            connection.executemany(
+                """
+                UPDATE drawdown_tier_records
+                SET alert_event_id = ?
+                WHERE cycle_id = ?
+                    AND source = 'close_confirmed'
+                    AND alert_event_id IS NULL
+                    AND tier_key = ?
+                """,
+                [(event_id, cycle_id, key) for key in sorted(alert_tier_keys)],
             )
         connection.commit()
     except Exception:

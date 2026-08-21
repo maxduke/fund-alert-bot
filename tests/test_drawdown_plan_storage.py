@@ -279,6 +279,63 @@ def test_snoozed_close_records_fact_but_suppresses_same_day_alert(
     assert event_count == 0
 
 
+def test_snoozed_fact_gets_provenance_from_later_action_alert(
+    tmp_path: Path,
+) -> None:
+    sqlite_path = tmp_path / "bot.sqlite3"
+    _add_plan(sqlite_path)
+
+    with open_connection(sqlite_path) as connection:
+        rule = list_rules(connection)[0]
+        first = evaluate_drawdown_plan_rule(
+            connection,
+            rule,
+            _history([100]),
+            expected_date=date(2024, 1, 1),
+        )
+        snooze_drawdown_tiers_for_date(
+            connection,
+            cycle_id=first.cycle_id,
+            tier_keys=("0.15",),
+            market_date="2024-01-02",
+        )
+        evaluate_drawdown_plan_rule(
+            connection,
+            rule,
+            _history([100, 84]),
+            expected_date=date(2024, 1, 2),
+        )
+        later = evaluate_drawdown_plan_rule(
+            connection,
+            rule,
+            _history([100, 84, 83]),
+            expected_date=date(2024, 1, 3),
+        )
+        assert later.notification is not None
+        record_manual_addition(
+            connection,
+            rule_id=1,
+            cycle_id=later.cycle_id,
+            source_alert_event_id=later.notification.event_id,
+            source_alert_event_ids={"0.15": later.notification.event_id},
+            fund_symbol="000001",
+            tiers=(DrawdownTier(0.15, 5000, "0.15"),),
+            action_at=datetime(2024, 1, 3, 10, tzinfo=UTC),
+            action_date_override=date(2024, 1, 2),
+            create_estimate=False,
+        )
+        records = list_drawdown_tier_records(connection, later.cycle_id)
+        actions = list_manual_add_actions(connection, later.cycle_id)
+
+    assert [row["tier_key"] for row in records] == ["0.15"]
+    assert records[0]["alert_event_id"] == later.notification.event_id
+    assert records[0]["source"] == "close_confirmed"
+    assert records[0]["data_date"] == "2024-01-02"
+    assert [(row["tier_key"], row["source_alert_event_id"]) for row in actions] == [
+        ("0.15", later.notification.event_id)
+    ]
+
+
 def test_batch_confirmed_close_fetches_qfq_once_and_persists_plan(
     tmp_path: Path,
 ) -> None:
