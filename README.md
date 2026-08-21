@@ -181,10 +181,10 @@ its peak cycle. A reminder does not mean that a purchase happened.
 
 Use `/plans` for a concise overview and `/check` for detailed plan state. Both
 are read-only for Drawdown Add Plans: they do not consume a tier or create an
-alert. `/plans` reads the latest confirmed ETF history and feeder-fund NAV
-stored in SQLite, so opening the overview normally does not create paid market
-data requests. Use `/plans refresh` only when you explicitly want to refresh
-the cached data; it may call the provider.
+alert. `/plans` reuses confirmed ETF history and a feeder-fund NAV cached through
+the latest completed trading day. It automatically refreshes an older NAV rather
+than displaying it indefinitely. Use `/plans refresh` to refresh even current
+cached data; it may call the provider.
 
 When the cached confirmed close has already reached an unrecorded tier, the
 overview labels it **reached, awaiting official close confirmation**. A
@@ -215,10 +215,10 @@ If you forgot to record an addition on its market date, add the actual date:
 /mark_added 1 15,20 2026-08-19
 ```
 
-The date must match an eligible reminder in the active drawdown cycle. A
-historical correction records the tier state and actual subscription date but
-never guesses historical NAV, units, or cost; run `/sync_position` after the
-platform settles.
+Each selected tier must have been close-confirmed in the active drawdown cycle on
+or before the actual subscription date. A historical correction never guesses
+historical NAV, units, or cost. Confirm whether the latest exact position already
+includes it; otherwise run `/sync_position` after the platform settles.
 
 The daily `08:30` NAV job runs on calendar days because a trading day's fund NAV
 may be published later. It requests exact-dated NAV while an estimate is pending,

@@ -275,11 +275,12 @@ cycle; for an already confirmed tier, the existing Tier Record remains intact.
 Choosing **Not added yet** creates no purchase or position state.
 
 Automatic position estimation accepts only a Manual Add Confirmation completed
-on the reminder's local market date. For a forgotten confirmation, the optional
-date must match an eligible reminder in the active drawdown cycle. This
-historical correction records the selected tiers and actual subscription date,
-but never estimates historical NAV, units, or cost; use `/sync_position` after
-the platform shows the settled units and average cost.
+on the reminder's local market date. For a forgotten confirmation, every
+selected tier must have been close-confirmed in the active cycle on or before
+the supplied actual subscription date. This historical correction records the
+selected tiers and date but never estimates historical NAV, units, or cost. The
+user explicitly confirms whether the latest exact snapshot already includes it;
+otherwise `/sync_position` remains required after settlement.
 
 A confirmed Manual Add Confirmation also creates one pending Manual Add
 Estimate containing the sum of the selected tier amounts, the shared Fund
@@ -490,10 +491,11 @@ a Drawdown Add Plan, enhanced DCA rule, Position Snapshot, or Position-Linked
 Price-Gain Rule. It summarizes configured DCA, current drawdown and next tier,
 position accuracy, and Price-Gain status without detailed history. It is not an
 alias for `/list`, which continues to list raw rule configuration. Plain
-`/plans` reads the persisted normalized ETF history and feeder-fund NAV from
-SQLite, so it does not refresh paid market data on every view. Use
-`/plans refresh` when a deliberate provider refresh is wanted; that command can
-consume provider quota.
+`/plans` reuses persisted normalized ETF history and a feeder-fund NAV whose date
+reaches the latest completed trading day. An older NAV is refreshed
+automatically instead of remaining cached indefinitely. `/plans refresh`
+unconditionally refreshes even current cached data and can consume provider
+quota.
 
 If the latest confirmed close is already beyond an unrecorded tier, `/plans`
 shows **Reached, awaiting official close confirmation**. It also shows

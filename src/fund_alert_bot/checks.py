@@ -1017,6 +1017,7 @@ def read_drawdown_plan_statuses(
     market_data_provider: MarketDataProvider,
     *,
     end_date: date | None = None,
+    minimum_fund_nav_date: date | None = None,
     force_refresh: bool = False,
 ) -> DrawdownPlanStatusResult:
     """Calculate current plan state without reserving alerts or changing cycles."""
@@ -1103,6 +1104,7 @@ def read_drawdown_plan_statuses(
                         connection,
                         market_data_provider,
                         config.investment_fund_symbol,
+                        minimum_date=minimum_fund_nav_date,
                         force_refresh=force_refresh,
                     )
                 except MarketDataProviderError as exc:
@@ -1468,23 +1470,35 @@ def get_cached_or_fetch_fund_nav(
     fund_symbol: str,
     *,
     nav_date: date | None = None,
+    minimum_date: date | None = None,
     force_refresh: bool = False,
 ) -> FundNav:
-    """Return cached NAV first; fetch and persist only when it is missing."""
+    """Return a sufficiently recent cached NAV, or fetch and persist one."""
 
     if not force_refresh:
         cached = get_cached_fund_nav(connection, fund_symbol, nav_date)
         if cached is not None:
-            return FundNav(
-                symbol=str(cached["fund_symbol"]),
-                date=date.fromisoformat(str(cached["nav_date"])),
-                value=float(cached["unit_nav"]),
-                source=str(cached["source"]),
-            )
+            cached_date = date.fromisoformat(str(cached["nav_date"]))
+            if (
+                nav_date is not None
+                or minimum_date is None
+                or cached_date >= minimum_date
+            ):
+                return FundNav(
+                    symbol=str(cached["fund_symbol"]),
+                    date=cached_date,
+                    value=float(cached["unit_nav"]),
+                    source=str(cached["source"]),
+                )
     nav = market_data_provider.get_fund_nav(
         Instrument(fund_symbol, fund_symbol, AssetType.CN_OPEN_FUND),
         nav_date=nav_date,
     )
+    if minimum_date is not None and nav_date is None and nav.date < minimum_date:
+        raise EmptyMarketDataError(
+            f"Fund NAV for {fund_symbol} is only available through {nav.date}; "
+            f"required at least {minimum_date}."
+        )
     upsert_fund_nav(
         connection,
         fund_symbol=str(nav.symbol),

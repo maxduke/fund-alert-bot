@@ -61,9 +61,12 @@ from fund_alert_bot.db import (
     list_pending_position_items,
     list_rules,
     open_connection,
+    reconcile_position_snapshot,
     record_manual_addition,
+    snooze_drawdown_tiers_for_date,
     upsert_fund_cutoff,
     upsert_fund_fee,
+    upsert_fund_nav,
     upsert_market_history,
     upsert_position_snapshot,
 )
@@ -1240,6 +1243,326 @@ def test_mark_added_records_historical_date_without_estimate(tmp_path) -> None:
     assert "Position sync is required" in query.edits[-1]
 
 
+def test_mark_added_historical_snoozed_fact_without_alert_succeeds(tmp_path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    with open_connection(sqlite_path) as connection:
+        init_db(connection)
+        rule_id = add_rule(
+            connection,
+            type="drawdown_plan",
+            symbol="510300",
+            name="A500",
+            asset_type="cn_etf",
+            params={
+                "investment_fund_symbol": "000001",
+                "lookback_days": 365,
+                "tiers": [{"drawdown": 0.15, "amount": 5000}],
+                "sma_window": 250,
+                "sma_slope_window": 20,
+            },
+        )
+        upsert_fund_fee(
+            connection,
+            fund_symbol="000001",
+            fee_mode="rate",
+            fee_value=0.0015,
+        )
+        upsert_position_snapshot(
+            connection,
+            fund_symbol="000001",
+            units=1000,
+            average_unit_cost=1.2,
+        )
+        rule = list_rules(connection)[0]
+        first = evaluate_drawdown_plan_rule(
+            connection,
+            rule,
+            _plan_history([100]),
+            expected_date=date(2024, 1, 1),
+        )
+        snooze_drawdown_tiers_for_date(
+            connection,
+            cycle_id=first.cycle_id,
+            tier_keys=("0.15",),
+            market_date="2024-01-02",
+        )
+        evaluate_drawdown_plan_rule(
+            connection,
+            rule,
+            _plan_history([100, 84]),
+            expected_date=date(2024, 1, 2),
+        )
+        recovered = evaluate_drawdown_plan_rule(
+            connection,
+            rule,
+            _plan_history([100, 84, 90]),
+            expected_date=date(2024, 1, 3),
+        )
+    assert recovered.notification is None
+
+    handlers = build_command_handlers(
+        {123},
+        sqlite_path=sqlite_path,
+        now_factory=lambda: datetime(2024, 1, 4, 6, 0, tzinfo=UTC),
+    )
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        effective_message=message,
+    )
+    asyncio.run(
+        _handler_by_command(handlers, "mark_added").callback(
+            update,
+            SimpleNamespace(args=[str(rule_id), "15", "2024-01-02"]),
+        )
+    )
+    assert "Historical correction" in message.replies[0]
+    query = FakeCallbackQuery(
+        message.reply_markups[0].inline_keyboard[0][0].callback_data
+    )
+    update.callback_query = query
+    asyncio.run(
+        _callback_by_name(handlers, "manual_add_confirm_callback").callback(
+            update,
+            SimpleNamespace(),
+        )
+    )
+
+    with open_connection(sqlite_path) as connection:
+        action = connection.execute(
+            "SELECT tier_key, source_alert_event_id FROM manual_add_actions"
+        ).fetchone()
+    assert action["tier_key"] == "0.15"
+    assert action["source_alert_event_id"] is None
+    assert "Position sync is required" in query.edits[-1]
+
+
+def test_historical_mark_added_can_reconcile_against_existing_exact_position(
+    tmp_path,
+) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    rule_id = _prepare_ready_plan_alert(
+        sqlite_path,
+        closes=[100, 84],
+        expected_date=date(2024, 1, 2),
+        tiers=[
+            {"drawdown": 0.15, "amount": 5000},
+            {"drawdown": 0.20, "amount": 10000},
+            {"drawdown": 0.25, "amount": 15000},
+        ],
+    )
+    with open_connection(sqlite_path) as connection:
+        rule = list_rules(connection)[0]
+        evaluate_drawdown_plan_rule(
+            connection,
+            rule,
+            _plan_history([100, 84, 79]),
+            expected_date=date(2024, 1, 3),
+        )
+        evaluate_drawdown_plan_rule(
+            connection,
+            rule,
+            _plan_history([100, 84, 79, 74]),
+            expected_date=date(2024, 1, 4),
+        )
+        cycle = get_active_drawdown_cycle(connection, rule_id)
+        assert cycle is not None
+        events = connection.execute(
+            "SELECT id FROM alert_events ORDER BY id"
+        ).fetchall()
+        record_manual_addition(
+            connection,
+            rule_id=rule_id,
+            cycle_id=int(cycle["id"]),
+            source_alert_event_id=int(events[-1]["id"]),
+            fund_symbol="000001",
+            tiers=(DrawdownTier(0.25, 15000, "0.25"),),
+            action_at=datetime(2024, 1, 4, 8, tzinfo=UTC),
+            create_estimate=False,
+        )
+        pending = list_pending_position_items(connection, "000001")
+        exact = reconcile_position_snapshot(
+            connection,
+            fund_symbol="000001",
+            units=2322.54,
+            average_unit_cost=1.3347,
+            expected_item_keys=[str(item["key"]) for item in pending],
+            all_included=True,
+            synced_at=datetime(2024, 1, 5, 1, 56, 40, tzinfo=UTC),
+        )
+        before_position = dict(exact)
+
+    handlers = build_command_handlers(
+        {123},
+        sqlite_path=sqlite_path,
+        now_factory=lambda: datetime(2024, 1, 5, 6, tzinfo=UTC),
+    )
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        effective_message=message,
+    )
+    asyncio.run(
+        _handler_by_command(handlers, "mark_added").callback(
+            update,
+            SimpleNamespace(args=[str(rule_id), "20", "2024-01-04"]),
+        )
+    )
+    exact_data = next(
+        button.callback_data
+        for row in message.reply_markups[-1].inline_keyboard
+        for button in row
+        if button.callback_data.endswith(":exact")
+    )
+    query = FakeCallbackQuery(exact_data)
+    update.callback_query = query
+    asyncio.run(
+        _callback_by_name(handlers, "manual_add_confirm_callback").callback(
+            update,
+            SimpleNamespace(),
+        )
+    )
+
+    with open_connection(sqlite_path) as connection:
+        after_position = dict(get_position_snapshot(connection, "000001"))
+        actions = connection.execute(
+            """
+            SELECT tier_key, source_alert_event_id, reconciled_at
+            FROM manual_add_actions
+            ORDER BY tier_key
+            """
+        ).fetchall()
+        settings = get_fund_settings(connection, "000001")
+        pending_after = list_pending_position_items(connection, "000001")
+
+    assert after_position == before_position
+    assert [row["tier_key"] for row in actions] == ["0.2", "0.25"]
+    assert actions[0]["reconciled_at"] == before_position["last_synced_at"]
+    assert actions[1]["reconciled_at"] is not None
+    assert actions[0]["source_alert_event_id"] != actions[1]["source_alert_event_id"]
+    assert settings["position_sync_required_since"] is None
+    assert pending_after == []
+    assert "Position and sync state were not changed" in query.edits[-1]
+
+
+def test_historical_mark_added_rejects_missing_or_stale_exact_position(
+    tmp_path,
+) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    rule_id = _prepare_ready_plan_alert(
+        sqlite_path,
+        closes=[100, 84],
+        expected_date=date(2024, 1, 2),
+    )
+    with open_connection(sqlite_path) as connection:
+        connection.execute("DELETE FROM position_snapshots")
+        connection.commit()
+
+    handlers = build_command_handlers(
+        {123},
+        sqlite_path=sqlite_path,
+        now_factory=lambda: datetime(2024, 1, 3, 6, tzinfo=UTC),
+    )
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        effective_message=message,
+    )
+    asyncio.run(
+        _handler_by_command(handlers, "mark_added").callback(
+            update,
+            SimpleNamespace(args=[str(rule_id), "15", "2024-01-02"]),
+        )
+    )
+    exact_data = next(
+        button.callback_data
+        for row in message.reply_markups[-1].inline_keyboard
+        for button in row
+        if button.callback_data.endswith(":exact")
+    )
+    query = FakeCallbackQuery(exact_data)
+    update.callback_query = query
+    asyncio.run(
+        _callback_by_name(handlers, "manual_add_confirm_callback").callback(
+            update,
+            SimpleNamespace(),
+        )
+    )
+    assert "exact position snapshot is required" in query.edits[-1]
+
+    with open_connection(sqlite_path) as connection:
+        upsert_position_snapshot(
+            connection,
+            fund_symbol="000001",
+            units=1000,
+            average_unit_cost=1.2,
+            synced_at=datetime(2024, 1, 1, tzinfo=UTC),
+        )
+    message = FakeMessage()
+    update.effective_message = message
+    asyncio.run(
+        _handler_by_command(handlers, "mark_added").callback(
+            update,
+            SimpleNamespace(args=[str(rule_id), "15", "2024-01-02"]),
+        )
+    )
+    exact_data = next(
+        button.callback_data
+        for row in message.reply_markups[-1].inline_keyboard
+        for button in row
+        if button.callback_data.endswith(":exact")
+    )
+    query = FakeCallbackQuery(exact_data)
+    update.callback_query = query
+    asyncio.run(
+        _callback_by_name(handlers, "manual_add_confirm_callback").callback(
+            update,
+            SimpleNamespace(),
+        )
+    )
+    assert "predates the historical addition" in query.edits[-1]
+
+
+def test_historical_mark_added_rejects_tier_triggered_after_action_date(
+    tmp_path,
+) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    rule_id = _prepare_ready_plan_alert(
+        sqlite_path,
+        closes=[100, 84],
+        expected_date=date(2024, 1, 2),
+    )
+    with open_connection(sqlite_path) as connection:
+        result = evaluate_drawdown_plan_rule(
+            connection,
+            list_rules(connection)[0],
+            _plan_history([100, 84, 79]),
+            expected_date=date(2024, 1, 3),
+        )
+        assert result.notification is not None
+
+    handlers = build_command_handlers(
+        {123},
+        sqlite_path=sqlite_path,
+        now_factory=lambda: datetime(2024, 1, 4, 6, tzinfo=UTC),
+    )
+    message = FakeMessage()
+    asyncio.run(
+        _handler_by_command(handlers, "mark_added").callback(
+            SimpleNamespace(
+                effective_user=SimpleNamespace(id=123),
+                effective_chat=SimpleNamespace(id=456),
+                effective_message=message,
+            ),
+            SimpleNamespace(args=[str(rule_id), "20", "2024-01-02"]),
+        )
+    )
+    assert "was not triggered by 2024-01-02" in message.replies[0]
+
+
 def test_mark_added_past_date_is_required_when_same_day_event_is_missing(
     tmp_path,
 ) -> None:
@@ -1587,9 +1910,14 @@ def test_sync_none_included_keeps_unestimated_manual_add_sync_warning(tmp_path) 
             action_at=datetime(2024, 1, 2, 8, tzinfo=UTC),
             create_estimate=False,
         )
+    provider = FakeProvider(
+        _history(["2024-01-03"], [1.5]),
+        nav=FundNav("000001", date(2024, 1, 3), 1.5, "akshare_eastmoney"),
+    )
     handlers = build_command_handlers(
         {123},
         sqlite_path=sqlite_path,
+        market_data_provider=provider,
         now_factory=lambda: datetime(2024, 1, 3, 8, tzinfo=UTC),
     )
     message = FakeMessage()
@@ -1621,8 +1949,10 @@ def test_sync_none_included_keeps_unestimated_manual_add_sync_warning(tmp_path) 
 
     assert "¥5,000.005" in message.replies[0]
     assert "Choose None only if no item below is included" in message.replies[0]
+    assert "Latest unit NAV: 1.5 on 2024-01-03" in query.edits[-1]
     assert "still require another /sync_position" in query.edits[-1]
     assert "eligible for dated-NAV processing" not in query.edits[-1]
+    assert provider.nav_calls == ["000001"]
 
 
 def test_sync_position_paginates_large_pending_preview(tmp_path, monkeypatch) -> None:
@@ -2090,10 +2420,54 @@ def test_plans_and_check_show_plan_state_without_mutation(tmp_path) -> None:
     assert "Next open tier: -15% / ¥5,000" in message.replies[0]
     assert "awaiting official close confirmation" not in message.replies[0]
     assert "Drawdown Add Plan status (read-only)" in message.replies[1]
-    assert "Read-only Drawdown Add Plans checked: 1" in message.replies[1]
+    assert "Read-only Drawdown Add Plans checked: 1." in message.replies[1]
     assert "No enabled drawdown_from_high" not in message.replies[1]
     assert "• -15% / ¥5,000: open" in message.replies[1]
     assert counts == [0, 0, 0]
+
+
+def test_plans_refreshes_nav_older_than_latest_completed_open_day(tmp_path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    rule_id = _prepare_ready_plan_alert(
+        sqlite_path,
+        closes=[100, 84],
+        expected_date=date(2024, 1, 2),
+    )
+    with open_connection(sqlite_path) as connection:
+        upsert_fund_nav(
+            connection,
+            fund_symbol="000001",
+            nav_date=date(2024, 1, 1),
+            unit_nav=1.2,
+            source="cached",
+        )
+    provider = FakeProvider(
+        _plan_history([100, 84]),
+        nav=FundNav("000001", date(2024, 1, 3), 1.5, "akshare_eastmoney"),
+    )
+    handlers = build_command_handlers(
+        {123},
+        sqlite_path=sqlite_path,
+        market_data_provider=provider,
+        market_calendar=FakeMarketCalendar(open_dates={date(2024, 1, 3)}),
+        now_factory=lambda: datetime(2024, 1, 4, 6, tzinfo=UTC),
+    )
+    message = FakeMessage()
+
+    asyncio.run(
+        _handler_by_command(handlers, "plans").callback(
+            SimpleNamespace(
+                effective_user=SimpleNamespace(id=123),
+                effective_chat=SimpleNamespace(id=456),
+                effective_message=message,
+            ),
+            SimpleNamespace(bot=FakeBot(), args=[]),
+        )
+    )
+
+    assert f"plan {rule_id}" in message.replies[0]
+    assert "using NAV 1.5 on 2024-01-03" in message.replies[0]
+    assert provider.nav_calls == ["000001"]
 
 
 def test_plans_keeps_position_linked_when_plan_market_data_fails(tmp_path) -> None:

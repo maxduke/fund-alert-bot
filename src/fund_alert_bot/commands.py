@@ -56,6 +56,7 @@ from fund_alert_bot.db import (
     get_scheduled_dca_occurrence,
     initialize_database,
     is_auto_cost_profit_rule,
+    list_drawdown_tier_records,
     list_enabled_drawdown_plan_fund_symbols,
     list_enhanced_dca_statuses,
     list_manual_add_actions,
@@ -326,7 +327,7 @@ class ManualAddSelection:
     """Server-loaded eligible tiers awaiting explicit confirmation."""
 
     plan_id: int
-    event_id: int
+    event_id: int | None
     cycle_id: int
     fund_symbol: str
     name: str
@@ -336,6 +337,7 @@ class ManualAddSelection:
     cutoff: str
     market_date: date
     historical: bool = False
+    tier_source_event_ids: tuple[tuple[str, int | None], ...] = ()
 
 
 @dataclass(slots=True)
@@ -650,13 +652,128 @@ def load_manual_add_selection(
     ignore_already_added: bool = False,
     historical: bool = False,
 ) -> ManualAddSelection:
-    """Load and validate eligible tiers from one dated alert event."""
+    """Load and validate eligible tiers for one manual-add action."""
 
     active = get_active_drawdown_cycle(connection, plan_id)
     if active is None:
         raise CommandParseError(
             "No eligible same-day plan reminder was found. For a past addition, "
             "use /mark_added <plan_id> <tier_percentages> <YYYY-MM-DD>."
+        )
+    requested_keys = tuple(tier_keys)
+    if len(set(requested_keys)) != len(requested_keys):
+        raise CommandParseError("Selected tiers must be unique.")
+    if historical:
+        # Historical corrections are based on durable close-confirmed facts,
+        # not on whichever alert happened to be delivered on the action date.
+        rule = connection.execute(
+            """
+            SELECT symbol, name, asset_type, params_json
+            FROM rules
+            WHERE id = ? AND type = 'drawdown_plan' AND enabled = 1
+            """,
+            (plan_id,),
+        ).fetchone()
+        if rule is None:
+            raise CommandParseError("Drawdown plan is no longer enabled.")
+        config = parse_drawdown_plan_config(
+            reference_symbol=str(rule["symbol"]),
+            asset_type=str(rule["asset_type"]),
+            params=_load_params(str(rule["params_json"])),
+        )
+        configured_by_key = {tier.key: tier for tier in config.tiers}
+        if any(key not in configured_by_key for key in requested_keys):
+            raise CommandParseError("One or more selected tiers are not configured.")
+        records = {
+            str(row["tier_key"]): row
+            for row in list_drawdown_tier_records(
+                connection,
+                int(active["id"]),
+                source="close_confirmed",
+            )
+        }
+        if any(key not in records for key in requested_keys):
+            raise CommandParseError(
+                "No close-confirmed plan record containing these tiers was found in "
+                "the active cycle."
+            )
+        selected = tuple(configured_by_key[key] for key in requested_keys)
+        source_event_ids: list[tuple[str, int | None]] = []
+        for tier in selected:
+            record = records[tier.key]
+            try:
+                trigger_date = date.fromisoformat(str(record["data_date"]))
+            except (TypeError, ValueError):
+                raise CommandParseError(
+                    "A selected tier has an invalid close-confirmed record."
+                ) from None
+            source_event_id = (
+                None
+                if record["alert_event_id"] is None
+                else int(record["alert_event_id"])
+            )
+            if trigger_date > action_date:
+                raise CommandParseError(
+                    f"Tier -{format_plan_percent(tier.drawdown)} was not triggered "
+                    f"by {action_date}."
+                )
+            if source_event_id is not None and source_event_id <= 0:
+                raise CommandParseError(
+                    "A selected tier has an invalid close-confirmed record."
+                )
+            if not (
+                math.isclose(
+                    float(record["drawdown"]),
+                    float(tier.drawdown),
+                    rel_tol=1e-9,
+                    abs_tol=1e-12,
+                )
+                and math.isclose(
+                    float(record["amount"]),
+                    float(tier.amount),
+                    rel_tol=1e-9,
+                    abs_tol=1e-12,
+                )
+            ):
+                raise CommandParseError(
+                    "A selected tier no longer matches the current plan."
+                )
+            source_event_ids.append((tier.key, source_event_id))
+        already_added = {
+            str(row["tier_key"])
+            for row in list_manual_add_actions(connection, int(active["id"]))
+        }
+        if ignore_already_added:
+            selected = tuple(tier for tier in selected if tier.key not in already_added)
+            source_event_ids = [
+                item for item in source_event_ids if item[0] not in already_added
+            ]
+        elif any(tier.key in already_added for tier in selected):
+            raise CommandParseError("One or more selected tiers were already recorded.")
+        if not selected:
+            raise CommandParseError("No eligible tiers were selected.")
+        readiness, missing_setup = derive_plan_readiness(
+            connection,
+            config.investment_fund_symbol,
+        )
+        settings = get_fund_settings(connection, config.investment_fund_symbol)
+        cutoff = "15:00" if settings is None else str(settings["subscription_cutoff"])
+        return ManualAddSelection(
+            plan_id=plan_id,
+            event_id=next(
+                (event_id for _tier_key, event_id in source_event_ids if event_id),
+                None,
+            ),
+            cycle_id=int(active["id"]),
+            fund_symbol=config.investment_fund_symbol,
+            name=str(rule["name"]),
+            tiers=selected,
+            readiness=readiness,
+            missing_setup=missing_setup,
+            cutoff=cutoff,
+            market_date=action_date,
+            historical=True,
+            tier_source_event_ids=tuple(source_event_ids),
         )
     event = get_drawdown_plan_action_event(
         connection,
@@ -680,9 +797,6 @@ def load_manual_add_selection(
         asset_type=str(event["asset_type"]),
         params=_load_params(str(event["params_json"])),
     )
-    requested_keys = tuple(tier_keys)
-    if len(set(requested_keys)) != len(requested_keys):
-        raise CommandParseError("Selected tiers must be unique.")
     if event_id is None and requested_keys:
         configured_by_key = {tier.key: tier for tier in config.tiers}
         if any(key not in configured_by_key for key in requested_keys):
@@ -783,7 +897,8 @@ def format_manual_add_confirmation(selection: ManualAddSelection) -> str:
         lines[2:2] = (
             f"Actual subscription date: {selection.market_date}",
             "Historical correction: no NAV, units, or cost estimate will be created.",
-            "After the platform settles, run /sync_position with its exact values.",
+            "Choose whether the current exact position already includes these "
+            "subscriptions.",
             "",
         )
     if selection.missing_setup:
@@ -992,11 +1107,17 @@ def format_check_summary(
     result: DrawdownCheckResult,
     dca_result: DcaCheckResult | None = None,
     profit_result: ProfitCheckResult | None = None,
+    plan_result: DrawdownPlanStatusResult | None = None,
 ) -> str:
     """Format a clear manual check summary."""
 
     if dca_result is not None or profit_result is not None:
-        return _format_combined_check_summary(result, dca_result, profit_result)
+        return _format_combined_check_summary(
+            result,
+            dca_result,
+            profit_result,
+            plan_result,
+        )
 
     if result.checked_rules == 0:
         return NO_DRAWDOWN_RULES_TO_CHECK_MESSAGE
@@ -1030,10 +1151,14 @@ def _format_combined_check_summary(
     drawdown_result: DrawdownCheckResult,
     dca_result: DcaCheckResult | None,
     profit_result: ProfitCheckResult | None,
+    plan_result: DrawdownPlanStatusResult | None = None,
 ) -> str:
     dca_checked = 0 if dca_result is None else dca_result.checked_rules
     profit_checked = 0 if profit_result is None else profit_result.checked_rules
-    total_checked = drawdown_result.checked_rules + profit_checked + dca_checked
+    plan_checked = 0 if plan_result is None else plan_result.checked_rules
+    total_checked = (
+        drawdown_result.checked_rules + profit_checked + dca_checked + plan_checked
+    )
     if total_checked == 0:
         return NO_RULES_TO_CHECK_MESSAGE
 
@@ -1050,8 +1175,10 @@ def _format_combined_check_summary(
         f"✅ Checked {drawdown_result.checked_rules} drawdown_from_high rule(s).",
         f"✅ Checked {profit_checked} profit_reminder rule(s).",
         f"✅ Checked {dca_checked} dca_reminder rule(s).",
-        f"🔔 New alerts: {alert_count}.",
     ]
+    if plan_result is not None:
+        parts.append(f"✅ Read-only Drawdown Add Plans checked: {plan_checked}.")
+    parts.append(f"🔔 New alerts: {alert_count}.")
     if alert_count == 0:
         parts.append("👌 No alerts triggered.")
     _append_drawdown_statuses(parts, drawdown_result)
@@ -2520,7 +2647,13 @@ def build_command_handlers(
                         "记录历史档位，稍后同步持仓",
                         callback_data=f"drawdown_add_confirm:{token}:sync",
                     )
-                ]
+                ],
+                [
+                    InlineKeyboardButton(
+                        "当前精确持仓已包含，仅补记档位",
+                        callback_data=f"drawdown_add_confirm:{token}:exact",
+                    )
+                ],
             ]
         elif readiness == "READY":
             rows = [
@@ -3026,6 +3159,7 @@ def build_command_handlers(
         *,
         create_estimate: bool,
         cutoff_choice: str | None = None,
+        position_already_included: bool = False,
     ) -> None:
         if draft.completed_message is not None:
             await _edit_message_text(query, draft.completed_message)
@@ -3077,6 +3211,8 @@ def build_command_handlers(
                     effective_date=(
                         None if effective_date is None else effective_date.isoformat()
                     ),
+                    source_alert_event_ids=dict(draft.selection.tier_source_event_ids),
+                    position_already_included=position_already_included,
                 )
             return estimate_id, tuple(recorded_keys), effective_date
 
@@ -3093,6 +3229,12 @@ def build_command_handlers(
         )
         if not recorded_keys:
             message = "These tiers were already recorded; no duplicate was created."
+        elif position_already_included:
+            message = (
+                f"Recorded tiers {tier_text}; the existing exact position snapshot "
+                "already includes these subscriptions. Position and sync state were "
+                "not changed. No order has been placed."
+            )
         elif estimate_id is None:
             message = (
                 f"Recorded tiers {tier_text}. Position sync is required. After the "
@@ -3253,6 +3395,16 @@ def build_command_handlers(
         if action == "sync":
             await commit_manual_add(query, draft, create_estimate=False)
             return
+        if action == "exact":
+            if not draft.selection.historical:
+                return
+            await commit_manual_add(
+                query,
+                draft,
+                create_estimate=False,
+                position_already_included=True,
+            )
+            return
         if action != "match" or draft.selection.readiness != "READY":
             return
         cn_now = _clock_now(clock).astimezone(cn_market_timezone)
@@ -3408,12 +3560,11 @@ def build_command_handlers(
                 current_nav = None
                 if command.units > 0:
                     try:
-                        current_nav = market_data_provider.get_fund_nav(
-                            Instrument(
-                                command.fund_symbol,
-                                command.fund_symbol,
-                                AssetType.CN_OPEN_FUND,
-                            )
+                        current_nav = get_cached_or_fetch_fund_nav(
+                            connection,
+                            market_data_provider,
+                            command.fund_symbol,
+                            force_refresh=True,
                         )
                     except MarketDataProviderError:
                         LOGGER.warning(
@@ -3558,10 +3709,11 @@ def build_command_handlers(
         if draft.completed_message is not None:
             await _edit_message_text(query, draft.completed_message)
             return
-        try:
+
+        def reconcile_position_work() -> tuple[Any, FundNav | None]:
             with open_connection(sqlite_path) as connection:
                 initialize_database(connection)
-                row = reconcile_position_snapshot(
+                current_row = reconcile_position_snapshot(
                     connection,
                     fund_symbol=draft.command.fund_symbol,
                     units=draft.command.units,
@@ -3570,10 +3722,28 @@ def build_command_handlers(
                     all_included=choice == "included",
                     synced_at=now,
                 )
+                current_nav = None
+                if draft.command.units > 0:
+                    try:
+                        current_nav = get_cached_or_fetch_fund_nav(
+                            connection,
+                            market_data_provider,
+                            draft.command.fund_symbol,
+                            force_refresh=True,
+                        )
+                    except MarketDataProviderError:
+                        LOGGER.warning(
+                            "Unable to fetch latest feeder-fund NAV symbol=%s",
+                            draft.command.fund_symbol,
+                        )
+                return current_row, current_nav
+
+        try:
+            row, nav = await run_serialized(work_lock, reconcile_position_work)
         except sqlite3.IntegrityError as exc:
             await _edit_message_text(query, str(exc))
             return
-        message = format_position_snapshot(row, None)
+        message = format_position_snapshot(row, nav)
         if choice == "none_included":
             if any(key.startswith("estimate:") for key in draft.item_keys):
                 message += (
@@ -3721,14 +3891,27 @@ def build_command_handlers(
             return
         force_refresh = args == ("refresh",)
         user_id = int(update.effective_user.id)
+        plan_date = _clock_now(clock).astimezone(timezone_info).date()
 
         def read_plans() -> tuple[Any, list[Any], list[Any], list[Any], list[Any]]:
+            try:
+                minimum_fund_nav_date = latest_completed_open_date(
+                    market_calendar,
+                    plan_date,
+                )
+            except MarketCalendarUnavailableError as exc:
+                LOGGER.warning(
+                    "Unable to determine minimum feeder-fund NAV date for /plans: %s",
+                    exc,
+                )
+                minimum_fund_nav_date = None
             with open_connection(sqlite_path) as connection:
                 initialize_database(connection)
                 current_result = read_drawdown_plan_statuses(
                     connection,
                     market_data_provider,
-                    end_date=_clock_now(clock).astimezone(timezone_info).date(),
+                    end_date=plan_date,
+                    minimum_fund_nav_date=minimum_fund_nav_date,
                     force_refresh=force_refresh,
                 )
                 planned_funds = set(list_enabled_drawdown_plan_fund_symbols(connection))
@@ -3759,6 +3942,7 @@ def build_command_handlers(
                                 connection,
                                 market_data_provider,
                                 str(row["fund_symbol"]),
+                                minimum_date=minimum_fund_nav_date,
                                 force_refresh=force_refresh,
                             )
                         except MarketDataProviderError:
@@ -4043,6 +4227,7 @@ def build_command_handlers(
                     connection,
                     market_data_provider,
                     end_date=check_date,
+                    minimum_fund_nav_date=confirmed_end_date,
                 )
             return (
                 current_result,
@@ -4075,22 +4260,12 @@ def build_command_handlers(
         else:
             dispatch_summary = None
 
-        response = format_check_summary(result, dca_result, profit_result)
-        legacy_checked = (
-            result.checked_rules
-            + dca_result.checked_rules
-            + profit_result.checked_rules
+        response = format_check_summary(
+            result,
+            dca_result,
+            profit_result,
+            plan_status_result,
         )
-        if legacy_checked == 0 and (
-            plan_status_result.statuses
-            or plan_status_result.no_data_skips
-            or plan_status_result.errors
-        ):
-            response = (
-                "📋 Check summary\n\n"
-                f"✅ Read-only Drawdown Add Plans checked: "
-                f"{plan_status_result.checked_rules}."
-            )
         response += format_plan_details(plan_status_result)
         if dispatch_summary is not None and dispatch_summary.failed:
             response = (

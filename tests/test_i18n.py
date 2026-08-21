@@ -83,10 +83,16 @@ def test_localizes_help_and_dynamic_status_structures() -> None:
         assert localize_text("✅ Checked 1 drawdown_from_high rule(s).") == (
             "✅ 已检查 1 drawdown_from_high rule(s)."
         )
+        assert localize_text("✅ Read-only Drawdown Add Plans checked: 4.") == (
+            "✅ 已检查回撤加仓计划（只读）：4."
+        )
     finally:
         set_language("en")
 
     assert localize_text("仅记录 -10% → ¥5000") == "Record only -10% → ¥5000"
+    assert localize_text("当前精确持仓已包含，仅补记档位") == (
+        "Current exact position already includes it; record tiers only"
+    )
 
 
 def test_chinese_localizes_readable_rule_list_fields() -> None:
