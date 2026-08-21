@@ -370,8 +370,19 @@ def _parse_quoted_args(
     """Recover shell-style quoting from Telegram's whitespace-split args."""
 
     raw = tuple(args)
-    if len(raw) in expected and not any('"' in value or "'" in value for value in raw):
+    has_quoted_arg = any(
+        value.startswith(quote)
+        and (
+            (len(value) > 1 and value.endswith(quote))
+            or any(later.endswith(quote) for later in raw[index + 1 :])
+        )
+        for index, value in enumerate(raw)
+        for quote in ('"', "'")
+    )
+    if len(raw) in expected and not has_quoted_arg:
         return raw
+    if not has_quoted_arg:
+        raise CommandParseError(usage)
     try:
         words = tuple(shlex.split(" ".join(raw)))
     except ValueError as exc:

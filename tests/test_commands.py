@@ -174,6 +174,24 @@ def test_parse_drawdown_command_recovers_telegram_split_quoted_name() -> None:
     assert command.name == "ChiNext Index"
 
 
+@pytest.mark.parametrize(
+    ("parser", "args"),
+    (
+        (
+            parse_add_drawdown_args,
+            ["cn_index", "399006", "Investor's", "365", "10,15"],
+        ),
+        (
+            parse_add_profit_args,
+            ["cn_open_fund", "110026", "Investor's", "auto", "20,30"],
+        ),
+        (parse_add_dca_args, ["Investor's", "周四", "1000"]),
+    ),
+)
+def test_add_commands_preserve_literal_name_apostrophes(parser, args) -> None:
+    assert parser(args).name == "Investor's"
+
+
 def test_reply_text_splits_long_messages_and_keeps_buttons_on_last_page() -> None:
     message = FakeMessage()
     markup = object()
@@ -264,6 +282,15 @@ def test_parse_enhanced_dca_command_defaults_holiday_next() -> None:
         "amount": 2000,
         "holiday_policy": "next",
     }
+
+
+def test_parse_enhanced_dca_recovers_telegram_split_quoted_name() -> None:
+    command = parse_add_dca_args(
+        ["110026", '"A500', 'feeder"', "周四", "2000", "rate:0.12%"]
+    )
+
+    assert command.name == "A500 feeder"
+    assert command.holiday_policy == "next"
 
 
 def test_parse_enhanced_dca_rejects_fixed_fee_consuming_amount() -> None:
