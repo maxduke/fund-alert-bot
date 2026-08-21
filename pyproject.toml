@@ -12,7 +12,7 @@ dependencies = [
     "akshare==1.18.91",
     "akshare-proxy-patch==0.5.0",
     "apscheduler<4",
-    "pandas<3",
+    "pandas<4",
     "python-dotenv",
     "python-telegram-bot<23",
     "requests<3",
