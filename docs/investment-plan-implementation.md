@@ -312,10 +312,12 @@ For every plan's `cn_etf` Reference ETF:
    initialization of a missing cycle from confirmed history.
 
 Telegram button callbacks and `/mark_added` share one handler. Validate the
-authorized user and chat, plan, active cycle, eligible alert event, and each
-named tier. Require a second confirmation for all-tier and partial-tier button
-actions. The callback payload carries only a stable event/action identity; load
-amounts and eligible tiers from SQLite rather than trusting Telegram data.
+authorized user and chat, plan, active cycle, and each named tier. Same-day
+actions require an eligible alert event; dated historical corrections use the
+durable close-confirmed Tier Record, which may legitimately have no alert event.
+Require a second confirmation for all-tier and partial-tier button actions. The
+callback payload carries only a stable action identity; load amounts and
+eligible tiers from SQLite rather than trusting Telegram data.
 
 The confirmation displays the selected tiers and configured gross total, then
 requires **actual amount matches** or **amount differs; sync later**. Only the

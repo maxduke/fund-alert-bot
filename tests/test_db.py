@@ -496,6 +496,111 @@ def test_init_migrates_legacy_ids_without_breaking_foreign_keys(
     assert repeat_event_id > next_event_id
 
 
+def test_init_migrates_manual_add_action_event_to_nullable_and_preserves_row(
+    tmp_path: Path,
+) -> None:
+    sqlite_path = tmp_path / "legacy-manual-actions.sqlite3"
+
+    with open_connection(sqlite_path) as connection:
+        init_db(connection)
+        rule_id = add_drawdown_plan_rule(
+            connection,
+            reference_symbol="159915",
+            investment_fund_symbol="000001",
+            name="Plan",
+            params={"tiers": [{"drawdown": 0.15, "amount": 5000}]},
+        )
+        connection.execute(
+            """
+            INSERT INTO drawdown_cycles (
+                rule_id, peak_date, initial_peak_price, peak_price,
+                last_evaluated_date, created_at, updated_at
+            ) VALUES (?, '2026-01-01', 100, 100, '2026-01-01', ?, ?)
+            """,
+            (rule_id, "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
+        )
+        cycle_id = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
+        event_id = add_alert_event(
+            connection,
+            rule_id=rule_id,
+            alert_key="legacy-manual-action",
+            title="Drawdown plan",
+            message="legacy",
+        )
+        connection.execute("DROP TABLE manual_add_actions")
+        connection.execute(
+            """
+            CREATE TABLE manual_add_actions (
+                cycle_id INTEGER NOT NULL REFERENCES drawdown_cycles(id),
+                tier_key TEXT NOT NULL,
+                source_alert_event_id INTEGER NOT NULL REFERENCES alert_events(id),
+                estimate_id INTEGER REFERENCES manual_add_estimates(id),
+                action_date TEXT NOT NULL,
+                reconciled_at TEXT,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (cycle_id, tier_key)
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO manual_add_actions (
+                cycle_id, tier_key, source_alert_event_id, action_date, created_at
+            ) VALUES (?, '0.15', ?, '2026-01-02', '2026-01-02T00:00:00+00:00')
+            """,
+            (cycle_id, event_id),
+        )
+        connection.commit()
+
+        init_db(connection)
+
+        connection.execute(
+            """
+            INSERT INTO manual_add_actions (
+                cycle_id, tier_key, source_alert_event_id, action_date, created_at
+            ) VALUES (?, '0.20', NULL, '2026-01-03', '2026-01-03T00:00:00+00:00')
+            """,
+            (cycle_id,),
+        )
+        connection.commit()
+
+        column = next(
+            row
+            for row in connection.execute(
+                "PRAGMA table_info(manual_add_actions)"
+            ).fetchall()
+            if row["name"] == "source_alert_event_id"
+        )
+        rows = connection.execute(
+            "SELECT * FROM manual_add_actions ORDER BY tier_key"
+        ).fetchall()
+        foreign_key_tables = {
+            row["table"]
+            for row in connection.execute(
+                "PRAGMA foreign_key_list(manual_add_actions)"
+            ).fetchall()
+        }
+        primary_key_columns = {
+            row["name"]
+            for row in connection.execute(
+                "PRAGMA table_info(manual_add_actions)"
+            ).fetchall()
+            if row["pk"]
+        }
+
+    assert column["notnull"] == 0
+    assert foreign_key_tables == {
+        "alert_events",
+        "drawdown_cycles",
+        "manual_add_estimates",
+    }
+    assert primary_key_columns == {"cycle_id", "tier_key"}
+    assert [(row["tier_key"], row["source_alert_event_id"]) for row in rows] == [
+        ("0.15", event_id),
+        ("0.20", None),
+    ]
+
+
 def test_legacy_id_migration_rolls_back_and_restores_foreign_keys(
     tmp_path: Path,
 ) -> None:

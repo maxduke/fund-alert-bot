@@ -273,7 +273,7 @@ def init_db(connection: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS manual_add_actions (
             cycle_id INTEGER NOT NULL REFERENCES drawdown_cycles(id),
             tier_key TEXT NOT NULL,
-            source_alert_event_id INTEGER NOT NULL REFERENCES alert_events(id),
+            source_alert_event_id INTEGER REFERENCES alert_events(id),
             estimate_id INTEGER REFERENCES manual_add_estimates(id),
             action_date TEXT NOT NULL,
             reconciled_at TEXT,
@@ -340,6 +340,7 @@ def init_db(connection: sqlite3.Connection) -> None:
     )
     delivery_columns_added = _ensure_alert_event_delivery_columns(connection)
     _migrate_monotonic_ids(connection)
+    _ensure_manual_add_action_source_event_nullable(connection)
     _ensure_drawdown_cycle_columns(connection)
     _ensure_fund_settings_columns(connection)
     now = _utc_now_text()
@@ -2149,7 +2150,7 @@ def record_manual_addition(
     *,
     rule_id: int,
     cycle_id: int,
-    source_alert_event_id: int,
+    source_alert_event_id: int | None,
     fund_symbol: str,
     tiers: Sequence[Any],
     action_at: datetime,
@@ -2158,7 +2159,7 @@ def record_manual_addition(
     cutoff_time: str | None = None,
     cutoff_choice: str | None = None,
     effective_date: str | None = None,
-    source_alert_event_ids: Mapping[str, int] | None = None,
+    source_alert_event_ids: Mapping[str, int | None] | None = None,
     position_already_included: bool = False,
 ) -> tuple[int | None, tuple[str, ...]]:
     """Record selected tiers and optionally one fee-aware pending estimate."""
@@ -2183,7 +2184,8 @@ def record_manual_addition(
         action_at.date() if action_date_override is None else action_date_override
     ).isoformat()
     source_event_ids = {
-        str(key): int(value) for key, value in (source_alert_event_ids or {}).items()
+        str(key): (None if value is None else int(value))
+        for key, value in (source_alert_event_ids or {}).items()
     }
     now = _utc_now_text()
     connection.execute("BEGIN IMMEDIATE")
@@ -2289,7 +2291,12 @@ def record_manual_addition(
                 key = str(tier.key)
                 record = records.get(key)
                 source_id = source_event_ids[key]
-                if record is None or int(record["alert_event_id"] or 0) != source_id:
+                record_source_id = (
+                    None
+                    if record is None or record["alert_event_id"] is None
+                    else int(record["alert_event_id"])
+                )
+                if record is None or record_source_id != source_id:
                     raise sqlite3.IntegrityError(
                         "Historical tier record changed; rerun /mark_added."
                     )
@@ -2320,48 +2327,48 @@ def record_manual_addition(
                     raise sqlite3.IntegrityError(
                         "Historical tier no longer matches the current plan."
                     )
-                event = connection.execute(
-                    "SELECT rule_id, payload_json FROM alert_events WHERE id = ?",
-                    (source_id,),
-                ).fetchone()
-                if event is None or int(event["rule_id"]) != rule_id:
-                    raise sqlite3.IntegrityError(
-                        "Historical tier source event does not match the plan."
-                    )
-                try:
-                    payload = json.loads(str(event["payload_json"]))
-                    eligible_payload = payload.get(
-                        "actionable_tiers", payload.get("crossed_tiers", ())
-                    )
-                    eligible_tier = next(
-                        item
-                        for item in eligible_payload
-                        if isinstance(item, dict) and str(item.get("key")) == key
-                    )
-                except (TypeError, ValueError, json.JSONDecodeError, StopIteration):
-                    raise sqlite3.IntegrityError(
-                        "Historical tier source event is no longer eligible."
-                    ) from None
-                try:
-                    event_date = date.fromisoformat(str(payload.get("data_date")))
-                except (TypeError, ValueError):
-                    raise sqlite3.IntegrityError(
-                        "Historical tier source event has an invalid data date."
-                    ) from None
-                if (
-                    int(payload.get("cycle_id", -1)) != cycle_id
-                    or event_date < trigger_date
-                    or str(payload.get("investment_fund_symbol")) != fund_symbol
-                    or not math.isclose(
-                        float(eligible_tier["drawdown"]), float(tier.drawdown)
-                    )
-                    or not math.isclose(
-                        float(eligible_tier["amount"]), float(tier.amount)
-                    )
-                ):
-                    raise sqlite3.IntegrityError(
-                        "Historical tier source event is no longer eligible."
-                    )
+                if source_id is not None:
+                    event = connection.execute(
+                        "SELECT rule_id, payload_json FROM alert_events WHERE id = ?",
+                        (source_id,),
+                    ).fetchone()
+                    if event is None or int(event["rule_id"]) != rule_id:
+                        raise sqlite3.IntegrityError(
+                            "Historical tier source event does not match the plan."
+                        )
+                    try:
+                        payload = json.loads(str(event["payload_json"]))
+                        eligible_payload = payload.get(
+                            "actionable_tiers", payload.get("crossed_tiers", ())
+                        )
+                        eligible_tier = next(
+                            item
+                            for item in eligible_payload
+                            if isinstance(item, dict) and str(item.get("key")) == key
+                        )
+                    except (
+                        TypeError,
+                        ValueError,
+                        json.JSONDecodeError,
+                        StopIteration,
+                    ):
+                        raise sqlite3.IntegrityError(
+                            "Historical tier source event is no longer eligible."
+                        ) from None
+                    if (
+                        int(payload.get("cycle_id", -1)) != cycle_id
+                        or str(payload.get("data_date")) != str(record["data_date"])
+                        or str(payload.get("investment_fund_symbol")) != fund_symbol
+                        or not math.isclose(
+                            float(eligible_tier["drawdown"]), float(tier.drawdown)
+                        )
+                        or not math.isclose(
+                            float(eligible_tier["amount"]), float(tier.amount)
+                        )
+                    ):
+                        raise sqlite3.IntegrityError(
+                            "Historical tier source event is no longer eligible."
+                        )
 
         existing_keys = {
             str(row["tier_key"])
@@ -4189,18 +4196,6 @@ def persist_drawdown_plan_evaluation(
                     for tier in records
                 ],
             )
-        if event_id is not None and alert_tier_keys:
-            connection.executemany(
-                """
-                UPDATE drawdown_tier_records
-                SET alert_event_id = ?
-                WHERE cycle_id = ?
-                    AND source = 'close_confirmed'
-                    AND alert_event_id IS NULL
-                    AND tier_key = ?
-                """,
-                [(event_id, cycle_id, key) for key in sorted(alert_tier_keys)],
-            )
         connection.commit()
     except Exception:
         connection.rollback()
@@ -4510,6 +4505,131 @@ def _migrate_monotonic_ids(connection: sqlite3.Connection) -> None:
         connection.execute(f"PRAGMA foreign_keys = {desired_foreign_keys}")
 
 
+def _ensure_manual_add_action_source_event_nullable(
+    connection: sqlite3.Connection,
+) -> None:
+    """Allow historical manual-add actions without an alert event."""
+
+    column = next(
+        (
+            row
+            for row in connection.execute(
+                "PRAGMA table_info(manual_add_actions)"
+            ).fetchall()
+            if str(row["name"]) == "source_alert_event_id"
+        ),
+        None,
+    )
+    if column is None or not bool(column["notnull"]):
+        return
+    schema = _table_schema_sql(connection, "manual_add_actions")
+    if schema is None:
+        raise RuntimeError("Cannot migrate missing manual_add_actions schema.")
+
+    temporary_table = "manual_add_actions__nullable_migration"
+    temporary_schema = _rename_table_schema_sql(
+        schema,
+        table="manual_add_actions",
+        temporary_table=temporary_table,
+    )
+    temporary_schema, replacements = re.subn(
+        r"(\bsource_alert_event_id\s+INTEGER)\s+NOT\s+NULL\b",
+        r"\1",
+        temporary_schema,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    if replacements != 1:
+        raise RuntimeError(
+            "Unsupported manual_add_actions schema for nullable provenance."
+        )
+
+    connection.commit()
+    original_foreign_keys = bool(
+        connection.execute("PRAGMA foreign_keys").fetchone()[0]
+    )
+    migration_committed = False
+    try:
+        connection.execute("PRAGMA foreign_keys = OFF")
+        if connection.execute("PRAGMA foreign_keys").fetchone()[0] != 0:
+            raise RuntimeError("Could not disable SQLite foreign-key checks.")
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            connection.execute(temporary_schema)
+            columns = [
+                str(row["name"])
+                for row in connection.execute(
+                    "PRAGMA table_info(manual_add_actions)"
+                ).fetchall()
+            ]
+            quoted_columns = ", ".join(_quote_identifier(name) for name in columns)
+            connection.execute(
+                f"INSERT INTO {_quote_identifier(temporary_table)} "
+                f"({quoted_columns}) SELECT {quoted_columns} "
+                "FROM manual_add_actions"
+            )
+            connection.execute("DROP TABLE manual_add_actions")
+            connection.execute(
+                f"ALTER TABLE {_quote_identifier(temporary_table)} "
+                "RENAME TO manual_add_actions"
+            )
+            _assert_foreign_keys_clean(connection)
+            connection.commit()
+            migration_committed = True
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+
+        connection.execute("PRAGMA foreign_keys = ON")
+        if connection.execute("PRAGMA foreign_keys").fetchone()[0] != 1:
+            raise RuntimeError("Could not enable SQLite foreign-key checks.")
+        _assert_foreign_keys_clean(connection)
+    except Exception:
+        if connection.in_transaction:
+            connection.rollback()
+        raise
+    finally:
+        if connection.in_transaction:
+            connection.rollback()
+        desired_foreign_keys = (
+            "ON" if migration_committed else ("ON" if original_foreign_keys else "OFF")
+        )
+        connection.execute(f"PRAGMA foreign_keys = {desired_foreign_keys}")
+
+
+def _rename_table_schema_sql(
+    schema_sql: str,
+    *,
+    table: str,
+    temporary_table: str,
+) -> str:
+    table_pattern = re.compile(
+        rf"(\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?)"
+        rf"(\"{re.escape(table)}\"|`{re.escape(table)}`|"
+        rf"\[{re.escape(table)}\]|{re.escape(table)})(\b)",
+        re.IGNORECASE,
+    )
+    table_match = table_pattern.search(schema_sql)
+    if table_match is None:
+        raise RuntimeError(f"Unsupported SQLite schema for {table!r}.")
+
+    name_token = table_match.group(2)
+    if name_token.startswith('"'):
+        temporary_token = f'"{temporary_table}"'
+    elif name_token.startswith("`"):
+        temporary_token = f"`{temporary_table}`"
+    elif name_token.startswith("["):
+        temporary_token = f"[{temporary_table}]"
+    else:
+        temporary_token = temporary_table
+    return (
+        schema_sql[: table_match.start(2)]
+        + temporary_token
+        + schema_sql[table_match.end(2) :]
+    )
+
+
 def _table_schema_sql(
     connection: sqlite3.Connection,
     table: str,
@@ -4571,29 +4691,10 @@ def _migration_schema_sql(
     table: str,
     temporary_table: str,
 ) -> str:
-    table_pattern = re.compile(
-        rf"(\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?)("
-        rf'"{re.escape(table)}"|`{re.escape(table)}`|'
-        rf"\[{re.escape(table)}\]|{re.escape(table)})(\b)",
-        re.IGNORECASE,
-    )
-    table_match = table_pattern.search(schema_sql)
-    if table_match is None:
-        raise RuntimeError(f"Unsupported SQLite schema for {table!r}.")
-
-    name_token = table_match.group(2)
-    if name_token.startswith('"'):
-        temporary_token = f'"{temporary_table}"'
-    elif name_token.startswith("`"):
-        temporary_token = f"`{temporary_table}`"
-    elif name_token.startswith("["):
-        temporary_token = f"[{temporary_table}]"
-    else:
-        temporary_token = temporary_table
-    migrated = (
-        schema_sql[: table_match.start(2)]
-        + temporary_token
-        + schema_sql[table_match.end(2) :]
+    migrated = _rename_table_schema_sql(
+        schema_sql,
+        table=table,
+        temporary_table=temporary_table,
     )
     id_pattern = re.compile(
         r"(\bid\s+INTEGER\s+PRIMARY\s+KEY)(?!\s+AUTOINCREMENT)",

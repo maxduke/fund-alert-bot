@@ -327,7 +327,7 @@ class ManualAddSelection:
     """Server-loaded eligible tiers awaiting explicit confirmation."""
 
     plan_id: int
-    event_id: int
+    event_id: int | None
     cycle_id: int
     fund_symbol: str
     name: str
@@ -337,7 +337,7 @@ class ManualAddSelection:
     cutoff: str
     market_date: date
     historical: bool = False
-    tier_source_event_ids: tuple[tuple[str, int], ...] = ()
+    tier_source_event_ids: tuple[tuple[str, int | None], ...] = ()
 
 
 @dataclass(slots=True)
@@ -652,7 +652,7 @@ def load_manual_add_selection(
     ignore_already_added: bool = False,
     historical: bool = False,
 ) -> ManualAddSelection:
-    """Load and validate eligible tiers from one dated alert event."""
+    """Load and validate eligible tiers for one manual-add action."""
 
     active = get_active_drawdown_cycle(connection, plan_id)
     if active is None:
@@ -694,26 +694,34 @@ def load_manual_add_selection(
         }
         if any(key not in records for key in requested_keys):
             raise CommandParseError(
-                "No close-confirmed plan reminder containing these tiers was found "
-                "in the active cycle."
+                "No close-confirmed plan record containing these tiers was found in "
+                "the active cycle."
             )
         selected = tuple(configured_by_key[key] for key in requested_keys)
-        source_event_ids: list[tuple[str, int]] = []
+        source_event_ids: list[tuple[str, int | None]] = []
         for tier in selected:
             record = records[tier.key]
             try:
                 trigger_date = date.fromisoformat(str(record["data_date"]))
-                source_event_id = int(record["alert_event_id"])
             except (TypeError, ValueError):
                 raise CommandParseError(
                     "A selected tier has an invalid close-confirmed record."
                 ) from None
+            source_event_id = (
+                None
+                if record["alert_event_id"] is None
+                else int(record["alert_event_id"])
+            )
             if trigger_date > action_date:
                 raise CommandParseError(
                     f"Tier -{format_plan_percent(tier.drawdown)} was not triggered "
                     f"by {action_date}."
                 )
-            if source_event_id <= 0 or not (
+            if source_event_id is not None and source_event_id <= 0:
+                raise CommandParseError(
+                    "A selected tier has an invalid close-confirmed record."
+                )
+            if not (
                 math.isclose(
                     float(record["drawdown"]),
                     float(tier.drawdown),
@@ -752,7 +760,10 @@ def load_manual_add_selection(
         cutoff = "15:00" if settings is None else str(settings["subscription_cutoff"])
         return ManualAddSelection(
             plan_id=plan_id,
-            event_id=source_event_ids[0][1],
+            event_id=next(
+                (event_id for _tier_key, event_id in source_event_ids if event_id),
+                None,
+            ),
             cycle_id=int(active["id"]),
             fund_symbol=config.investment_fund_symbol,
             name=str(rule["name"]),
