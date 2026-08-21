@@ -32,8 +32,10 @@ _EN_TO_ZH = {
     "Record an addition you made": "记录你已实际提交的加仓",
     "Show investment-plan status": "显示投资计划状态",
     "List configured rules": "列出已配置规则",
+    "List configured rules and IDs": "列出已配置规则及其 ID",
     "Remove a configured rule": "删除已配置规则",
     "Run a manual check": "手动执行检查",
+    "Run checks and send any triggered alerts": "立即检查并发送触发提醒",
     "Send a test notification to all enabled channels": "向所有已启用渠道发送测试通知",
     "Usage:": "用法：",
     "or:": "或：",
@@ -59,6 +61,10 @@ _EN_TO_ZH = {
     "Duplicate alerts skipped:": "已跳过重复提醒：",
     "No-data skips:": "因无数据跳过：",
     "Errors:": "错误：",
+    "Rule:": "规则：",
+    "Type:": "类型：",
+    "Status:": "状态：",
+    "Action:": "操作：",
     "Current drawdowns": "当前回撤",
     "from high": "相对高点",
     "latest": "最新价",
@@ -93,6 +99,8 @@ _EN_TO_ZH = {
     "days": "天",
     "RMB": "元",
     "Tiers (incremental):": "档位（增量金额）：",
+    "Tiers:": "档位：",
+    "Weekday:": "星期：",
     "Maximum one-cycle total:": "单周期最大总额：",
     "MA250 / 20-session slope: context only": "MA250 / 20 个交易日斜率：仅作背景信息",
     "Plan readiness:": "计划准备状态：",
@@ -259,11 +267,14 @@ _EN_TO_ZH.update(
         "Selected tiers must be unique.": "所选档位不能重复。",
         "One or more selected tiers are not configured.": "一个或多个所选档位未配置。",
         "Selected tiers are not all present in a same-day reminder.": "所选档位并非全部来自同一天的提醒。",
+        "Selected tiers are not all present in that dated reminder.": "所选档位并非全部来自该日期的提醒。",
         "No eligible tiers were selected.": "没有选择可记录的档位。",
         "One or more selected tiers were already recorded.": "一个或多个所选档位已经记录。",
         "No eligible same-day plan reminder was found.": (
             "未找到当天可操作的计划提醒。"
         ),
+        "For a past addition, use /mark_added <plan_id> <tier_percentages> <YYYY-MM-DD>.": "如果是补记历史加仓，请使用 /mark_added <plan_id> <tier_percentages> <YYYY-MM-DD>。",
+        "No eligible plan reminder containing these tiers was found on ": "未在以下日期找到包含这些档位的有效计划提醒：",
         "This reminder expired or its peak cycle changed.": (
             "该提醒已过期或高点周期已改变。"
         ),
@@ -345,6 +356,7 @@ _EN_TO_ZH.update(
         "Shared subscription fee:": "共享申购手续费：",
         "Position readiness:": "持仓准备状态：",
         "Remember: run /sync_position before automatic estimates can apply.": "请记得：应用自动估算前先运行 /sync_position。",
+        "Run /sync_position before automatic estimates can apply.": "应用自动估算前，请先运行 /sync_position。",
         "future amount to": "未来金额更新为",
         "Existing occurrences are unchanged.": "已有期次保持不变。",
         "Unable to scope the confirmation; rerun command.": (
@@ -380,6 +392,32 @@ _EN_TO_ZH.update(
         "waiting for exact dated NAV on": "等待以下日期的准确净值：",
         "The bot did not place or verify an order.": "Bot 未下单，也未核实订单。",
         "Invalid DCA skip action.": "无效的定投跳过操作。",
+        "Confirm failed DCA deduction": "确认定投扣款失败",
+        "Confirm failed deduction": "确认扣款失败",
+        "Confirm only if this deduction failed or was not executed.": "仅在本期扣款失败或未执行时确认。",
+        "This occurrence will not update the estimated position.": "本期不会更新估算持仓。",
+        "DCA skip cancelled. Nothing was changed.": "已取消跳过本期定投，未作任何修改。",
+        "Confirm rule removal": "确认移除规则",
+        "Confirm removal": "确认移除",
+        "Rule removal cancelled. Nothing changed.": "已取消移除规则，未作任何修改。",
+        "Invalid rule removal action.": "无效的规则移除操作。",
+        "No reminder state will change until you confirm.": "确认前不会修改任何提醒状态。",
+        "Historical correction: no NAV, units, or cost estimate will be created.": "历史补记不会创建净值、份额或成本估算。",
+        "After the platform settles, run /sync_position with its exact values.": "平台结算后，请使用准确数据运行 /sync_position。",
+        "Historical additions cannot create position estimates.": "历史补记不能创建持仓估算。",
+        "Actual subscription date:": "实际申购日期：",
+        "action_date must use YYYY-MM-DD": "action_date 必须使用 YYYY-MM-DD",
+        "action_date must not be in the future": "action_date 不能是未来日期",
+        "Partial redemption — sync position": "部分赎回——同步持仓",
+        "Confirm fully closed": "确认已全部清仓",
+        "No position action": "不调整持仓",
+        "No position action was recorded.": "未记录任何持仓操作。",
+        "The reached threshold was already recorded when this reminder was created and will not repeat in the current position cycle.": "该阈值在提醒创建时已经记录，本持仓周期内不会重复提醒。",
+        "If you actually subscribed, record it using the actual date:": "如果已经实际申购，请使用真实申购日期记录：",
+        "If the deduction failed, use:": "如果扣款失败，请使用：",
+        "If executed, wait for a confirmed subscription NAV date.": "如果已经扣款，请等待确认申购净值日期。",
+        "Next action: none; use /sync_position only if the platform differs.": "下一步：无需操作；仅在平台数据不一致时使用 /sync_position。",
+        "Configuration invalid; inspect logs or recreate this rule.": "配置无效；请检查日志或重新创建该规则。",
         "This addition confirmation expired or belongs to another chat.": "该加仓确认已过期或属于其他聊天。",
         "Manual addition recording cancelled.": "已取消记录手动加仓。",
         "The confirmation is at or after the configured cutoff.": "当前确认时间已达到或超过配置的截止时间。",
@@ -424,7 +462,9 @@ _EN_TO_ZH.update(
         "Disabled fixed DCA rule id=": "已停用固定定投规则 id=",
         "Disabled auto-cost Price-Gain rule id=": "已停用自动成本涨幅规则 id=",
         "Deleted rule id=": "已删除规则 id=",
+        "Disabled rule id=": "已停用规则 id=",
         "Rule id=": "规则 id=",
+        " is already disabled.": " 已经停用。",
         " was not found": " 未找到",
     }
 )
@@ -435,6 +475,7 @@ _ZH_TO_EN = {
     "实际金额与配置总额完全一致": "Actual amount exactly matches the configured total",
     "金额不同，记录档位后同步持仓": "Different amount; record tiers then sync position",
     "记录档位，稍后同步持仓": "Record tiers and sync position later",
+    "记录历史档位，稍后同步持仓": "Record historical tiers and sync position later",
     "前已提交 — 当日净值": " submitted before cutoff — same-day NAV",
     "后才提交 — 下一开放日": " submitted after cutoff — next open-day NAV",
     "已全部包含": "All included",
@@ -442,6 +483,7 @@ _ZH_TO_EN = {
     "只包含部分（取消）": "Partially included (cancel)",
     "✅ 已按全部档位加仓": "✅ Added all tiers",
     "✅ 已加仓": "✅ Added",
+    "✅ 全部已加仓": "✅ Record all tiers as added",
     "仅记录 ": "Record only ",
     "⏭ 暂未加仓": "⏭ No addition yet",
     "⏰ 今天不投，之后提醒": "⏰ Not today, remind me again",
@@ -494,6 +536,7 @@ _DYNAMIC_PREFIXES = (
     "Disabled fixed DCA rule id=",
     "Disabled auto-cost Price-Gain rule id=",
     "Deleted rule id=",
+    "Disabled rule id=",
     "Rule id=",
     "Skipped fixed DCA occurrence",
     "Set gain thresholds —",
@@ -506,6 +549,7 @@ _DYNAMIC_PREFIXES = (
     "仅记录 ",
     "跳过 -",
     "Confirm skipping ",
+    "No eligible plan reminder containing these tiers was found on ",
 )
 _LABEL_VALUE_SUFFIXES = {
     "Gross amount:": ("RMB",),
@@ -517,7 +561,12 @@ _LABEL_VALUE_TRANSLATIONS = {
     "Holiday policy:": {
         "next": "顺延至下一开放日",
         "skip": "跳过",
-    }
+    },
+    "Status:": {"enabled": "已启用", "disabled": "已停用"},
+    "Action:": {
+        "soft-disable": "停用并保留历史",
+        "permanently delete": "永久删除",
+    },
 }
 _DATED_LABELS = {"Peak:", "Latest:"}
 
@@ -687,6 +736,11 @@ def _localize_line(line: str) -> str:
             remainder = (
                 remainder.removesuffix(" was not found")
                 + replacements[" was not found"]
+            )
+        elif _language == "zh-CN" and remainder.endswith(" is already disabled."):
+            remainder = (
+                remainder.removesuffix(" is already disabled.")
+                + replacements[" is already disabled."]
             )
         return decoration + replacements[dynamic_prefix] + remainder
 

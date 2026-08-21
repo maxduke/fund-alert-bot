@@ -245,12 +245,12 @@ Telegram pre-alerts and confirmed reminders include inline buttons. A typical
 multi-tier message shows:
 
 ```text
-[✅ 已加仓]
+[✅ 全部已加仓]
 [⏰ 今天不投，之后提醒]
 [⏭ 本周期跳过]
 ```
 
-`✅ 已加仓` starts the existing all-or-selected-tier manual-add confirmation;
+`✅ 全部已加仓` starts the existing all-or-selected-tier manual-add confirmation;
 only tiers the user actually submitted should be selected. `⏰ 今天不投，之后提醒`
 stores a one-market-date snooze without recording an addition. `⏭ 本周期跳过`
 asks for confirmation and then lets the user skip all or selected tiers for the
@@ -262,7 +262,7 @@ Buttons are the normal Telegram workflow. Bark, ntfy, webhook, and button
 failure use the command fallback printed in the same reminder:
 
 ```text
-/mark_added <plan_id> 15,20
+/mark_added <plan_id> 15,20 [YYYY-MM-DD]
 
 Only use this after you actually subscribe. It records your statement and never
 places an order.
@@ -275,11 +275,11 @@ cycle; for an already confirmed tier, the existing Tier Record remains intact.
 Choosing **Not added yet** creates no purchase or position state.
 
 Automatic position estimation accepts only a Manual Add Confirmation completed
-on the reminder's local market date. A later button or command is rejected rather
-than guessing when the subscription happened; if the user invested later or
-forgot to record it, they use `/sync_position` after the platform shows the
-settled units and average cost. This deliberately favors correct cost over a
-convenient but ambiguous backdated estimate.
+on the reminder's local market date. For a forgotten confirmation, the optional
+date must match an eligible reminder in the active drawdown cycle. This
+historical correction records the selected tiers and actual subscription date,
+but never estimates historical NAV, units, or cost; use `/sync_position` after
+the platform shows the settled units and average cost.
 
 A confirmed Manual Add Confirmation also creates one pending Manual Add
 Estimate containing the sum of the selected tier amounts, the shared Fund
@@ -529,7 +529,8 @@ platform baseline.
 tier. Drawdown Add Plan status is read-only: running `/check` never confirms a new
 plan tier. It distinguishes **untriggered**, **triggered pending**, **added**, and
 **skipped for this cycle**; a check mark never implies that the Bot or platform
-completed a purchase. Existing legacy rule behavior remains unchanged.
+completed a purchase. `/check` can still create and send triggered legacy
+drawdown, Price-Gain, and due reminder-only DCA alerts.
 
 ## Low-maintenance DCA position tracking
 
@@ -538,7 +539,7 @@ amount. Its fee argument initializes or validates the fund's shared actual
 subscription-fee setting after any sales-platform discount:
 
 ```text
-/add_dca <fund_symbol> <name> <weekday> <gross_amount> <fee> [holiday:next|holiday:skip]
+/add_dca <fund_symbol> <name> <weekday> <gross_amount> <rate:<percent>%|fixed:<RMB>> [holiday:next|holiday:skip]
 
 Percentage fee: rate:0.12%
 Fixed RMB fee:  fixed:1
@@ -688,7 +689,8 @@ the user taps **Skip this occurrence** or runs:
 /dca_skip <rule_id> <due_date>
 ```
 
-A skip received before calculation prevents that occurrence from changing the
+A detail screen requires confirmation before changing the occurrence. A skip
+received before calculation prevents that occurrence from changing the
 estimate. If the discrepancy is discovered after application, `/sync_position`
 provides the simple correction instead of implementing purchase reversal logic.
 Clicking an old skip button after application therefore explains that the
@@ -803,7 +805,8 @@ guessing that an old reminder is current. This is a one-time upgrade safeguard.
 All market-driven alerts include their market-data date. Missing, stale, or
 insufficient data is reported without creating an incorrect reminder.
 
-For the new stateful Drawdown Add Plan and enhanced DCA rule, `/del` stops future
+`/del` first shows the exact rule and destructive action for confirmation. For
+the new stateful Drawdown Add Plan and enhanced DCA rule, it stops future
 evaluations or scheduled occurrences but retains existing cycle and contribution
 state. A contribution already recorded as pending still settles or is reconciled
 through Position Sync; deleting a rule never silently discards it or applies it

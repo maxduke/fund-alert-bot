@@ -89,6 +89,45 @@ def test_localizes_help_and_dynamic_status_structures() -> None:
     assert localize_text("仅记录 -10% → ¥5000") == "Record only -10% → ¥5000"
 
 
+def test_chinese_localizes_readable_rule_list_fields() -> None:
+    set_language("zh-CN")
+    try:
+        assert localize_text(
+            "• #3 A500\n"
+            "Type: drawdown_plan\n"
+            "Status: enabled\n"
+            "Reference ETF: 510300\n"
+            "Investment fund: 000001\n"
+            "Tiers: -15%:¥5,000"
+        ) == (
+            "• #3 A500\n"
+            "类型： drawdown_plan\n"
+            "状态：已启用\n"
+            "参考 ETF： 510300\n"
+            "实际投资基金： 000001\n"
+            "档位： -15%:¥5,000"
+        )
+    finally:
+        set_language("en")
+
+
+def test_chinese_localizes_new_confirmation_workflows() -> None:
+    set_language("zh-CN")
+    try:
+        assert localize_text(
+            "Action: soft-disable\n"
+            "Confirm only if this deduction failed or was not executed. "
+            "This occurrence will not update the estimated position.\n"
+            "Disabled rule id=3 (A500)."
+        ) == (
+            "操作：停用并保留历史\n"
+            "仅在本期扣款失败或未执行时确认。 本期不会更新估算持仓。\n"
+            "已停用规则 id=3 (A500)."
+        )
+    finally:
+        set_language("en")
+
+
 def test_localizes_dynamic_success_messages_without_changing_names() -> None:
     set_language("zh-CN")
     try:

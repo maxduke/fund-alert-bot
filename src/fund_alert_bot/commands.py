@@ -53,6 +53,7 @@ from fund_alert_bot.db import (
     get_fund_settings,
     get_position_profit_event,
     get_position_snapshot,
+    get_scheduled_dca_occurrence,
     initialize_database,
     is_auto_cost_profit_rule,
     list_enabled_drawdown_plan_fund_symbols,
@@ -64,6 +65,7 @@ from fund_alert_bot.db import (
     open_connection,
     reconcile_position_snapshot,
     record_manual_addition,
+    rule_removal_action,
     skip_drawdown_tiers_for_cycle,
     skip_scheduled_dca_occurrence,
     snooze_drawdown_tiers_for_date,
@@ -139,7 +141,7 @@ ADD_DRAWDOWN_PLAN_USAGE = (
     "Usage: /add_drawdown_plan <reference_etf_symbol> <feeder_fund_symbol> "
     "<name> <tiers> [lookback:<calendar_days>]"
 )
-MARK_ADDED_USAGE = "Usage: /mark_added <plan_id> <tier_percentages>"
+MARK_ADDED_USAGE = "Usage: /mark_added <plan_id> <tier_percentages> [YYYY-MM-DD]"
 START_MESSAGE = "fund-alert-bot is running. Use /help to see available commands."
 HELP_MESSAGE = "\n".join(
     (
@@ -149,7 +151,8 @@ HELP_MESSAGE = "\n".join(
         "/add_drawdown <asset_type> <symbol> <name> <lookback_days> <thresholds>",
         "/add_profit <asset_type> <symbol> <name> <cost|auto> <thresholds>",
         "/add_dca <name> <weekday> <amount> - Reminder only",
-        "/add_dca <fund_symbol> <name> <weekday> <amount> <fee> "
+        "/add_dca <fund_symbol> <name> <weekday> <gross_amount> "
+        "<rate:<percent>%|fixed:<RMB>> "
         "[holiday:next|holiday:skip] - Fixed fund DCA estimate",
         "/dca_skip <rule_id> <due_date> - Deduction failed/not executed",
         "/set_dca_amount <rule_id> <new_amount> - Future occurrences only",
@@ -158,11 +161,12 @@ HELP_MESSAGE = "\n".join(
         "/sync_position <fund_symbol> <units> <average_unit_cost>",
         "/add_drawdown_plan <reference_etf> <feeder_fund> <name> <tiers> "
         "[lookback:<days>]",
-        "/mark_added <plan_id> <tier_percentages> - Record an addition you made",
+        "/mark_added <plan_id> <tier_percentages> [YYYY-MM-DD] "
+        "- Record an addition you made",
         "/plans - Show investment-plan status",
-        "/list - List configured rules",
+        "/list - List configured rules and IDs",
         "/del <id> - Remove a configured rule",
-        "/check - Run a manual check",
+        "/check - Run checks and send any triggered alerts",
         "/test_notify - Send a test notification to all enabled channels",
     )
 )
@@ -195,9 +199,9 @@ BOT_COMMAND_MENU = (
     ("add_drawdown_plan", "Add a drawdown buy plan"),
     ("mark_added", "Record a completed addition"),
     ("plans", "Show investment-plan status"),
-    ("list", "List configured rules"),
+    ("list", "List configured rules and IDs"),
     ("del", "Remove a configured rule"),
-    ("check", "Run a manual check"),
+    ("check", "Run checks and send any triggered alerts"),
     ("test_notify", "Test enabled notification channels"),
 )
 
@@ -314,6 +318,7 @@ class MarkAddedCommand:
 
     plan_id: int
     tier_keys: tuple[str, ...]
+    action_date: date | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -330,6 +335,7 @@ class ManualAddSelection:
     missing_setup: tuple[str, ...]
     cutoff: str
     market_date: date
+    historical: bool = False
 
 
 @dataclass(slots=True)
@@ -355,13 +361,43 @@ class PositionSyncDraft:
     completed_message: str | None = None
 
 
+def _parse_quoted_args(
+    args: Sequence[str],
+    *,
+    expected: Collection[int],
+    usage: str,
+) -> tuple[str, ...]:
+    """Recover shell-style quoting from Telegram's whitespace-split args."""
+
+    raw = tuple(args)
+    has_quoted_arg = any(
+        value.startswith(quote)
+        and (
+            (len(value) > 1 and value.endswith(quote))
+            or any(later.endswith(quote) for later in raw[index + 1 :])
+        )
+        for index, value in enumerate(raw)
+        for quote in ('"', "'")
+    )
+    if len(raw) in expected and not has_quoted_arg:
+        return raw
+    if not has_quoted_arg:
+        raise CommandParseError(usage)
+    try:
+        words = tuple(shlex.split(" ".join(raw)))
+    except ValueError as exc:
+        raise CommandParseError(f"{usage}\n{exc}") from exc
+    if len(words) not in expected:
+        raise CommandParseError(usage)
+    return words
+
+
 def parse_add_drawdown_args(args: Sequence[str]) -> DrawdownCommand:
     """Parse /add_drawdown arguments into a typed command object."""
 
-    if len(args) != 5:
-        raise CommandParseError(ADD_DRAWDOWN_USAGE)
-
-    raw_asset_type, symbol, name, raw_lookback_days, raw_thresholds = args
+    raw_asset_type, symbol, name, raw_lookback_days, raw_thresholds = (
+        _parse_quoted_args(args, expected={5}, usage=ADD_DRAWDOWN_USAGE)
+    )
     try:
         asset_type = AssetType(raw_asset_type)
     except ValueError as exc:
@@ -396,10 +432,11 @@ def parse_add_drawdown_args(args: Sequence[str]) -> DrawdownCommand:
 def parse_add_profit_args(args: Sequence[str]) -> ProfitCommand:
     """Parse /add_profit arguments into a typed command object."""
 
-    if len(args) != 5:
-        raise CommandParseError(ADD_PROFIT_USAGE)
-
-    raw_asset_type, symbol, name, raw_cost, raw_thresholds = args
+    raw_asset_type, symbol, name, raw_cost, raw_thresholds = _parse_quoted_args(
+        args,
+        expected={5},
+        usage=ADD_PROFIT_USAGE,
+    )
     try:
         asset_type = AssetType(raw_asset_type)
     except ValueError as exc:
@@ -566,7 +603,7 @@ def parse_sync_position_args(args: Sequence[str]) -> SyncPositionCommand:
 def parse_mark_added_args(args: Sequence[str]) -> MarkAddedCommand:
     """Parse selected drawdown tier percentages for a recorded manual add."""
 
-    if len(args) != 2:
+    if len(args) not in {2, 3}:
         raise CommandParseError(MARK_ADDED_USAGE)
     try:
         plan_id = int(args[0])
@@ -592,7 +629,13 @@ def parse_mark_added_args(args: Sequence[str]) -> MarkAddedCommand:
         raise CommandParseError(
             "tier percentages must be unique numbers between 0 and 100"
         )
-    return MarkAddedCommand(plan_id, tier_keys)
+    action_date = None
+    if len(args) == 3:
+        try:
+            action_date = date.fromisoformat(args[2])
+        except ValueError as exc:
+            raise CommandParseError("action_date must use YYYY-MM-DD") from exc
+    return MarkAddedCommand(plan_id, tier_keys, action_date)
 
 
 def load_manual_add_selection(
@@ -605,14 +648,15 @@ def load_manual_add_selection(
     tier_index: int | None = None,
     select_all: bool = False,
     ignore_already_added: bool = False,
+    historical: bool = False,
 ) -> ManualAddSelection:
-    """Load and validate eligible tiers from a stored same-day alert event."""
+    """Load and validate eligible tiers from one dated alert event."""
 
     active = get_active_drawdown_cycle(connection, plan_id)
     if active is None:
         raise CommandParseError(
-            "No eligible same-day plan reminder was found. Use /sync_position "
-            "after your platform position updates."
+            "No eligible same-day plan reminder was found. For a past addition, "
+            "use /mark_added <plan_id> <tier_percentages> <YYYY-MM-DD>."
         )
     event = get_drawdown_plan_action_event(
         connection,
@@ -622,9 +666,14 @@ def load_manual_add_selection(
         cycle_id=int(active["id"]),
     )
     if event is None:
+        if historical:
+            raise CommandParseError(
+                "No eligible plan reminder containing these tiers was found on "
+                f"{action_date}."
+            )
         raise CommandParseError(
-            "No eligible same-day plan reminder was found. Use /sync_position "
-            "after your platform position updates."
+            "No eligible same-day plan reminder was found. For a past addition, "
+            "use /mark_added <plan_id> <tier_percentages> <YYYY-MM-DD>."
         )
     config = parse_drawdown_plan_config(
         reference_symbol=str(event["symbol"]),
@@ -647,9 +696,10 @@ def load_manual_add_selection(
             required_tier_keys=tuple(tier.key for tier in requested),
         )
         if event is None:
-            raise CommandParseError(
-                "Selected tiers are not all present in a same-day reminder."
-            )
+            message = "Selected tiers are not all present in a same-day reminder."
+            if historical:
+                message = "Selected tiers are not all present in that dated reminder."
+            raise CommandParseError(message)
     payload = json.loads(str(event["payload_json"]))
     if (
         int(payload.get("cycle_id", -1)) != int(active["id"])
@@ -672,9 +722,10 @@ def load_manual_add_selection(
     else:
         eligible_by_key = {tier.key: tier for tier in eligible}
         if any(key not in eligible_by_key for key in requested_keys):
-            raise CommandParseError(
-                "Selected tiers are not all present in a same-day reminder."
-            )
+            message = "Selected tiers are not all present in a same-day reminder."
+            if historical:
+                message = "Selected tiers are not all present in that dated reminder."
+            raise CommandParseError(message)
         selected = tuple(eligible_by_key[key] for key in requested_keys)
     if not selected:
         raise CommandParseError("No eligible tiers were selected.")
@@ -703,6 +754,7 @@ def load_manual_add_selection(
         missing_setup=missing_setup,
         cutoff=cutoff,
         market_date=action_date,
+        historical=historical,
     )
 
 
@@ -727,6 +779,13 @@ def format_manual_add_confirmation(selection: ManualAddSelection) -> str:
         "Continue only if you already submitted the fund subscription.",
         "The bot records your statement; it does not place or verify an order.",
     ]
+    if selection.historical:
+        lines[2:2] = (
+            f"Actual subscription date: {selection.market_date}",
+            "Historical correction: no NAV, units, or cost estimate will be created.",
+            "After the platform settles, run /sync_position with its exact values.",
+            "",
+        )
     if selection.missing_setup:
         lines.append(f"Missing setup: {', '.join(selection.missing_setup)}")
     return "\n".join(lines)
@@ -829,19 +888,14 @@ def _parse_fund_symbol(raw_symbol: str) -> str:
 def parse_add_dca_args(args: Sequence[str]) -> DcaCommand:
     """Parse /add_dca arguments into a typed command object."""
 
-    if len(args) == 3:
-        raw_name, raw_weekday, raw_amount = args
+    words = _parse_quoted_args(args, expected={3, 5, 6}, usage=ADD_DCA_USAGE)
+    if len(words) == 3:
+        raw_name, raw_weekday, raw_amount = words
         fund_symbol = None
         fee_mode = None
         fee_value = None
         holiday_policy = None
     else:
-        try:
-            words = shlex.split(" ".join(args))
-        except ValueError as exc:
-            raise CommandParseError(f"{ADD_DCA_USAGE}\n{exc}") from exc
-        if len(words) not in {5, 6}:
-            raise CommandParseError(ADD_DCA_USAGE)
         fund_symbol = _parse_fund_symbol(words[0])
         raw_name, raw_weekday, raw_amount = words[1:4]
         fee_mode, fee_value = _parse_fund_fee(words[4])
@@ -1287,6 +1341,22 @@ def format_plan_overview(
             )
             if row["added_units"] is not None:
                 lines.append(f"Estimated units added: {float(row['added_units']):.6f}")
+            if row["status"] == "pending":
+                if row["effective_date"] is None:
+                    lines.append(
+                        "If executed, wait for a confirmed subscription NAV date."
+                    )
+                lines.extend(
+                    (
+                        "If the deduction failed, use:",
+                        f"/dca_skip {row['rule_id']} {row['due_date']}",
+                    )
+                )
+            elif row["status"] in {"applied", "skipped", "reconciled_by_sync"}:
+                lines.append(
+                    "Next action: none; use /sync_position only if the "
+                    "platform differs."
+                )
         if row["last_synced_at"] is None:
             lines.append("Position: not synced — remember /sync_position")
         else:
@@ -1315,6 +1385,14 @@ def format_plan_overview(
                     f"{format_plan_amount(tier.amount)}"
                     for tier in pending_tiers
                 )
+            )
+            tier_text = ",".join(
+                format_plan_percent(tier.key).removesuffix("%")
+                for tier in pending_tiers
+            )
+            plan_lines.append(
+                "If you actually subscribed, record it using the actual date: "
+                f"/mark_added {status.rule_id} {tier_text} <YYYY-MM-DD>"
             )
         if newly_reached_tiers:
             plan_lines.append(
@@ -1593,29 +1671,79 @@ def get_start_message() -> str:
 
 
 def _format_rule_row(row: Any) -> str:
-    params = _load_params(row["params_json"])
-    params_text = json.dumps(
-        params,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
     status = "enabled" if bool(row["enabled"]) else "disabled"
-    if row["type"] == DCA_RULE_TYPE:
-        return (
-            f"id={row['id']} type={row['type']} name={row['name']}"
-            f" status={status} params={params_text}"
-        )
+    lines = [
+        f"• #{row['id']} {row['name']}",
+        f"Type: {row['type']}",
+        f"Status: {status}",
+    ]
+    try:
+        params = _load_params(str(row["params_json"]))
+        if row["type"] == DRAW_DOWN_PLAN_RULE_TYPE:
+            tiers = ", ".join(
+                f"-{format_plan_percent(float(item['drawdown']))}:"
+                f"{format_plan_amount(float(item['amount']))}"
+                for item in params["tiers"]
+            )
+            lines.extend(
+                (
+                    f"Reference ETF: {row['symbol']}",
+                    f"Investment fund: {params['investment_fund_symbol']}",
+                    f"Tiers: {tiers}",
+                )
+            )
+        elif row["type"] == DCA_RULE_TYPE:
+            lines.extend(
+                (
+                    (
+                        f"Fund: {row['symbol']}"
+                        if row["asset_type"] == AssetType.CN_OPEN_FUND.value
+                        else f"Symbol: {row['symbol']}"
+                    ),
+                    f"Weekday: {params['weekday']}",
+                    f"Gross amount: {format_plan_amount(float(params['amount']))}",
+                )
+            )
+        elif row["type"] == DRAW_DOWN_RULE_TYPE:
+            thresholds = ", ".join(
+                format_plan_percent(float(value)) for value in params["thresholds"]
+            )
+            lines.extend(
+                (
+                    f"Asset type: {row['asset_type']}",
+                    f"Symbol: {row['symbol']}",
+                    f"Lookback: {params['lookback_days']} days",
+                    f"Thresholds: {thresholds}",
+                )
+            )
+        elif row["type"] == PROFIT_RULE_TYPE:
+            thresholds = ", ".join(
+                format_plan_percent(float(value)) for value in params["thresholds"]
+            )
+            cost = "auto position cost" if params["cost"] == "auto" else params["cost"]
+            lines.extend(
+                (
+                    f"Asset type: {row['asset_type']}",
+                    f"Symbol: {row['symbol']}",
+                    f"Cost: {cost}",
+                    f"Thresholds: {thresholds}",
+                )
+            )
+        else:
+            lines.extend(
+                (
+                    f"Asset type: {row['asset_type']}",
+                    f"Symbol: {row['symbol']}",
+                )
+            )
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        lines.append("Configuration invalid; inspect logs or recreate this rule.")
+    return "\n".join(lines)
 
-    return (
-        f"id={row['id']} "
-        f"type={row['type']} "
-        f"asset_type={row['asset_type']} "
-        f"symbol={row['symbol']} "
-        f"name={row['name']} "
-        f"status={status} "
-        f"params={params_text}"
-    )
+
+def _rule_removal_result(row: Any) -> str:
+    action = "Disabled" if rule_removal_action(row) == "disable" else "Deleted"
+    return f"{action} rule id={row['id']} ({row['name']})."
 
 
 def _load_params(params_json: str) -> dict[str, Any]:
@@ -1665,6 +1793,22 @@ def _dca_skip_response(status: str, rule_id: int, due_date: str) -> str:
     if status == "reconciled_by_sync":
         return "This occurrence was already reconciled by Position Sync."
     return "Fixed DCA occurrence not found."
+
+
+def _format_dca_skip_confirmation(row: Any) -> str:
+    return "\n".join(
+        (
+            "Confirm failed DCA deduction",
+            "",
+            f"Rule: {row['rule_id']}",
+            f"Fund: {row['fund_symbol']}",
+            f"Scheduled date: {row['due_date']}",
+            f"Gross amount: {format_plan_amount(float(row['gross_amount']))}",
+            "",
+            "Confirm only if this deduction failed or was not executed. "
+            "This occurrence will not update the estimated position.",
+        )
+    )
 
 
 async def _reply_text(
@@ -1722,25 +1866,6 @@ async def _edit_message_text(
         localize_text(text),
         reply_markup=reply_markup,
     )
-
-
-def _remaining_callback_markup(query: object, consumed_data: str) -> object | None:
-    """Keep unconsumed buttons when one action edits a merged notification."""
-
-    from telegram import InlineKeyboardMarkup
-
-    reply_markup = getattr(getattr(query, "message", None), "reply_markup", None)
-    keyboard = getattr(reply_markup, "inline_keyboard", ())
-    remaining = tuple(
-        tuple(
-            button
-            for button in row
-            if getattr(button, "callback_data", None) != consumed_data
-        )
-        for row in keyboard
-    )
-    remaining = tuple(row for row in remaining if row)
-    return InlineKeyboardMarkup(remaining) if remaining else None
 
 
 def _split_telegram_text(text: str) -> tuple[str, ...]:
@@ -2038,19 +2163,34 @@ def build_command_handlers(
 
         fund_type = None
         settings_cutoff = None
-        position_ready = False
+        position_readiness = "SETUP_REQUIRED"
+        missing_setup: tuple[str, ...] = ()
         if command.fund_symbol is not None:
 
-            def add_enhanced_dca() -> tuple[str, int, str, str, bool]:
+            def add_enhanced_dca() -> tuple[
+                str,
+                int,
+                str,
+                str,
+                str,
+                tuple[str, ...],
+            ]:
                 metadata_reader = getattr(market_data_provider, "get_fund_type", None)
                 if not callable(metadata_reader):
-                    return "missing_metadata", 0, "", "", False
+                    return "missing_metadata", 0, "", "", "SETUP_REQUIRED", ()
                 try:
                     current_fund_type = str(metadata_reader(command.fund_symbol))
                 except MarketDataProviderError as exc:
-                    return "metadata_error", 0, "", str(exc), False
+                    return "metadata_error", 0, "", str(exc), "SETUP_REQUIRED", ()
                 if "QDII" in current_fund_type.upper() or "海外" in current_fund_type:
-                    return "foreign_fund", 0, current_fund_type, "", False
+                    return (
+                        "foreign_fund",
+                        0,
+                        current_fund_type,
+                        "",
+                        "SETUP_REQUIRED",
+                        (),
+                    )
                 with open_connection(sqlite_path) as connection:
                     initialize_database(connection)
                     current_rule_id = add_enhanced_dca_rule(
@@ -2067,16 +2207,16 @@ def build_command_handlers(
                         connection,
                         command.fund_symbol,
                     )
-                    current_position = get_position_snapshot(
-                        connection,
-                        command.fund_symbol,
+                    current_readiness, current_missing = derive_plan_readiness(
+                        connection, command.fund_symbol
                     )
                 return (
                     "ok",
                     current_rule_id,
                     current_fund_type,
                     str(current_settings["subscription_cutoff"]),
-                    current_position is not None,
+                    current_readiness,
+                    current_missing,
                 )
 
             try:
@@ -2085,7 +2225,8 @@ def build_command_handlers(
                     rule_id,
                     fund_type,
                     settings_cutoff,
-                    position_ready,
+                    position_readiness,
+                    missing_setup,
                 ) = await run_serialized(work_lock, add_enhanced_dca)
             except sqlite3.IntegrityError as exc:
                 await _reply_text(update, str(exc))
@@ -2150,10 +2291,20 @@ def build_command_handlers(
                     f"Shared subscription fee: {fee}",
                     f"Holiday policy: {command.holiday_policy}",
                     f"Subscription cutoff: {settings_cutoff}",
-                    "Position readiness: "
-                    + ("READY" if position_ready else "SETUP_REQUIRED"),
-                    "Remember: run /sync_position before automatic estimates "
-                    "can apply.",
+                    f"Position readiness: {position_readiness}",
+                    *(
+                        (f"Missing setup: {', '.join(missing_setup)}",)
+                        if missing_setup
+                        else ()
+                    ),
+                    *(
+                        ("Run /sync_position before automatic estimates can apply.",)
+                        if any(
+                            item in {"position snapshot", "position sync required"}
+                            for item in missing_setup
+                        )
+                        else ()
+                    ),
                 )
             )
         await _reply_text(update, response)
@@ -2354,10 +2505,24 @@ def build_command_handlers(
         manual_add_drafts[token] = draft
         return token, draft
 
-    def manual_add_confirmation_markup(token: str, readiness: str) -> Any:
+    def manual_add_confirmation_markup(
+        token: str,
+        readiness: str,
+        *,
+        historical: bool = False,
+    ) -> Any:
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-        if readiness == "READY":
+        if historical:
+            rows = [
+                [
+                    InlineKeyboardButton(
+                        "记录历史档位，稍后同步持仓",
+                        callback_data=f"drawdown_add_confirm:{token}:sync",
+                    )
+                ]
+            ]
+        elif readiness == "READY":
             rows = [
                 [
                     InlineKeyboardButton(
@@ -2399,7 +2564,11 @@ def build_command_handlers(
             return
         try:
             command = parse_mark_added_args(getattr(context, "args", ()))
-            action_date = _clock_now(clock).astimezone(cn_market_timezone).date()
+            today = _clock_now(clock).astimezone(cn_market_timezone).date()
+            action_date = command.action_date or today
+            if action_date > today:
+                raise CommandParseError("action_date must not be in the future")
+            historical = action_date < today
             with open_connection(sqlite_path) as connection:
                 initialize_database(connection)
                 selection = load_manual_add_selection(
@@ -2407,6 +2576,7 @@ def build_command_handlers(
                     plan_id=command.plan_id,
                     action_date=action_date,
                     tier_keys=command.tier_keys,
+                    historical=historical,
                 )
         except (CommandParseError, ValueError) as exc:
             await _reply_text(update, str(exc))
@@ -2426,7 +2596,11 @@ def build_command_handlers(
         await _reply_text(
             update,
             format_manual_add_confirmation(selection),
-            reply_markup=manual_add_confirmation_markup(token, selection.readiness),
+            reply_markup=manual_add_confirmation_markup(
+                token,
+                selection.readiness,
+                historical=selection.historical,
+            ),
         )
 
     async def manual_add_event_callback(
@@ -2487,7 +2661,11 @@ def build_command_handlers(
         await _edit_message_text(
             query,
             format_manual_add_confirmation(selection),
-            reply_markup=manual_add_confirmation_markup(token, selection.readiness),
+            reply_markup=manual_add_confirmation_markup(
+                token,
+                selection.readiness,
+                historical=selection.historical,
+            ),
         )
 
     async def defer_drawdown_event(
@@ -2852,8 +3030,15 @@ def build_command_handlers(
         if draft.completed_message is not None:
             await _edit_message_text(query, draft.completed_message)
             return
+        if draft.selection.historical and create_estimate:
+            await _edit_message_text(
+                query,
+                "Historical additions cannot create position estimates. "
+                "Rerun /mark_added and choose the historical recording action.",
+            )
+            return
         now = _clock_now(clock).astimezone(cn_market_timezone)
-        if now.date() != draft.selection.market_date:
+        if not draft.selection.historical and now.date() != draft.selection.market_date:
             await _edit_message_text(
                 query,
                 "This reminder expired after its market date. Use /sync_position "
@@ -2881,6 +3066,11 @@ def build_command_handlers(
                     fund_symbol=draft.selection.fund_symbol,
                     tiers=draft.selection.tiers,
                     action_at=now,
+                    action_date_override=(
+                        draft.selection.market_date
+                        if draft.selection.historical
+                        else None
+                    ),
                     create_estimate=create_estimate,
                     cutoff_time=(draft.selection.cutoff if create_estimate else None),
                     cutoff_choice=cutoff_choice,
@@ -2918,6 +3108,46 @@ def build_command_handlers(
         draft.completed_message = message
         await _edit_message_text(query, message)
 
+    async def request_dca_skip_confirmation(
+        update: Update,
+        *,
+        rule_id: int,
+        due_date: str,
+    ) -> None:
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+        with open_connection(sqlite_path) as connection:
+            initialize_database(connection)
+            occurrence = get_scheduled_dca_occurrence(connection, rule_id, due_date)
+        if occurrence is None or str(occurrence["status"]) != "pending":
+            status = "not_found" if occurrence is None else str(occurrence["status"])
+            await _reply_text(update, _dca_skip_response(status, rule_id, due_date))
+            return
+        await _reply_text(
+            update,
+            _format_dca_skip_confirmation(occurrence),
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "Confirm failed deduction",
+                            callback_data=(
+                                f"dca_skip_confirm:{rule_id}:{due_date}:apply"
+                            ),
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "Cancel",
+                            callback_data=(
+                                f"dca_skip_confirm:{rule_id}:{due_date}:cancel"
+                            ),
+                        )
+                    ],
+                ]
+            ),
+        )
+
     async def dca_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if await reject_if_unauthorized(update, allowed_user_ids):
             return
@@ -2931,14 +3161,11 @@ def build_command_handlers(
         except ValueError:
             await _reply_text(update, "rule_id must be an integer and date YYYY-MM-DD")
             return
-        with open_connection(sqlite_path) as connection:
-            initialize_database(connection)
-            status = skip_scheduled_dca_occurrence(
-                connection,
-                rule_id=rule_id,
-                due_date=due_date,
-            )
-        await _reply_text(update, _dca_skip_response(status, rule_id, due_date))
+        await request_dca_skip_confirmation(
+            update,
+            rule_id=rule_id,
+            due_date=due_date,
+        )
 
     async def dca_skip_callback(
         update: Update,
@@ -2958,6 +3185,35 @@ def build_command_handlers(
         except (TypeError, ValueError):
             await _edit_message_text(query, "Invalid DCA skip action.")
             return
+        await request_dca_skip_confirmation(
+            update,
+            rule_id=rule_id,
+            due_date=due_date,
+        )
+
+    async def dca_skip_confirm_callback(
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        del context
+        query = getattr(update, "callback_query", None)
+        if query is None:
+            return
+        await query.answer()
+        if await reject_if_unauthorized(update, allowed_user_ids):
+            return
+        try:
+            _prefix, raw_rule_id, raw_due_date, action = str(query.data).split(":", 3)
+            rule_id = int(raw_rule_id)
+            due_date = date.fromisoformat(raw_due_date).isoformat()
+            if action not in {"apply", "cancel"}:
+                raise ValueError
+        except (TypeError, ValueError):
+            await _edit_message_text(query, "Invalid DCA skip action.")
+            return
+        if action == "cancel":
+            await _edit_message_text(query, "DCA skip cancelled. Nothing was changed.")
+            return
         with open_connection(sqlite_path) as connection:
             initialize_database(connection)
             status = skip_scheduled_dca_occurrence(
@@ -2965,11 +3221,7 @@ def build_command_handlers(
                 rule_id=rule_id,
                 due_date=due_date,
             )
-        await _edit_message_text(
-            query,
-            _dca_skip_response(status, rule_id, due_date),
-            reply_markup=_remaining_callback_markup(query, str(query.data)),
-        )
+        await _edit_message_text(query, _dca_skip_response(status, rule_id, due_date))
 
     async def manual_add_confirm_callback(
         update: Update,
@@ -3375,8 +3627,9 @@ def build_command_handlers(
         if choice == "none":
             await _edit_message_text(
                 query,
-                "Recorded: no position update. Nothing was changed and no trade "
-                "was placed.",
+                "No position action was recorded. The reached threshold was already "
+                "recorded when this reminder was created and will not repeat in the "
+                "current position cycle. No trade was placed.",
             )
             return
         if choice != "close":
@@ -3645,36 +3898,96 @@ def build_command_handlers(
 
         with open_connection(sqlite_path) as connection:
             initialize_database(connection)
-            rule_identity = next(
-                (
-                    (
-                        str(row["type"]),
-                        str(row["asset_type"]),
-                        "auto" if is_auto_cost_profit_rule(row) else None,
-                    )
-                    for row in db_list_rules(connection)
-                    if int(row["id"]) == rule_id
-                ),
+            rule = next(
+                (row for row in db_list_rules(connection) if int(row["id"]) == rule_id),
                 None,
             )
-            removed = delete_rule(connection, rule_id)
-
-        if removed and rule_identity == ("drawdown_plan", "cn_etf", None):
-            await _reply_text(update, f"Disabled drawdown plan id={rule_id}")
-        elif removed and rule_identity == (DCA_RULE_TYPE, "cn_open_fund", None):
-            await _reply_text(update, f"Disabled fixed DCA rule id={rule_id}")
-        elif removed and rule_identity == (
-            PROFIT_RULE_TYPE,
-            "cn_open_fund",
-            "auto",
-        ):
-            await _reply_text(
-                update, f"Disabled auto-cost Price-Gain rule id={rule_id}"
-            )
-        elif removed:
-            await _reply_text(update, f"Deleted rule id={rule_id}")
-        else:
+        if rule is None:
             await _reply_text(update, f"Rule id={rule_id} was not found")
+            return
+        if not bool(rule["enabled"]):
+            await _reply_text(update, f"Rule id={rule_id} is already disabled.")
+            return
+
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+        action = (
+            "soft-disable"
+            if rule_removal_action(rule) == "disable"
+            else "permanently delete"
+        )
+        await _reply_text(
+            update,
+            "\n".join(
+                (
+                    "Confirm rule removal",
+                    "",
+                    f"Rule: {rule['id']} / {rule['name']}",
+                    f"Type: {rule['type']}",
+                    f"Symbol: {rule['symbol']}",
+                    f"Action: {action}",
+                    "",
+                    "No reminder state will change until you confirm.",
+                )
+            ),
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "Confirm removal",
+                            callback_data=f"rule_delete:{rule_id}:apply",
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "Cancel",
+                            callback_data=f"rule_delete:{rule_id}:cancel",
+                        )
+                    ],
+                ]
+            ),
+        )
+
+    async def delete_rule_callback(
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        del context
+        query = getattr(update, "callback_query", None)
+        if query is None:
+            return
+        await query.answer()
+        if await reject_if_unauthorized(update, allowed_user_ids):
+            return
+        try:
+            _prefix, raw_rule_id, action = str(query.data).split(":", 2)
+            rule_id = int(raw_rule_id)
+            if action not in {"apply", "cancel"}:
+                raise ValueError
+        except (TypeError, ValueError):
+            await _edit_message_text(query, "Invalid rule removal action.")
+            return
+        if action == "cancel":
+            await _edit_message_text(query, "Rule removal cancelled. Nothing changed.")
+            return
+        with open_connection(sqlite_path) as connection:
+            initialize_database(connection)
+            rule = next(
+                (row for row in db_list_rules(connection) if int(row["id"]) == rule_id),
+                None,
+            )
+            if rule is None:
+                result = f"Rule id={rule_id} was not found"
+            elif not bool(rule["enabled"]):
+                result = f"Rule id={rule_id} is already disabled."
+            else:
+                removed = delete_rule(connection, rule_id)
+                result = (
+                    _rule_removal_result(rule)
+                    if removed
+                    else f"Rule id={rule_id} was not found"
+                )
+        await _edit_message_text(query, result)
 
     async def check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if await reject_if_unauthorized(update, allowed_user_ids):
@@ -3866,6 +4179,17 @@ def build_command_handlers(
             pattern=r"^position_sync:",
         ),
         CallbackQueryHandler(dca_skip_callback, pattern=r"^dca_skip:"),
+        CallbackQueryHandler(
+            dca_skip_confirm_callback,
+            pattern=(
+                r"^dca_skip_confirm:[0-9]+:[0-9]{4}-[0-9]{2}-[0-9]{2}:"
+                r"(?:apply|cancel)$"
+            ),
+        ),
+        CallbackQueryHandler(
+            delete_rule_callback,
+            pattern=r"^rule_delete:[0-9]+:(?:apply|cancel)$",
+        ),
         CallbackQueryHandler(
             position_profit_setup_callback,
             pattern=r"^profit_setup:[0-9]{6}$",

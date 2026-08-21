@@ -29,14 +29,14 @@ SQLite 会自动清理已终结历史（基准保留 400 天），但保留活�
 - `/add_drawdown <asset_type> <symbol> <name> <lookback_days> <thresholds>`
 - `/add_profit <asset_type> <symbol> <name> <cost|auto> <thresholds>`
 - `/add_dca <name> <weekday> <amount>`
-- `/add_dca <fund_symbol> <name> <weekday> <gross_amount> <fee> [holiday:next|holiday:skip]`
+- `/add_dca <fund_symbol> <name> <weekday> <gross_amount> <rate:<percent>%|fixed:<RMB>> [holiday:next|holiday:skip]`
 - `/set_dca_amount <rule_id> <new_amount>`
 - `/dca_skip <rule_id> <due_date>`
 - `/set_fund_fee <fund_symbol> <rate:<percent>%|fixed:<RMB>>`
 - `/set_fund_cutoff <fund_symbol> <HH:MM>`
 - `/sync_position <fund_symbol> <units> <average_unit_cost>`
 - `/add_drawdown_plan <reference_etf> <feeder_fund> <name> <tiers> [lookback:<days>]`
-- `/mark_added <plan_id> <tier_percentages>`
+- `/mark_added <plan_id> <tier_percentages> [YYYY-MM-DD]`
 - `/plans [refresh]`
 - `/list`
 - `/del <id>`
@@ -100,7 +100,8 @@ AKShare 的新浪交易日历取得官方开市状态，节假日会跳过；日
 ```
 
 Bot 假设配置的固定扣款会执行，但无法向销售平台核实。发现差异时必须重新
-运行 `/sync_position`。创建增强规则时会进行一次单基金类型检查；QDII、
+运行 `/sync_position`。命令和按钮都会先显示该期详情，确认后才修改状态。
+创建增强规则时会进行一次单基金类型检查；QDII、
 海外基金或无法确认国内估值日历的基金不会创建规则。该检查不会使用东方财富
 全量基金列表。
 
@@ -199,6 +200,15 @@ occurrence 和手动加仓估算；历史快照不会重算。因为它是基金
 准确基金净值；截止时间后会询问实际申购发生在截止前还是截止后。配置完整且
 金额相符时，准确日期净值发布后会更新“估算”持仓；金额不同或配置不完整时，
 只记录档位，之后必须 `/sync_position`。
+
+如果过后才发现忘记记录，请带上真实申购日期：
+
+```text
+/mark_added 1 15,20 2026-08-19
+```
+
+该日期必须对应当前回撤周期中的有效提醒。历史补记只修正档位状态和真实申购
+日期，不猜测历史净值、份额或成本；平台结算后必须运行 `/sync_position`。
 
 每天 `08:30` 的净值任务在自然日运行，因为交易日净值可能延迟发布。待处理估算
 会请求准确日期净值；存在正持仓的已启用 `auto` 涨幅规则也会使用最近完成交易日

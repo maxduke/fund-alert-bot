@@ -112,19 +112,19 @@ pending 档位可以在之后的交易日继续提醒。
 提醒中的 Telegram 按钮有三个明确含义：
 
 ```text
-✅ 已加仓
+✅ 全部已加仓（多档提醒）/ ✅ 已加仓（单档提醒）
 ⏰ 今天不投，之后提醒
 ⏭ 本周期跳过
 ```
 
-“已加仓”会进入现有的全部或部分档位确认流程，只选择你实际提交的档位；“今天不投，
+“全部已加仓/已加仓”会进入现有的全部或部分档位确认流程，只选择你实际提交的档位；“今天不投，
 之后提醒”只暂停当天提醒，不记录加仓；“本周期跳过”会先确认，并允许跳过全部或部分
 档位。pending 档位在后续交易日仍可能提醒，直到你确认已加仓或跳过本周期。
 
 也可以执行：
 
 ```text
-/mark_added <plan_id> <tier_percentages>
+/mark_added <plan_id> <tier_percentages> [YYYY-MM-DD]
 ```
 
 例如：
@@ -135,6 +135,15 @@ pending 档位可以在之后的交易日继续提醒。
 
 只选择你实际提交的档位。Bot 按计划中这些档位的配置金额记录，不会下单，也不
 会验证销售平台是否接受了申购。
+
+如果过后才补记，必须带上真实申购日期，例如：
+
+```text
+/mark_added 1 15,20 2026-08-19
+```
+
+该日期必须对应当前回撤周期中的有效提醒。历史补记只记录档位状态和真实申购
+日期，不反推历史净值、份额或成本；平台结算后必须运行 `/sync_position`。
 
 截止时间前提交时，Bot 等待同一市场日期的准确联接基金净值。截止时间后，Bot
 会询问申购实际属于截止前还是截止后。金额与配置一致且设置完整时，准确净值发布
@@ -185,7 +194,7 @@ MA 字段显示不可用，但只要回撤数据足够，回撤规则仍可正�
 ### 需要估算联接基金份额
 
 ```text
-/add_dca <fund_symbol> <name> <weekday> <gross_amount> <fee> [holiday:next|holiday:skip]
+/add_dca <fund_symbol> <name> <weekday> <gross_amount> <rate:<percent>%|fixed:<RMB>> [holiday:next|holiday:skip]
 ```
 
 例如：
@@ -238,6 +247,7 @@ Bot 假设配置的固定扣款会执行，但无法查询销售平台。如果�
 ```
 
 同一规则和到期日只有一个持久化 occurrence。失败标记会阻止该笔计入持仓估算。
+命令和提醒按钮都会先显示该期规则、基金、日期和金额，确认后才修改状态。
 
 同一天到期的多条增强固定定投会在 Telegram、Bark、ntfy 和 webhook
 合并为一条摘要。`holiday:skip` 项会显示，但不计入合计。数据库仍按
@@ -331,6 +341,10 @@ Bot 会在启动和每日净值任务后自动清理已终结的 SQLite 历史�
 仍在使用的规则行情窗口、活跃周期高点、每只基金最新净值、待处理业务和有效去重
 状态不受该期限影响，因此数据库增长有界，同时不会破坏恢复与去重。
 
+`/del <id>` 会先显示规则身份以及将执行“停用”还是“永久删除”，确认前不会
+修改状态。带周期或待结算状态的规则只停用后续检查并保留历史；旧式无状态规则
+沿用永久删除。
+
 ## 常用命令速查
 
 ```text
@@ -339,14 +353,14 @@ Bot 会在启动和每日净值任务后自动清理已终结的 SQLite 历史�
 /add_drawdown <asset_type> <symbol> <name> <lookback_days> <thresholds>
 /add_profit <asset_type> <symbol> <name> <cost|auto> <thresholds>
 /add_dca <name> <weekday> <amount>
-/add_dca <fund_symbol> <name> <weekday> <gross_amount> <fee> [holiday:next|holiday:skip]
+/add_dca <fund_symbol> <name> <weekday> <gross_amount> <rate:<percent>%|fixed:<RMB>> [holiday:next|holiday:skip]
 /set_dca_amount <rule_id> <new_amount>
 /dca_skip <rule_id> <due_date>
 /set_fund_fee <fund_symbol> <rate:<percent>%|fixed:<RMB>>
 /set_fund_cutoff <fund_symbol> <HH:MM>
 /sync_position <fund_symbol> <units> <average_unit_cost>
 /add_drawdown_plan <reference_etf> <feeder_fund> <name> <tiers> [lookback:<days>]
-/mark_added <plan_id> <tier_percentages>
+/mark_added <plan_id> <tier_percentages> [YYYY-MM-DD]
 /plans
 /list
 /del <id>

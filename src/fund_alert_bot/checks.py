@@ -1159,8 +1159,14 @@ def derive_plan_readiness(
             ("position snapshot", position is None),
             (
                 "position sync required",
-                settings is not None
-                and settings["position_sync_required_since"] is not None,
+                (
+                    settings is not None
+                    and settings["position_sync_required_since"] is not None
+                )
+                or (
+                    position is not None
+                    and position["position_sync_required_since"] is not None
+                ),
             ),
         )
         if absent
@@ -1173,8 +1179,9 @@ def _drawdown_plan_action_rows(
     event_id: int,
     tiers: tuple[DrawdownTier, ...],
 ) -> tuple[tuple[tuple[str, str], ...], ...]:
+    all_label = "✅ 全部已加仓" if len(tiers) > 1 else "✅ 已加仓"
     rows: list[tuple[tuple[str, str], ...]] = [
-        (("✅ 已加仓", f"drawdown_add:{rule_id}:{event_id}:all"),)
+        ((all_label, f"drawdown_add:{rule_id}:{event_id}:all"),)
     ]
     if len(tiers) > 1:
         rows.extend(
@@ -1897,9 +1904,14 @@ def position_profit_action_rows(
     event_id: int,
 ) -> tuple[tuple[tuple[str, str], ...], ...]:
     return (
-        (("✅ Partially redeemed", f"profit_action:{event_id}:partial"),),
-        (("✅ Fully closed", f"profit_action:{event_id}:close"),),
-        (("⏭ No action", f"profit_action:{event_id}:none"),),
+        (
+            (
+                "↪️ Partial redemption — sync position",
+                f"profit_action:{event_id}:partial",
+            ),
+        ),
+        (("✅ Confirm fully closed", f"profit_action:{event_id}:close"),),
+        (("⏭ No position action", f"profit_action:{event_id}:none"),),
     )
 
 

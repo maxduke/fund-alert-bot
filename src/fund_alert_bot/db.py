@@ -1530,8 +1530,20 @@ def is_auto_cost_profit_rule(rule: Any) -> bool:
     return isinstance(params, dict) and params.get("cost") == "auto"
 
 
+def rule_removal_action(rule: Any) -> str:
+    """Return the persistence-safe removal action for one rule."""
+
+    if (
+        rule["type"] == "drawdown_plan"
+        or (rule["type"] == "dca_reminder" and rule["asset_type"] == "cn_open_fund")
+        or is_auto_cost_profit_rule(rule)
+    ):
+        return "disable"
+    return "delete"
+
+
 def delete_rule(connection: sqlite3.Connection, rule_id: int) -> bool:
-    """Delete a legacy rule or disable a stateful drawdown plan."""
+    """Delete a legacy rule or disable a stateful rule."""
 
     row = connection.execute(
         "SELECT type, asset_type, params_json FROM rules WHERE id = ?",
@@ -1540,11 +1552,7 @@ def delete_rule(connection: sqlite3.Connection, rule_id: int) -> bool:
     if row is None:
         return False
 
-    if (
-        row["type"] == "drawdown_plan"
-        or (row["type"] == "dca_reminder" and row["asset_type"] == "cn_open_fund")
-        or is_auto_cost_profit_rule(row)
-    ):
+    if rule_removal_action(row) == "disable":
         connection.execute(
             "UPDATE rules SET enabled = 0, updated_at = ? WHERE id = ?",
             (_utc_now_text(), rule_id),
@@ -2139,6 +2147,7 @@ def record_manual_addition(
     tiers: Sequence[Any],
     action_at: datetime,
     create_estimate: bool,
+    action_date_override: date | None = None,
     cutoff_time: str | None = None,
     cutoff_choice: str | None = None,
     effective_date: str | None = None,
@@ -2147,6 +2156,8 @@ def record_manual_addition(
 
     if not tiers:
         raise ValueError("At least one drawdown tier must be selected.")
+    if action_date_override is not None and create_estimate:
+        raise ValueError("Historical additions cannot create position estimates.")
     if create_estimate and (
         cutoff_time is None
         or cutoff_choice not in {"before", "after"}
@@ -2155,7 +2166,9 @@ def record_manual_addition(
         raise ValueError("A pending estimate requires a cutoff time, choice, and date.")
 
     action_text = _timestamp_text(action_at)
-    action_date = action_at.date().isoformat()
+    action_date = (
+        action_at.date() if action_date_override is None else action_date_override
+    ).isoformat()
     now = _utc_now_text()
     connection.execute("BEGIN IMMEDIATE")
     try:

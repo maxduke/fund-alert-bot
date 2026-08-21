@@ -32,14 +32,14 @@ Implemented Telegram commands:
 - `/add_drawdown <asset_type> <symbol> <name> <lookback_days> <thresholds>`
 - `/add_profit <asset_type> <symbol> <name> <cost|auto> <thresholds>`
 - `/add_dca <name> <weekday> <amount>`
-- `/add_dca <fund_symbol> <name> <weekday> <gross_amount> <fee> [holiday:next|holiday:skip]`
+- `/add_dca <fund_symbol> <name> <weekday> <gross_amount> <rate:<percent>%|fixed:<RMB>> [holiday:next|holiday:skip]`
 - `/set_dca_amount <rule_id> <new_amount>`
 - `/dca_skip <rule_id> <due_date>`
 - `/set_fund_fee <fund_symbol> <rate:<percent>%|fixed:<RMB>>`
 - `/set_fund_cutoff <fund_symbol> <HH:MM>`
 - `/sync_position <fund_symbol> <units> <average_unit_cost>`
 - `/add_drawdown_plan <reference_etf> <feeder_fund> <name> <tiers> [lookback:<days>]`
-- `/mark_added <plan_id> <tier_percentages>`
+- `/mark_added <plan_id> <tier_percentages> [YYYY-MM-DD]`
 - `/plans [refresh]`
 - `/list`
 - `/del <id>`
@@ -89,7 +89,8 @@ estimate. `holiday:next` defers a holiday occurrence to the next confirmed open
 day; `holiday:skip` records it as skipped. If the platform does not execute a
 scheduled deduction, tap the Telegram failure button or run
 `/dca_skip <rule_id> <YYYY-MM-DD>` before NAV processing. The bot assumes a
-configured deduction occurred, but cannot verify the platform. Check `/plans`
+configured deduction occurred, but cannot verify the platform. Both paths show
+the occurrence details and require confirmation before changing its state. Check `/plans`
 and periodically run `/sync_position` after any mismatch. No order is placed.
 When several enhanced fixed-DCA rules are due on the same date, their delivery
 is combined into one notification. Each occurrence, estimate, and failure
@@ -207,6 +208,17 @@ estimated position once the exact dated NAV becomes available. A different
 amount or incomplete fund setup records the tiers but requires a later
 `/sync_position`. These actions record your statement only: the bot does not
 place or verify an order.
+
+If you forgot to record an addition on its market date, add the actual date:
+
+```text
+/mark_added 1 15,20 2026-08-19
+```
+
+The date must match an eligible reminder in the active drawdown cycle. A
+historical correction records the tier state and actual subscription date but
+never guesses historical NAV, units, or cost; run `/sync_position` after the
+platform settles.
 
 The daily `08:30` NAV job runs on calendar days because a trading day's fund NAV
 may be published later. It requests exact-dated NAV while an estimate is pending,
