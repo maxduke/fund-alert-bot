@@ -1,12 +1,13 @@
-# Lock the peak for each drawdown cycle
+# Keep a stable anchor for each drawdown cycle
 
 The first scheduled plan evaluation with valid confirmed history initializes a
 Drawdown Cycle from the highest Reference ETF `qfq` close in the configured
-calendar lookback, choosing the most recent date on an equal high. That peak
-remains
-the drawdown reference until a later confirmed close exceeds it, or first
-returns to it after an intervening below-peak close. Repeated equal closes at the
-peak without an intervening decline do not create empty cycles; lookback expiry
-never lowers the peak or re-arms tiers, and time-varying forward adjustment is
-handled by identifying the cycle by database ID and peak date while refreshing
-that date's `qfq` value.
+calendar lookback, choosing the most recent date on an equal high. Its date is
+the immutable cycle anchor. The current peak continues to follow genuine
+confirmed closing highs and remains the drawdown reference.
+
+A new cycle begins only when a future confirmed genuine new high reaches the
+plan's configured margin above the cycle anchor. Equal highs never re-arm a
+cycle. Lookback expiry does not lower either reference or re-arm tiers.
+Time-varying forward adjustment is handled by storing the anchor and current
+peak dates and refreshing both dates' `qfq` values before evaluation.

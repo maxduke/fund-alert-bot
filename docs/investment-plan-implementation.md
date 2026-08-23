@@ -53,7 +53,7 @@ identity links the reminder to the actual position and later supplies NAV for
 position and Price-Gain calculations. The command is:
 
 ```text
-/add_drawdown_plan <reference_etf_symbol> <feeder_fund_symbol> <name> <tiers> [lookback:<calendar_days>]
+/add_drawdown_plan <reference_etf_symbol> <feeder_fund_symbol> <name> <tiers> [lookback:<calendar_days>] [rearm:<percent>]
 ```
 
 Do not accept asset-type arguments: persist the rule's existing asset type and
@@ -71,6 +71,7 @@ Store:
 {
   "investment_fund_symbol": "<six-digit fund code>",
   "lookback_days": 365,
+  "rearm_margin": 0.02,
   "tiers": [
     {"drawdown": 0.15, "amount": 5000},
     {"drawdown": 0.20, "amount": 10000}
@@ -101,10 +102,13 @@ finite values remain floats. No new money or decimal abstraction is needed for
 reminder-only RMB amounts.
 
 Parse tiers from the required comma-separated `<percent>:<amount>` token. Parse
-only the optional trailing `lookback:<positive integer>` token; reject unknown,
-duplicate, or misplaced options. Apply `lookback_days=365`, `sma_window=250`,
-and `sma_slope_window=20` when absent rather than exposing SMA arguments in the
-Telegram command.
+optional `lookback:<positive integer>` and `rearm:<percent>` tokens in either
+order, at most once each; reject unknown or duplicate options. `rearm:4` and
+`rearm:4%` both store `0.04`. Apply `lookback_days=365`, `rearm_margin=0.02`,
+`sma_window=250`, and `sma_slope_window=20` when absent rather than exposing SMA
+arguments in the Telegram command. `/set_plan_rearm <plan_id> <percent>` updates
+only the enabled drawdown plan's configuration and accepts the same percentage
+syntax; it preserves all cycle, tier, notification, addition, and position state.
 
 Display `sum(tier.amount)` as the maximum one-cycle capital commitment in every
 creation preview. This is arithmetic validation of the user's plan, not an
@@ -204,7 +208,7 @@ range is the maximum of:
 
 - `lookback_days`;
 - twice `sma_window + sma_slope_window` calendar days;
-- the distance to the active cycle's locked peak date;
+- the distance to both active cycle anchor and current-peak dates;
 - the history needed to examine closes since the last persisted cycle
   evaluation.
 
@@ -228,13 +232,15 @@ Store:
 
 - primary key;
 - `rule_id`;
-- locked peak date;
-- initial peak price for audit and latest refreshed `qfq` peak price;
+- immutable `initial_peak_date` allocation anchor;
+- refreshed `initial_peak_price` for that anchor's current `qfq` basis;
+- moving `peak_date` current confirmed closing high;
+- refreshed `peak_price` for that current high's `qfq` basis;
 - last evaluated closing date;
 - optional end date;
 - creation/update timestamps.
 
-Allow one active cycle per rule. Its database ID and locked peak date—not a
+Allow one active cycle per rule. Its database ID and immutable anchor date—not a
 time-varying forward-adjusted price string—identify its Tier Records.
 
 ### `drawdown_tier_records`
@@ -252,19 +258,21 @@ Store:
 Enforce one row per cycle and canonical tier key. The canonical string avoids
 using a binary float as the deduplication identity.
 
-On first evaluation, lock the most recent occurrence of the maximum valid `qfq`
-close in the configured calendar lookback. On later runs:
+On first evaluation, initialize both anchor and current peak from the most recent
+occurrence of the maximum valid `qfq` close in the configured calendar lookback.
+On later runs:
 
-- refresh the adjusted price for the locked peak date on the current `qfq`
-  basis without changing the cycle identity;
-- lookback expiry never changes the peak, cycle, or Tier Records;
-- a confirmed close above the refreshed peak starts a new cycle;
-- an equal close starts a new cycle only when at least one confirmed close since
-  the locked peak was below it, using an explicit float tolerance for equality;
-- repeated equal closes without an intervening decline do not create new cycles;
-- when recovering after downtime, scan closing history to find the latest cycle
-  boundary, but create close-confirmed tier records only from the latest closing
-  snapshot;
+- recover and refresh the QFQ prices for both `initial_peak_date` and `peak_date`;
+- lookback expiry never changes the anchor, current peak, cycle, or Tier Records;
+- scan only confirmed rows after `last_evaluated_date` for cycle decisions;
+- a genuine new confirmed high updates `peak_date` and `peak_price`;
+- only a future genuine new high at least `rearm_margin` above the immutable
+  anchor starts one new cycle; use the final high from a catch-up batch as the
+  new anchor and current peak;
+- an equal high never rearms, including after an intervening decline;
+- QFQ restatement and a changed margin never create a retroactive cycle;
+- when recovering after downtime, scan closing history to update current-peak
+  state, but create close-confirmed tier records only from newly processed rows;
 - never replay drawdowns that crossed and recovered entirely while offline.
 
 When one close crosses several untriggered tiers, insert every Tier Record and one
@@ -293,7 +301,8 @@ For every plan's `cn_etf` Reference ETF:
 1. Fetch confirmed `qfq` closing history through the plan-specific price basis,
    without inserting the realtime row.
 2. Initialize a missing Drawdown Cycle from that confirmed history, or refresh
-   the active cycle's locked peak value, then calculate drawdown, SMA, and slope.
+   the active cycle's anchor and current-peak values, then calculate drawdown,
+   SMA, and slope. Realtime evaluation cannot rearm or create a cycle.
    Cycle initialization alone inserts no Tier Record or alert event.
 3. Fetch a positive finite quote for the exact ETF symbol and require evidence
    of current-session trading.
@@ -724,8 +733,9 @@ dispatch is sufficient.
 
 Run one conservative SQLite prune at startup and after the daily NAV process.
 Keep at least 400 calendar days of terminal history. Bound market-price caches
-to enabled-rule windows plus a small calendar buffer, while preserving active
-cycle peaks. Keep the latest NAV per fund and any exact NAV dates still needed
+to enabled-rule windows plus a small calendar buffer, while preserving both
+dates of each active cycle's anchor and current peak. Keep the latest NAV per fund
+and any exact NAV dates still needed
 by pending work. Never prune pending estimates, unreconciled actions, active
 cycles, or deduplication keys that may still suppress a valid duplicate.
 
@@ -840,11 +850,15 @@ transaction ledger.
   unresolved pending tier may be reminded once per later market date.
 - A 365-day peak window uses deterministic inclusive endpoints: the latest
   confirmed date plus the preceding 364 calendar dates.
-- The peak date remains locked through the cycle; lookback expiry never lowers
-  it. An equal-price full recovery after a decline starts a new cycle, while
-  repeated equal closes with no intervening decline do not.
-- Reference ETF history is `qfq`; the peak value is refreshed on that basis so
-  a distribution does not create a false drawdown.
+- The allocation anchor date remains fixed while the current peak follows
+  confirmed genuine highs; lookback expiry never lowers either state.
+- A new cycle requires a future confirmed genuine high reaching the plan's
+  positive rearm margin above the anchor (default 2%); equal highs never rearm.
+- Reference ETF history is `qfq`; both anchor and current-peak values are
+  refreshed by date on that basis so a distribution does not create a false
+  drawdown or cycle.
+- Changing the margin is prospective and never reinterprets already persisted
+  cycle decisions.
 - The tested AKShare interface version is reproducible, and adapter tests pin the
   endpoint parameters and normalized contract.
 - Plan creation previews current reached tiers, while only the first successful

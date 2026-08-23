@@ -83,9 +83,9 @@ def test_prune_plan_history_keeps_active_peak_as_a_bounded_exception() -> None:
         connection.execute(
             """
             INSERT INTO drawdown_cycles (
-                rule_id, peak_date, initial_peak_price, peak_price,
+                rule_id, initial_peak_date, peak_date, initial_peak_price, peak_price,
                 last_evaluated_date, created_at, updated_at
-            ) VALUES (?, '2020-01-01', 1, 1, '2020-01-02', '2020', '2020')
+            ) VALUES (?, '2020-01-01', '2020-01-02', 1, 1, '2026-01-01', '2020', '2020')
             """,
             (rule_id,),
         )
@@ -104,7 +104,7 @@ def test_prune_plan_history_keeps_active_peak_as_a_bounded_exception() -> None:
                 rows=[
                     {
                         "date": row_date.isoformat(),
-                        "close": 0.5 if row_date == date(2020, 1, 2) else 1,
+                        "close": (0.5 if row_date == today - timedelta(days=25) else 1),
                         "source": "test",
                     }
                 ],
@@ -117,6 +117,7 @@ def test_prune_plan_history_keeps_active_peak_as_a_bounded_exception() -> None:
         ).fetchall()
         assert [row["date"] for row in rows] == [
             date(2020, 1, 1).isoformat(),
+            date(2020, 1, 2).isoformat(),
             (today - timedelta(days=24)).isoformat(),
             today.isoformat(),
         ]
@@ -144,9 +145,9 @@ def test_prune_fund_nav_preserves_latest_and_pending_effective_dates() -> None:
         connection.execute(
             """
             INSERT INTO drawdown_cycles (
-                rule_id, peak_date, initial_peak_price, peak_price,
+                rule_id, initial_peak_date, peak_date, initial_peak_price, peak_price,
                 last_evaluated_date, created_at, updated_at
-            ) VALUES (?, '2020-01-01', 1, 1, '2020-01-01',
+            ) VALUES (?, '2020-01-01', '2020-01-01', 1, 1, '2020-01-01',
                       '2020-01-01', '2020-01-01')
             """,
             (rule_id,),
@@ -225,9 +226,10 @@ def test_prune_protects_active_cycles_and_removes_terminal_old_cycles() -> None:
             connection.execute(
                 """
                 INSERT INTO drawdown_cycles (
-                    rule_id, peak_date, initial_peak_price, peak_price,
+                    rule_id, initial_peak_date, peak_date,
+                    initial_peak_price, peak_price,
                     last_evaluated_date, end_date, created_at, updated_at
-                ) VALUES (?, '2020-01-01', 1, 1, '2020-01-01', ?,
+                ) VALUES (?, '2020-01-01', '2020-01-01', 1, 1, '2020-01-01', ?,
                           '2020-01-01', '2020-01-01')
                 """,
                 (rule_id, end_date),

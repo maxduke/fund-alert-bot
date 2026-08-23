@@ -39,6 +39,7 @@ from fund_alert_bot.db import (
     record_alert_notification_result,
     record_manual_addition,
     snooze_drawdown_tiers_for_date,
+    update_drawdown_plan_rearm_margin,
     upsert_fund_fee,
     upsert_fund_nav,
     upsert_position_snapshot,
@@ -90,6 +91,8 @@ def test_market_tier_facts_can_persist_without_an_alert(tmp_path: Path) -> None:
             expected_active_cycle_id=None,
             expected_last_evaluated_date=None,
             start_new_cycle=True,
+            initial_peak_date="2024-01-01",
+            initial_peak_price=100,
             peak_date="2024-01-01",
             peak_price=100,
             evaluation_date="2024-01-02",
@@ -104,6 +107,51 @@ def test_market_tier_facts_can_persist_without_an_alert(tmp_path: Path) -> None:
     assert [row["tier_key"] for row in records] == ["0.15"]
     assert records[0]["alert_event_id"] is None
     assert event_count == 0
+
+
+def test_update_drawdown_plan_rearm_margin_preserves_cycle_state(
+    tmp_path: Path,
+) -> None:
+    sqlite_path = tmp_path / "bot.sqlite3"
+    rule_id = _add_plan(sqlite_path)
+
+    with open_connection(sqlite_path) as connection:
+        rule = list_rules(connection)[0]
+        evaluate_drawdown_plan_rule(
+            connection,
+            rule,
+            _history([100, 84]),
+            expected_date=date(2024, 1, 2),
+        )
+        state_tables = (
+            "drawdown_cycles",
+            "drawdown_tier_records",
+            "drawdown_tier_reminder_states",
+            "manual_add_actions",
+            "manual_add_estimates",
+            "position_snapshots",
+            "position_cycles",
+            "alert_events",
+            "scheduled_dca_occurrences",
+        )
+        state_before = {
+            table: [dict(row) for row in connection.execute(f"SELECT * FROM {table}")]
+            for table in state_tables
+        }
+        row, old_margin = update_drawdown_plan_rearm_margin(
+            connection,
+            rule_id=rule_id,
+            rearm_margin=0.04,
+        )
+        state_after = {
+            table: [dict(row) for row in connection.execute(f"SELECT * FROM {table}")]
+            for table in state_tables
+        }
+        params = json.loads(str(row["params_json"]))
+
+    assert old_margin == pytest.approx(0.02)
+    assert params["rearm_margin"] == pytest.approx(0.04)
+    assert state_after == state_before
 
 
 def test_prealert_add_is_upgraded_to_close_confirmed_fact(tmp_path: Path) -> None:
@@ -600,7 +648,7 @@ def test_read_plan_status_does_not_reuse_tiers_after_new_peak(tmp_path: Path) ->
         )
         result = read_drawdown_plan_statuses(
             connection,
-            FakePlanProvider(_history([100, 84, 101, 85.85])),
+            FakePlanProvider(_history([100, 84, 102, 86.7])),
             end_date=date(2024, 1, 4),
         )
 
@@ -673,7 +721,44 @@ def test_restart_preserves_tier_deduplication_and_allows_next_level(
     assert event_count == 2
 
 
-def test_new_peak_closes_old_cycle_and_rearms_tier(
+def test_subthreshold_new_high_updates_peak_without_rearming_tier(
+    tmp_path: Path,
+) -> None:
+    sqlite_path = tmp_path / "bot.sqlite3"
+    rule_id = _add_plan(sqlite_path)
+
+    with open_connection(sqlite_path) as connection:
+        rule = list_rules(connection)[0]
+        first = evaluate_drawdown_plan_rule(
+            connection,
+            rule,
+            _history([100, 84]),
+            expected_date=date(2024, 1, 2),
+        )
+        tiers_before = [
+            dict(row) for row in list_drawdown_tier_records(connection, first.cycle_id)
+        ]
+        second = evaluate_drawdown_plan_rule(
+            connection,
+            rule,
+            _history([100, 84, 101]),
+            expected_date=date(2024, 1, 3),
+        )
+        cycle = get_active_drawdown_cycle(connection, rule_id)
+        tiers_after = [
+            dict(row) for row in list_drawdown_tier_records(connection, first.cycle_id)
+        ]
+
+    assert cycle is not None
+    assert second.cycle_id == first.cycle_id == cycle["id"]
+    assert cycle["initial_peak_date"] == "2024-01-01"
+    assert cycle["initial_peak_price"] == 100
+    assert cycle["peak_date"] == "2024-01-03"
+    assert cycle["peak_price"] == 101
+    assert tiers_after == tiers_before
+
+
+def test_qualifying_new_peak_closes_old_cycle_and_rearms_tier(
     tmp_path: Path,
 ) -> None:
     sqlite_path = tmp_path / "bot.sqlite3"
@@ -690,11 +775,15 @@ def test_new_peak_closes_old_cycle_and_rearms_tier(
         second = evaluate_drawdown_plan_rule(
             connection,
             rule,
-            _history([100, 84, 101, 85.85]),
+            _history([100, 84, 102, 86.7]),
             expected_date=date(2024, 1, 4),
         )
         cycles = connection.execute(
-            "SELECT id, peak_date, end_date FROM drawdown_cycles WHERE rule_id = ?",
+            """
+            SELECT id, initial_peak_date, initial_peak_price,
+                   peak_date, peak_price, end_date
+            FROM drawdown_cycles WHERE rule_id = ?
+            """,
             (rule_id,),
         ).fetchall()
         second_tiers = list_drawdown_tier_records(connection, second.cycle_id)
@@ -704,6 +793,8 @@ def test_new_peak_closes_old_cycle_and_rearms_tier(
         ("2024-01-01", "2024-01-03"),
         ("2024-01-03", None),
     ]
+    assert cycles[1]["initial_peak_date"] == cycles[1]["peak_date"]
+    assert cycles[1]["initial_peak_price"] == cycles[1]["peak_price"] == 102
     assert [row["tier_key"] for row in second_tiers] == ["0.15"]
 
 
@@ -1174,6 +1265,8 @@ def test_cycle_tiers_and_event_roll_back_together_on_constraint_failure(
                 expected_active_cycle_id=None,
                 expected_last_evaluated_date=None,
                 start_new_cycle=True,
+                initial_peak_date="2024-01-01",
+                initial_peak_price=100,
                 peak_date="2024-01-01",
                 peak_price=100,
                 evaluation_date="2024-01-02",
@@ -1209,6 +1302,8 @@ def test_stale_cycle_version_cannot_regress_evaluation_date(tmp_path: Path) -> N
             expected_active_cycle_id=initial.cycle_id,
             expected_last_evaluated_date="2024-01-02",
             start_new_cycle=False,
+            initial_peak_date="2024-01-01",
+            initial_peak_price=100,
             peak_date="2024-01-01",
             peak_price=100,
             evaluation_date="2024-01-03",
@@ -1221,6 +1316,8 @@ def test_stale_cycle_version_cannot_regress_evaluation_date(tmp_path: Path) -> N
                 expected_active_cycle_id=initial.cycle_id,
                 expected_last_evaluated_date="2024-01-02",
                 start_new_cycle=False,
+                initial_peak_date="2024-01-01",
+                initial_peak_price=100,
                 peak_date="2024-01-01",
                 peak_price=100,
                 evaluation_date="2024-01-02",

@@ -135,6 +135,7 @@ def init_db(connection: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS drawdown_cycles (
             id INTEGER PRIMARY KEY,
             rule_id INTEGER NOT NULL REFERENCES rules(id),
+            initial_peak_date TEXT NOT NULL,
             peak_date TEXT NOT NULL,
             initial_peak_price REAL NOT NULL,
             peak_price REAL NOT NULL,
@@ -516,7 +517,7 @@ def _prune_market_daily_history(
                 key = (str(rule["symbol"]), str(rule["asset_type"]), "qfq")
                 active_cycles = connection.execute(
                     """
-                    SELECT peak_date
+                    SELECT initial_peak_date, peak_date
                     FROM drawdown_cycles
                     WHERE rule_id = ? AND end_date IS NULL
                     """,
@@ -540,9 +541,12 @@ def _prune_market_daily_history(
             for cycle in active_cycles:
                 # ponytail: keep the peak fact, not an unbounded active-cycle
                 # tail; the cycle row remains the durable business state.
-                peak_date = _parse_storage_date(cycle["peak_date"])
-                if peak_date is not None:
-                    extra_dates.add(peak_date)
+                for cycle_date in (
+                    _parse_storage_date(cycle["initial_peak_date"]),
+                    _parse_storage_date(cycle["peak_date"]),
+                ):
+                    if cycle_date is not None:
+                        extra_dates.add(cycle_date)
 
     if not windows:
         cursor = connection.execute("DELETE FROM market_daily_history")
@@ -1345,6 +1349,78 @@ def update_dca_rule_amount(
     if updated is None:
         raise RuntimeError("Updated DCA rule was not found.")
     return updated
+
+
+def update_drawdown_plan_rearm_margin(
+    connection: sqlite3.Connection,
+    *,
+    rule_id: int,
+    rearm_margin: float,
+) -> tuple[sqlite3.Row, float]:
+    """Update one enabled plan's margin without touching its state."""
+
+    if isinstance(rearm_margin, bool):
+        raise ValueError("Rearm margin must be a finite number between 0 and 1.")
+    try:
+        margin = float(rearm_margin)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "Rearm margin must be a finite number between 0 and 1."
+        ) from exc
+    if not math.isfinite(margin) or not 0 < margin < 1:
+        raise ValueError("Rearm margin must be a finite number between 0 and 1.")
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        row = connection.execute(
+            "SELECT * FROM rules WHERE id = ? AND type = 'drawdown_plan'",
+            (rule_id,),
+        ).fetchone()
+        if row is None or not bool(row["enabled"]):
+            raise sqlite3.IntegrityError("Enabled drawdown plan was not found.")
+        try:
+            params = json.loads(str(row["params_json"]))
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise sqlite3.IntegrityError(
+                "Drawdown plan parameters are invalid."
+            ) from exc
+        if not isinstance(params, dict):
+            raise sqlite3.IntegrityError("Drawdown plan parameters are invalid.")
+        try:
+            config = parse_drawdown_plan_config(
+                reference_symbol=str(row["symbol"]),
+                asset_type=str(row["asset_type"]),
+                params=params,
+            )
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise sqlite3.IntegrityError(
+                "Drawdown plan parameters are invalid."
+            ) from exc
+        old_margin = config.rearm_margin
+        params["rearm_margin"] = margin
+        try:
+            parse_drawdown_plan_config(
+                reference_symbol=str(row["symbol"]),
+                asset_type=str(row["asset_type"]),
+                params=params,
+            )
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise sqlite3.IntegrityError(
+                "Drawdown plan parameters are invalid."
+            ) from exc
+        connection.execute(
+            "UPDATE rules SET params_json = ?, updated_at = ? WHERE id = ?",
+            (_json_text(params), _utc_now_text(), rule_id),
+        )
+        updated = connection.execute(
+            "SELECT * FROM rules WHERE id = ?", (rule_id,)
+        ).fetchone()
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    if updated is None:
+        raise RuntimeError("Updated drawdown plan was not found.")
+    return updated, old_margin
 
 
 def add_position_profit_rule(
@@ -3806,8 +3882,9 @@ def get_active_drawdown_cycle(
         SELECT
             id,
             rule_id,
-            peak_date,
+            initial_peak_date,
             initial_peak_price,
+            peak_date,
             peak_price,
             saw_below_peak,
             last_evaluated_date,
@@ -4013,6 +4090,8 @@ def persist_drawdown_plan_evaluation(
     expected_active_cycle_id: int | None,
     expected_last_evaluated_date: str | None,
     start_new_cycle: bool,
+    initial_peak_date: str,
+    initial_peak_price: float,
     peak_date: str,
     peak_price: float,
     evaluation_date: str,
@@ -4071,6 +4150,7 @@ def persist_drawdown_plan_evaluation(
                 """
                 INSERT INTO drawdown_cycles (
                     rule_id,
+                    initial_peak_date,
                     peak_date,
                     initial_peak_price,
                     peak_price,
@@ -4079,12 +4159,13 @@ def persist_drawdown_plan_evaluation(
                     created_at,
                     updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     rule_id,
+                    initial_peak_date,
                     peak_date,
-                    peak_price,
+                    initial_peak_price,
                     peak_price,
                     int(saw_below_peak),
                     evaluation_date,
@@ -4099,11 +4180,19 @@ def persist_drawdown_plan_evaluation(
             connection.execute(
                 """
                 UPDATE drawdown_cycles
-                SET peak_price = ?, saw_below_peak = ?,
-                    last_evaluated_date = ?, updated_at = ?
+                SET initial_peak_price = ?, peak_date = ?, peak_price = ?,
+                    saw_below_peak = ?, last_evaluated_date = ?, updated_at = ?
                 WHERE id = ? AND end_date IS NULL
                 """,
-                (peak_price, int(saw_below_peak), evaluation_date, now, active_id),
+                (
+                    initial_peak_price,
+                    peak_date,
+                    peak_price,
+                    int(saw_below_peak),
+                    evaluation_date,
+                    now,
+                    active_id,
+                ),
             )
             cycle_id = active_id
 
@@ -4794,6 +4883,14 @@ def _ensure_drawdown_cycle_columns(connection: sqlite3.Connection) -> None:
             "ALTER TABLE drawdown_cycles ADD COLUMN saw_below_peak INTEGER "
             "NOT NULL DEFAULT 0 CHECK (saw_below_peak IN (0, 1))"
         )
+    if "initial_peak_date" not in columns:
+        connection.execute(
+            "ALTER TABLE drawdown_cycles ADD COLUMN initial_peak_date TEXT"
+        )
+    connection.execute(
+        "UPDATE drawdown_cycles SET initial_peak_date = peak_date "
+        "WHERE initial_peak_date IS NULL"
+    )
 
 
 def _ensure_standard_notification_recovery_migration(

@@ -67,6 +67,67 @@ def test_init_db_creates_storage_tables(tmp_path: Path) -> None:
     }.issubset(table_names)
 
 
+def test_init_migrates_drawdown_cycle_initial_peak_date_idempotently() -> None:
+    connection = connect(":memory:")
+    try:
+        connection.executescript(
+            """
+            CREATE TABLE rules (
+                id INTEGER PRIMARY KEY,
+                type TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                name TEXT NOT NULL,
+                asset_type TEXT NOT NULL,
+                params_json TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE drawdown_cycles (
+                id INTEGER PRIMARY KEY,
+                rule_id INTEGER NOT NULL REFERENCES rules(id),
+                peak_date TEXT NOT NULL,
+                initial_peak_price REAL NOT NULL,
+                peak_price REAL NOT NULL,
+                last_evaluated_date TEXT NOT NULL,
+                end_date TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            INSERT INTO rules VALUES
+                (1, 'drawdown_plan', '510300', 'Plan', 'cn_etf',
+                 '{"investment_fund_symbol":"000001","tiers":[]}',
+                 1, '2026-01-01', '2026-01-01');
+            INSERT INTO drawdown_cycles
+                (id, rule_id, peak_date, initial_peak_price, peak_price,
+                 last_evaluated_date, created_at, updated_at)
+            VALUES (7, 1, '2026-01-02', 100, 101, '2026-01-03',
+                    '2026-01-03', '2026-01-03');
+            """
+        )
+        connection.commit()
+
+        init_db(connection)
+        first = connection.execute(
+            "SELECT id, initial_peak_date FROM drawdown_cycles"
+        ).fetchone()
+        columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(drawdown_cycles)")
+        }
+        assert "initial_peak_date" in columns
+        assert (first["id"], first["initial_peak_date"]) == (7, "2026-01-02")
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+        init_db(connection)
+        second = connection.execute(
+            "SELECT id, initial_peak_date FROM drawdown_cycles"
+        ).fetchone()
+        assert dict(second) == dict(first)
+    finally:
+        connection.close()
+
+
 def test_drawdown_tier_reminder_preferences_are_idempotent_and_cycle_scoped(
     tmp_path: Path,
 ) -> None:
@@ -84,9 +145,9 @@ def test_drawdown_tier_reminder_preferences_are_idempotent_and_cycle_scoped(
         connection.execute(
             """
             INSERT INTO drawdown_cycles (
-                rule_id, peak_date, initial_peak_price, peak_price,
+                rule_id, initial_peak_date, peak_date, initial_peak_price, peak_price,
                 last_evaluated_date, created_at, updated_at
-            ) VALUES (?, '2026-08-14', 100, 100, '2026-08-14',
+            ) VALUES (?, '2026-08-14', '2026-08-14', 100, 100, '2026-08-14',
                       '2026-08-14T00:00:00+00:00', '2026-08-14T00:00:00+00:00')
             """,
             (rule_id,),
@@ -162,9 +223,9 @@ def test_drawdown_tier_reminder_keys_are_canonical_and_unique(
         connection.execute(
             """
             INSERT INTO drawdown_cycles (
-                rule_id, peak_date, initial_peak_price, peak_price,
+                rule_id, initial_peak_date, peak_date, initial_peak_price, peak_price,
                 last_evaluated_date, created_at, updated_at
-            ) VALUES (?, '2026-08-14', 100, 100, '2026-08-14',
+            ) VALUES (?, '2026-08-14', '2026-08-14', 100, 100, '2026-08-14',
                       '2026-08-14T00:00:00+00:00', '2026-08-14T00:00:00+00:00')
             """,
             (rule_id,),
@@ -513,9 +574,9 @@ def test_init_migrates_manual_add_action_event_to_nullable_and_preserves_row(
         connection.execute(
             """
             INSERT INTO drawdown_cycles (
-                rule_id, peak_date, initial_peak_price, peak_price,
+                rule_id, initial_peak_date, peak_date, initial_peak_price, peak_price,
                 last_evaluated_date, created_at, updated_at
-            ) VALUES (?, '2026-01-01', 100, 100, '2026-01-01', ?, ?)
+            ) VALUES (?, '2026-01-01', '2026-01-01', 100, 100, '2026-01-01', ?, ?)
             """,
             (rule_id, "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
         )

@@ -35,7 +35,8 @@ SQLite 会自动清理已终结历史（基准保留 400 天），但保留活�
 - `/set_fund_fee <fund_symbol> <rate:<percent>%|fixed:<RMB>>`
 - `/set_fund_cutoff <fund_symbol> <HH:MM>`
 - `/sync_position <fund_symbol> <units> <average_unit_cost>`
-- `/add_drawdown_plan <reference_etf> <feeder_fund> <name> <tiers> [lookback:<days>]`
+- `/add_drawdown_plan <reference_etf> <feeder_fund> <name> <tiers> [lookback:<days>] [rearm:<percent>]`
+- `/set_plan_rearm <plan_id> <percent>`
 - `/mark_added <plan_id> <tier_percentages> [YYYY-MM-DD]`
 - `/plans [refresh]`
 - `/list`
@@ -165,8 +166,10 @@ occurrence 和手动加仓估算；历史快照不会重算。因为它是基金
 /add_drawdown_plan 510300 000001 "Core index" 15:5000,20:10000,25:15000
 ```
 
-可选的 `lookback:<days>` 只能放在最后，默认 365 个日历日。MA250 和 20 个
-交易日的 MA250 斜率只提供趋势背景，绝不会独立触发、取消或修改加仓金额。
+可选的 `lookback:<days>` 和 `rearm:<percent>` 各最多出现一次，顺序任意；未知或重复
+选项会被拒绝。`lookback` 默认 365 个日历日，`rearm` 默认 2%；`rearm:4` 和
+`rearm:4%` 都表示 4%。MA250 和 20 个交易日的 MA250 斜率只提供趋势背景，绝不会
+独立触发、取消或修改加仓金额。
 
 每档金额是增量。例如上面的最大单周期额外加仓总额为 ¥30,000；若价格直接
 跨过 15%、20%、25% 三档，会发送一条合并提醒，总额仍为 ¥30,000。
@@ -176,7 +179,10 @@ occurrence 和手动加仓估算；历史快照不会重算。因为它是基金
 并绑定当前 Telegram 用户和聊天。
 
 收盘确认只使用参考 ETF 的前复权（`qfq`）日线；联接基金净值不会代替 ETF
-回撤，ETF 实时价格也不会被当作准确持仓价值。每档在同一个高点周期内只记录
+回撤，ETF 实时价格也不会被当作准确持仓价值。当前高点跟随已确认的真实收盘新高，
+回撤始终从当前高点计算。周期的分配锚点日期固定（QFQ 发生重算时会按日期刷新价格），
+只有未来已确认的新高达到该计划相对锚点的重启幅度才会开始新周期；默认重启幅度为 2%。
+等高不会重启，修改幅度只影响未来尚未处理的已确认新高。每档在同一个分配周期内只记录
 一次。提醒不等于已经购买。
 
 - `/plans`：简洁查看所有计划；会复用覆盖最近已完成交易日的净值缓存，过旧时自动刷新。
@@ -189,7 +195,8 @@ occurrence 和手动加仓估算；历史快照不会重算。因为它是基金
 对于回撤加仓计划，这两条命令不会消耗正式档位或创建计划提醒。但 `/check` 也会
 评估普通回撤、固定成本涨幅和当天到期的 DCA 规则，满足条件时仍可能发送提醒。
 
-默认 `14:50` 使用 ETF 实时价格发送临时预警，不消耗正式档位。如果你确实
+默认 `14:50` 使用 ETF 实时价格发送临时预警；实时数据不能更新高点、重启或创建周期，
+只有收盘确认数据可以这样做。它不消耗正式档位。如果你确实
 提交了联接基金申购，可点击 Telegram 按钮或使用：
 
 ```text

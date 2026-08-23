@@ -8,6 +8,7 @@ import pytest
 
 from fund_alert_bot.market_data import AssetType, RealtimeQuote
 from fund_alert_bot.rules.drawdown_plan import (
+    DEFAULT_REARM_MARGIN,
     TIER_STATE_ADDED,
     TIER_STATE_PENDING,
     TIER_STATE_SKIPPED,
@@ -45,10 +46,34 @@ def test_plan_config_applies_defaults_and_preserves_incremental_amounts() -> Non
     assert config.lookback_days == 365
     assert config.sma_window == 250
     assert config.sma_slope_window == 20
+    assert config.rearm_margin == DEFAULT_REARM_MARGIN
     assert config.tiers == (
         DrawdownTier(0.15, 5000, "0.15"),
         DrawdownTier(0.20, 10000.5, "0.2"),
     )
+
+
+def test_plan_config_parses_explicit_rearm_margin() -> None:
+    config = _config([(0.15, 5000)], rearm_margin=0.04)
+
+    assert config.rearm_margin == pytest.approx(0.04)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [0, -0.01, 1, 1.01, float("nan"), float("inf"), True, "0.04"],
+)
+def test_plan_config_rejects_invalid_rearm_margin(value: object) -> None:
+    with pytest.raises(ValueError, match="rearm_margin"):
+        parse_drawdown_plan_config(
+            reference_symbol="510300",
+            asset_type=AssetType.CN_ETF,
+            params={
+                "investment_fund_symbol": "000001",
+                "tiers": [{"drawdown": 0.15, "amount": 5000}],
+                "rearm_margin": value,
+            },
+        )
 
 
 def test_plan_config_limits_tiers_to_bounded_telegram_actions() -> None:
@@ -169,6 +194,8 @@ def test_scientific_tiers_keep_confirmed_alert_within_telegram_limit() -> None:
     evaluation = DrawdownPlanEvaluation(
         latest_date=date(2024, 1, 2),
         latest_price=80,
+        initial_peak_date=date(2024, 1, 1),
+        initial_peak_price=100,
         peak_date=date(2024, 1, 1),
         peak_price=100,
         drawdown=0.2,
@@ -229,9 +256,16 @@ def test_required_history_range_covers_trend_and_locked_peak() -> None:
         config=config,
         active_peak_date=date(2022, 6, 1),
     )
+    both_peaks_start = required_history_start(
+        evaluation_date=date(2024, 12, 31),
+        config=config,
+        active_peak_date=date(2023, 1, 1),
+        initial_peak_date=date(2022, 6, 1),
+    )
 
     assert trend_start == date(2023, 7, 11)
     assert locked_peak_start == date(2022, 6, 1)
+    assert both_peaks_start == date(2022, 6, 1)
 
 
 @pytest.mark.parametrize(
@@ -335,6 +369,8 @@ def test_recorded_tier_does_not_repeat_after_recovery_without_new_peak() -> None
         expected_date=date(2024, 1, 4),
         active_cycle=ActiveDrawdownCycle(
             cycle_id=1,
+            initial_peak_date=date(2024, 1, 1),
+            initial_peak_price=100,
             peak_date=date(2024, 1, 1),
             peak_price=100,
             last_evaluated_date=date(2024, 1, 2),
@@ -348,7 +384,14 @@ def test_recorded_tier_does_not_repeat_after_recovery_without_new_peak() -> None
 
 def test_deeper_then_partial_recovery_never_reverses_or_repeats_tiers() -> None:
     config = _config([(0.15, 5000), (0.20, 10000), (0.25, 15000), (0.30, 20000)])
-    active = ActiveDrawdownCycle(1, date(2024, 1, 1), 100, date(2024, 1, 2))
+    active = ActiveDrawdownCycle(
+        1,
+        date(2024, 1, 1),
+        100,
+        date(2024, 1, 2),
+        85,
+        date(2024, 1, 2),
+    )
     day_two = evaluate_drawdown_plan(
         _history([100, 85, 70]),
         config,
@@ -367,6 +410,8 @@ def test_deeper_then_partial_recovery_never_reverses_or_repeats_tiers() -> None:
             date(2024, 1, 1),
             100,
             date(2024, 1, 3),
+            70,
+            date(2024, 1, 3),
         ),
         recorded_tier_keys={"0.15", "0.2", "0.25", "0.3"},
     )
@@ -383,8 +428,8 @@ def test_deeper_then_partial_recovery_never_reverses_or_repeats_tiers() -> None:
 
 def test_new_high_starts_cycle_and_rearms_tiers() -> None:
     evaluation = evaluate_drawdown_plan(
-        _history([100, 84, 101, 85.85]),
-        _config([(0.15, 5000)]),
+        _history([100, 84, 102, 86.7]),
+        _config([(0.15, 5000)], rearm_margin=0.02),
         reference_symbol="510300",
         expected_date=date(2024, 1, 4),
         active_cycle=ActiveDrawdownCycle(
@@ -392,18 +437,235 @@ def test_new_high_starts_cycle_and_rearms_tiers() -> None:
             date(2024, 1, 1),
             100,
             date(2024, 1, 2),
+            84,
+            date(2024, 1, 2),
         ),
         recorded_tier_keys={"0.15"},
     )
 
     assert evaluation.cycle_changed is True
+    assert evaluation.initial_peak_date == date(2024, 1, 3)
+    assert evaluation.initial_peak_price == 102
     assert evaluation.peak_date == date(2024, 1, 3)
-    assert evaluation.peak_price == 101
+    assert evaluation.peak_price == 102
     assert [tier.key for tier in evaluation.newly_crossed_tiers] == ["0.15"]
 
 
-def test_equal_peak_after_decline_starts_cycle_but_repeated_equal_does_not() -> None:
-    active = ActiveDrawdownCycle(1, date(2024, 1, 1), 100, date(2024, 1, 2))
+def test_catch_up_creates_one_cycle_at_the_batch_high() -> None:
+    evaluation = evaluate_drawdown_plan(
+        _history([100, 84, 102, 103, 87.55]),
+        _config([(0.15, 5000)], rearm_margin=0.02),
+        reference_symbol="510300",
+        expected_date=date(2024, 1, 5),
+        active_cycle=ActiveDrawdownCycle(
+            1,
+            date(2024, 1, 1),
+            100,
+            date(2024, 1, 2),
+            84,
+            date(2024, 1, 2),
+        ),
+        recorded_tier_keys={"0.15"},
+    )
+
+    assert evaluation.cycle_changed is True
+    assert evaluation.initial_peak_date == date(2024, 1, 4)
+    assert evaluation.initial_peak_price == 103
+    assert evaluation.drawdown == pytest.approx(0.15)
+    assert [tier.key for tier in evaluation.newly_crossed_tiers] == ["0.15"]
+
+
+def test_small_new_high_updates_current_peak_without_rearming_tiers() -> None:
+    evaluation = evaluate_drawdown_plan(
+        _history([100, 84, 101, 85.85]),
+        _config([(0.15, 5000)], rearm_margin=0.02),
+        reference_symbol="510300",
+        expected_date=date(2024, 1, 4),
+        active_cycle=ActiveDrawdownCycle(
+            1,
+            date(2024, 1, 1),
+            100,
+            date(2024, 1, 2),
+            84,
+            date(2024, 1, 2),
+        ),
+        recorded_tier_keys={"0.15"},
+    )
+
+    assert evaluation.cycle_changed is False
+    assert evaluation.initial_peak_date == date(2024, 1, 1)
+    assert evaluation.initial_peak_price == 100
+    assert evaluation.peak_date == date(2024, 1, 3)
+    assert evaluation.peak_price == 101
+    assert evaluation.drawdown == pytest.approx(0.15)
+    assert evaluation.newly_crossed_tiers == ()
+
+
+def test_multiple_subthreshold_highs_keep_anchor_and_latest_current_peak() -> None:
+    evaluation = evaluate_drawdown_plan(
+        _history([100, 84, 100.5, 101.5]),
+        _config([(0.15, 5000)], rearm_margin=0.02),
+        reference_symbol="510300",
+        expected_date=date(2024, 1, 4),
+        active_cycle=ActiveDrawdownCycle(
+            1,
+            date(2024, 1, 1),
+            100,
+            date(2024, 1, 2),
+            84,
+            date(2024, 1, 2),
+        ),
+        recorded_tier_keys={"0.15"},
+    )
+
+    assert evaluation.cycle_changed is False
+    assert evaluation.initial_peak_price == 100
+    assert evaluation.peak_date == date(2024, 1, 4)
+    assert evaluation.peak_price == 101.5
+
+
+@pytest.mark.parametrize("new_peak", [102.0, 102.5])
+def test_rearm_threshold_is_inclusive_for_genuine_new_peak(new_peak: float) -> None:
+    evaluation = evaluate_drawdown_plan(
+        _history([100, 84, new_peak]),
+        _config([(0.15, 5000)], rearm_margin=0.02),
+        reference_symbol="510300",
+        expected_date=date(2024, 1, 3),
+        active_cycle=ActiveDrawdownCycle(
+            1,
+            date(2024, 1, 1),
+            100,
+            date(2024, 1, 2),
+            84,
+            date(2024, 1, 2),
+        ),
+        recorded_tier_keys={"0.15"},
+    )
+
+    assert evaluation.cycle_changed is True
+    assert evaluation.initial_peak_price == new_peak
+    assert evaluation.peak_price == new_peak
+    assert evaluation.newly_crossed_tiers == ()
+
+
+def test_microscopic_new_peak_within_price_tolerance_does_not_rearm() -> None:
+    evaluation = evaluate_drawdown_plan(
+        _history([100, 84, 100.005]),
+        _config([(0.15, 5000)], rearm_margin=0.00001),
+        reference_symbol="510300",
+        expected_date=date(2024, 1, 3),
+        active_cycle=ActiveDrawdownCycle(
+            1,
+            date(2024, 1, 1),
+            100,
+            date(2024, 1, 2),
+            84,
+            date(2024, 1, 2),
+        ),
+    )
+
+    assert evaluation.cycle_changed is False
+    assert evaluation.peak_date == date(2024, 1, 1)
+    assert evaluation.peak_price == 100
+
+
+def test_lowering_margin_is_prospective_only() -> None:
+    active = ActiveDrawdownCycle(
+        1,
+        date(2024, 1, 1),
+        100,
+        date(2024, 1, 3),
+        103,
+        date(2024, 1, 3),
+    )
+    config = _config([(0.15, 5000)], rearm_margin=0.02)
+    unchanged = evaluate_drawdown_plan(
+        _history([100, 84, 103, 102.5]),
+        config,
+        reference_symbol="510300",
+        expected_date=date(2024, 1, 4),
+        active_cycle=active,
+        recorded_tier_keys={"0.15"},
+    )
+    changed = evaluate_drawdown_plan(
+        _history([100, 84, 103, 102.5, 103.1]),
+        config,
+        reference_symbol="510300",
+        expected_date=date(2024, 1, 5),
+        active_cycle=ActiveDrawdownCycle(
+            1,
+            date(2024, 1, 1),
+            100,
+            date(2024, 1, 3),
+            103,
+            date(2024, 1, 4),
+        ),
+        recorded_tier_keys={"0.15"},
+    )
+
+    assert unchanged.cycle_changed is False
+    assert unchanged.initial_peak_price == 100
+    assert changed.cycle_changed is True
+    assert changed.initial_peak_price == pytest.approx(103.1)
+
+
+def test_raising_margin_does_not_reset_existing_cycle_state() -> None:
+    evaluation = evaluate_drawdown_plan(
+        _history([100, 84, 103]),
+        _config([(0.15, 5000)], rearm_margin=0.05),
+        reference_symbol="510300",
+        expected_date=date(2024, 1, 3),
+        active_cycle=ActiveDrawdownCycle(
+            1,
+            date(2024, 1, 1),
+            100,
+            date(2024, 1, 3),
+            103,
+            date(2024, 1, 3),
+        ),
+        recorded_tier_keys={"0.15"},
+    )
+
+    assert evaluation.cycle_changed is False
+    assert evaluation.initial_peak_price == 100
+    assert evaluation.peak_price == 103
+    assert evaluation.newly_crossed_tiers == ()
+
+
+def test_qfq_restatement_refreshes_anchor_and_peak_without_rearming() -> None:
+    evaluation = evaluate_drawdown_plan(
+        _dated_history(
+            ["2024-01-01", "2024-01-02", "2024-01-03"],
+            [105, 110, 108],
+        ),
+        _config([(0.15, 5000)], rearm_margin=0.04),
+        reference_symbol="510300",
+        expected_date=date(2024, 1, 3),
+        active_cycle=ActiveDrawdownCycle(
+            1,
+            date(2024, 1, 1),
+            100,
+            date(2024, 1, 2),
+            103,
+            date(2024, 1, 2),
+        ),
+    )
+
+    assert evaluation.cycle_changed is False
+    assert evaluation.initial_peak_price == 105
+    assert evaluation.peak_date == date(2024, 1, 2)
+    assert evaluation.peak_price == 110
+
+
+def test_equal_peak_after_decline_does_not_rearm() -> None:
+    active = ActiveDrawdownCycle(
+        1,
+        date(2024, 1, 1),
+        100,
+        date(2024, 1, 2),
+        84,
+        date(2024, 1, 2),
+    )
     recovered = evaluate_drawdown_plan(
         _history([100, 84, 100, 85]),
         _config([(0.15, 5000)]),
@@ -421,15 +683,16 @@ def test_equal_peak_after_decline_starts_cycle_but_repeated_equal_does_not() -> 
         recorded_tier_keys={"0.15"},
     )
 
-    assert recovered.cycle_changed is True
-    assert recovered.peak_date == date(2024, 1, 3)
-    assert [tier.key for tier in recovered.newly_crossed_tiers] == ["0.15"]
+    assert recovered.cycle_changed is False
+    assert recovered.peak_date == date(2024, 1, 1)
+    assert recovered.peak_price == 100
+    assert recovered.newly_crossed_tiers == ()
     assert repeated.cycle_changed is False
 
 
 def test_equal_peak_uses_persisted_decline_after_history_is_pruned() -> None:
     evaluation = evaluate_drawdown_plan(
-        _dated_history(["2020-01-01", "2026-01-01"], [100, 100]),
+        _dated_history(["2020-01-01", "2025-12-31", "2026-01-01"], [100, 100, 100]),
         _config([(0.15, 5000)]),
         reference_symbol="510300",
         expected_date=date(2026, 1, 1),
@@ -438,14 +701,16 @@ def test_equal_peak_uses_persisted_decline_after_history_is_pruned() -> None:
             date(2020, 1, 1),
             100,
             date(2025, 12, 31),
+            100,
+            date(2025, 12, 31),
             saw_below_peak=True,
         ),
         recorded_tier_keys={"0.15"},
     )
 
-    assert evaluation.cycle_changed is True
-    assert evaluation.peak_date == date(2026, 1, 1)
-    assert evaluation.saw_below_peak is False
+    assert evaluation.cycle_changed is False
+    assert evaluation.peak_date == date(2025, 12, 31)
+    assert evaluation.saw_below_peak is True
 
 
 def test_downtime_crossing_that_recovered_is_not_backfilled() -> None:
@@ -456,6 +721,8 @@ def test_downtime_crossing_that_recovered_is_not_backfilled() -> None:
         expected_date=date(2024, 1, 3),
         active_cycle=ActiveDrawdownCycle(
             1,
+            date(2024, 1, 1),
+            100,
             date(2024, 1, 1),
             100,
             date(2024, 1, 1),
@@ -572,6 +839,9 @@ def test_alert_aggregates_tiers_and_carries_trend_payload() -> None:
     ]
     assert payload["total_amount"] == 15000
     assert payload["data_date"] == "2024-01-03"
+    assert payload["rearm_margin"] == pytest.approx(0.02)
+    assert payload["initial_peak_date"] == "2024-01-01"
+    assert payload["initial_peak_price"] == 100
     assert payload["sma"] == pytest.approx(84.5)
     assert "Total additional amount now due: ¥15,000" in str(alert["message"])
     assert "No trade has been placed" in str(alert["message"])
@@ -714,11 +984,45 @@ def test_realtime_plan_crossing_uses_quote_without_consuming_recorded_tiers() ->
     assert [tier.key for tier in realtime.newly_crossed_tiers] == ["0.2"]
     assert realtime.total_amount == 10000
     assert alert is not None
+    assert realtime.cycle_changed is False
+    assert realtime.initial_peak_price == confirmed.initial_peak_price
+    assert realtime.peak_price == confirmed.peak_price
     assert alert["alert_key"] == "7:drawdown_plan:pre_alert:2024-01-02"
     assert alert["payload"]["phase"] == "before_close"
     assert alert["payload"]["cycle_id"] == 9
     assert alert["payload"]["confirmed_close_date"] == "2024-01-01"
     assert "Realtime estimate before close" in alert["message"]
+
+
+def test_realtime_quote_above_rearm_threshold_cannot_rearm_cycle() -> None:
+    config = _config([(0.15, 5000)], rearm_margin=0.02)
+    confirmed = evaluate_drawdown_plan(
+        _history([100, 84]),
+        config,
+        reference_symbol="510300",
+        expected_date=date(2024, 1, 2),
+    )
+    realtime = evaluate_drawdown_plan_realtime(
+        confirmed,
+        config,
+        RealtimeQuote(
+            symbol="510300",
+            price=103,
+            previous_close=84,
+            volume=100,
+            amount=1000,
+            source="eastmoney",
+            fetched_at=datetime(2024, 1, 3, 6, 50, tzinfo=UTC),
+        ),
+        reference_symbol="510300",
+        market_date=date(2024, 1, 3),
+    )
+
+    assert realtime.cycle_changed is False
+    assert realtime.initial_peak_date == date(2024, 1, 1)
+    assert realtime.initial_peak_price == 100
+    assert realtime.peak_date == date(2024, 1, 1)
+    assert realtime.peak_price == 100
 
 
 def test_realtime_plan_rejects_quote_fetched_on_another_market_date() -> None:
@@ -754,19 +1058,23 @@ def _config(
     lookback_days: int = 365,
     sma_window: int = 250,
     slope_window: int = 20,
+    rearm_margin: float | None = None,
 ) -> DrawdownPlanConfig:
+    params: dict[str, object] = {
+        "investment_fund_symbol": "000001",
+        "lookback_days": lookback_days,
+        "tiers": [
+            {"drawdown": drawdown, "amount": amount} for drawdown, amount in tiers
+        ],
+        "sma_window": sma_window,
+        "sma_slope_window": slope_window,
+    }
+    if rearm_margin is not None:
+        params["rearm_margin"] = rearm_margin
     return parse_drawdown_plan_config(
         reference_symbol="510300",
         asset_type=AssetType.CN_ETF,
-        params={
-            "investment_fund_symbol": "000001",
-            "lookback_days": lookback_days,
-            "tiers": [
-                {"drawdown": drawdown, "amount": amount} for drawdown, amount in tiers
-            ],
-            "sma_window": sma_window,
-            "sma_slope_window": slope_window,
-        },
+        params=params,
     )
 
 
