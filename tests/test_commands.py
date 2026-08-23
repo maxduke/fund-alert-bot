@@ -3056,6 +3056,7 @@ def test_delete_command_confirms_legacy_hard_delete(
 
 def test_check_sends_due_dca_without_market_data_fetch(tmp_path) -> None:
     sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    check_date = date(2024, 1, 4)
     with open_connection(sqlite_path) as connection:
         init_db(connection)
         add_rule(
@@ -3064,7 +3065,7 @@ def test_check_sends_due_dca_without_market_data_fetch(tmp_path) -> None:
             symbol="创业板",
             name="创业板",
             asset_type="dca",
-            params={"weekday": weekday_for_date(date.today()), "amount": 1000},
+            params={"weekday": weekday_for_date(check_date), "amount": 1000},
         )
 
     provider = FakeProvider(_history(["2024-01-01"], [100.0]))
@@ -3072,7 +3073,7 @@ def test_check_sends_due_dca_without_market_data_fetch(tmp_path) -> None:
         {123},
         sqlite_path=sqlite_path,
         market_data_provider=provider,
-        timezone="UTC",
+        now_factory=lambda: datetime(2024, 1, 4, 6, tzinfo=UTC),
     )
     message = FakeMessage()
     update = SimpleNamespace(
@@ -3085,14 +3086,10 @@ def test_check_sends_due_dca_without_market_data_fetch(tmp_path) -> None:
     asyncio.run(_handler_by_command(handlers, "check").callback(update, context))
 
     assert provider.calls == []
-    expected_dca_message = EXPECTED_DCA_MESSAGE.replace(
-        "2024-01-04",
-        date.today().isoformat(),
-    )
     assert context.bot.messages == [
         {
             "chat_id": 456,
-            "text": expected_dca_message,
+            "text": EXPECTED_DCA_MESSAGE,
         }
     ]
     assert "Checked 1 dca_reminder rule(s)." in message.replies[0]
