@@ -95,6 +95,48 @@ def test_localizes_help_and_dynamic_status_structures() -> None:
     )
 
 
+def test_chinese_localizes_drawdown_rearm_fields_and_update() -> None:
+    set_language("zh-CN")
+    try:
+        assert localize_text(
+            "Change a plan rearm margin\n"
+            "Rearm margin: 2% → 4%\n"
+            "Cycle anchor: 100 on 2024-01-01\n"
+            "Current peak: 101 on 2024-01-02\n"
+            "Rearm threshold: 102\n"
+            "Rearm occurs only on a future confirmed new peak.\n"
+            "Updated Drawdown Add Plan id=5\n"
+            "Current cycle, tier records, additions and position state are unchanged.\n"
+            "The new setting applies to future confirmed-close evaluations."
+        ) == (
+            "修改计划重启幅度\n"
+            "重启幅度： 2% → 4%\n"
+            "周期锚点： 100，日期：2024-01-01\n"
+            "当前高点： 101，日期：2024-01-02\n"
+            "重启阈值： 102\n"
+            "只有未来确认的新高才会触发重新启动。\n"
+            "已更新回撤加仓计划 id=5\n"
+            "当前周期、档位记录、加仓记录和持仓状态均未改变。\n"
+            "新设置仅适用于未来的收盘确认评估。"
+        )
+    finally:
+        set_language("en")
+
+
+def test_chinese_localizes_rearm_preview_sentence() -> None:
+    set_language("zh-CN")
+    try:
+        assert (
+            localize_text(
+                "A new allocation cycle requires a confirmed new peak at least "
+                "4% above the cycle anchor."
+            )
+            == "新的配置周期需要确认的新高至少高于周期锚点 4%。"
+        )
+    finally:
+        set_language("en")
+
+
 def test_chinese_localizes_readable_rule_list_fields() -> None:
     set_language("zh-CN")
     try:

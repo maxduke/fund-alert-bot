@@ -38,7 +38,8 @@ Implemented Telegram commands:
 - `/set_fund_fee <fund_symbol> <rate:<percent>%|fixed:<RMB>>`
 - `/set_fund_cutoff <fund_symbol> <HH:MM>`
 - `/sync_position <fund_symbol> <units> <average_unit_cost>`
-- `/add_drawdown_plan <reference_etf> <feeder_fund> <name> <tiers> [lookback:<days>]`
+- `/add_drawdown_plan <reference_etf> <feeder_fund> <name> <tiers> [lookback:<days>] [rearm:<percent>]`
+- `/set_plan_rearm <plan_id> <percent>`
 - `/mark_added <plan_id> <tier_percentages> [YYYY-MM-DD]`
 - `/plans [refresh]`
 - `/list`
@@ -161,8 +162,10 @@ the ETF feeder fund you actually own as a separate position identity:
 /add_drawdown_plan 510300 000001 "Core index" 15:5000,20:10000,25:15000
 ```
 
-An optional `lookback:<days>` token may appear only at the end. The default is
-365 calendar days; MA250 and its 20-session slope are always informational.
+Optional `lookback:<days>` and `rearm:<percent>` tokens may appear once each, in
+either order. `lookback` defaults to 365 calendar days and `rearm` defaults to
+2%; `rearm:4` and `rearm:4%` both mean 4%. Unknown or duplicate options are
+rejected. MA250 and its 20-session slope are always informational.
 Every tier amount is incremental, so the example's maximum one-cycle total is
 ¥30,000. The Bot shows that total before saving.
 
@@ -175,9 +178,15 @@ Telegram user and chat.
 
 Confirmed-close checks use only the Reference ETF's forward-adjusted (`qfq`)
 daily history. The feeder fund's NAV is never substituted for ETF drawdown, and
-the ETF realtime price is never used as exact position value. Several newly
-reached tiers produce one aggregated reminder; each tier is remembered within
-its peak cycle. A reminder does not mean that a purchase happened.
+the ETF realtime price is never used as exact position value. The current peak
+follows confirmed genuine closing highs and drawdown is measured from it. A
+cycle's allocation anchor date remains fixed (its QFQ price is refreshed when
+history is restated); a new cycle starts only when a future confirmed genuine
+high reaches that plan's rearm margin above the anchor. The default margin is
+2%. Equal highs do not rearm, and changing the margin affects only future
+unprocessed confirmed highs. Several newly reached tiers produce one aggregated
+reminder; each tier is remembered within its allocation cycle. A reminder does
+not mean that a purchase happened.
 
 Use `/plans` for a concise overview and `/check` for detailed plan state. Both
 are read-only for Drawdown Add Plans: they do not consume a tier or create an
@@ -192,7 +201,9 @@ before-close realtime estimate never consumes that tier; the after-close job
 must confirm it from the ETF close.
 
 At `14:50`, a plan uses the Reference ETF's current realtime price for a
-provisional pre-alert. It does not consume a tier by itself. If you actually
+provisional pre-alert. Realtime data cannot update the peak, rearm a cycle, or
+create a cycle; only confirmed closing history can do that. It does not consume
+a tier by itself. If you actually
 submit the feeder-fund subscription, use the Telegram button or the printed
 fallback command, for example:
 

@@ -82,15 +82,30 @@ Plan.
 _Avoid_: Cumulative threshold, cumulative amount definition
 
 **Recent Peak**:
-The adjusted Reference ETF closing high whose date remains fixed while its
-Drawdown Cycle is active.
+The highest relevant confirmed Reference ETF closing price currently used for
+drawdown. Its date and QFQ price move to a genuine confirmed closing high within
+the active cycle.
 _Avoid_: Cost basis, rolling peak, all-time high
 
+**Cycle Allocation Anchor**:
+The confirmed peak date at which the active Drawdown Cycle began. The date is
+immutable for that cycle; its QFQ price is refreshed when history is restated.
+The plan's positive rearm margin is measured above this anchor.
+
+**Rearm Margin**:
+A per-plan positive percentage (default `2%`) that a future confirmed genuine
+new high must exceed above the cycle allocation anchor before a new Drawdown
+Cycle starts. Equal highs do not rearm. Updating the margin applies only to
+future unprocessed confirmed highs.
+
 **Drawdown Cycle**:
-The period in which each Drawdown Tier's market fact may become confirmed once,
-ending only when a confirmed close reaches or exceeds the Recent Peak after being
-below it. Pending user reminders are separate and may repeat within the cycle.
-_Avoid_: Rolling-window reset, partial recovery reset
+The period in which each Drawdown Tier's market fact may become confirmed once.
+Its current peak follows confirmed genuine closing highs, while the allocation
+anchor remains fixed. The cycle ends only when a future confirmed genuine high
+reaches the plan's rearm margin above that anchor. Pending user reminders are
+separate and may repeat within the cycle.
+Realtime quotes never rearm or create a cycle.
+_Avoid_: Rolling-window reset, equal-peak reset, partial recovery reset
 
 **Initial Plan Evaluation**:
 The first confirmed-close evaluation that records all currently reached open

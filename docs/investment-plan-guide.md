@@ -79,12 +79,14 @@ cannot determine their subscription date safely.
 V1 does not separately configure the official index. Telegram uses:
 
 ```text
-/add_drawdown_plan <reference_etf_symbol> <feeder_fund_symbol> <name> <tiers> [lookback:<calendar_days>]
+/add_drawdown_plan <reference_etf_symbol> <feeder_fund_symbol> <name> <tiers> [lookback:<calendar_days>] [rearm:<percent>]
 ```
 
 The command fixes the first symbol as `cn_etf` and the second as `cn_open_fund`,
 so the user does not enter asset-type tokens. A name containing spaces must be
-quoted. `lookback` is optional and defaults to `365`; SMA stays internal at 250
+quoted. `lookback` and `rearm` are optional, may appear once each in either order,
+and default to `365` calendar days and `2%`. Both `rearm:4` and `rearm:4%` mean
+4%; unknown or duplicate options are rejected. SMA stays internal at 250
 observations with a 20-observation slope window. A plan accepts at most 50 tiers
 so Telegram can always render the tier action buttons; normal plans typically
 need only a small handful. Before saving, the bot also renders the largest
@@ -97,11 +99,18 @@ Conceptual example:
 /add_drawdown_plan <ETF代码> <联接基金代码> 中证A500 15:5000,20:10000,25:15000,30:20000,35:10000
 ```
 
-An override is appended only when required:
+Optional settings can be supplied in either order:
 
 ```text
 /add_drawdown_plan <ETF代码> <联接基金代码> 中证A500 15:5000,20:10000 lookback:500
+/add_drawdown_plan <ETF代码> <联接基金代码> 中证A500 15:5000,20:10000 rearm:4% lookback:500
 ```
+
+To change a running plan without recreating it, use
+`/set_plan_rearm <plan_id> <percent>`. The value is stored as a fraction, so
+`4` and `4%` both store `0.04`; the current cycle, tier records, additions,
+snoozes, and position state remain unchanged. The new setting applies only to
+future unprocessed confirmed new highs.
 
 The command does not save immediately. It resolves the exact ETF and feeder-fund
 codes to provider names where possible, then shows a read-only confirmation:
@@ -201,23 +210,33 @@ or reinterpret the user's plan.
 
 The first scheduled evaluation finds the highest valid Reference ETF close in
 the inclusive calendar window ending on the latest confirmed close. A 365-day
-window therefore contains that date plus the preceding 364 calendar dates. It
-locks the most recent equal high as the Recent Peak for the Drawdown Cycle, and
-each tier's market fact is recorded once in that cycle. Pending user reminders
-are separate and can repeat on later market dates until the user adds, skips, or
-a new cycle begins.
+window therefore contains that date plus the preceding 364 calendar dates. The
+cycle stores an immutable allocation anchor date and price, plus a moving
+current peak. The current peak follows confirmed genuine closing highs, and
+drawdown is always calculated from that current peak. Each tier's market fact is
+recorded once in the allocation cycle; pending user reminders are separate and
+can repeat on later market dates until the user adds, skips, or a new cycle begins.
 
-The peak does not expire or fall simply because 365 days pass. A new cycle begins
-when a confirmed close exceeds the locked peak, or first returns to the peak
-after an intervening below-peak close. Repeated equal closes at the peak without
-an intervening decline do not create empty new cycles. This prevents a long
-decline from looking smaller merely because its original high left a rolling
-window.
+The allocation anchor does not expire when the lookback window moves. A new
+cycle starts only when a future confirmed genuine new high reaches the plan's
+configured rearm margin above the anchor (2% by default). A small new high still
+updates the current peak but does not rearm tiers. An equal high never rearms,
+even after a decline. Thus `100 -> 84 -> 100.5` remains one cycle with a 100
+anchor under a 2% margin, while a future confirmed 102 starts the next cycle.
 
 Forward-adjusted history may be recalculated after an ETF distribution. The bot
-therefore keeps the peak date stable but refreshes that date's `qfq` value on the
-current basis before calculating drawdown. Distribution adjustment changes
-neither the cycle identity nor its recorded tiers.
+keeps both anchor and current-peak dates as durable identities and refreshes
+their `qfq` prices from those dates before calculating drawdown or rearm. A QFQ
+restatement alone never creates a new cycle.
+
+Changing `rearm` is prospective: it does not reinterpret already persisted
+cycle decisions. A new cycle still requires a future, not-yet-processed
+confirmed genuine high; a previously persisted peak being above a newly lowered
+threshold is not enough.
+
+The following are example user choices only, not automatic policy or symbol
+mappings: broad index/A500 `2%`, dividend or low-volatility dividend `roughly
+1.5–2%`, ChiNext `4%`, STAR 50 `4%`, and STAR 100 `5%`.
 
 After downtime, the bot recovers the latest cycle from closing history but does
 not replay reminders for drawdowns that crossed and recovered entirely while it
@@ -229,7 +248,9 @@ normally.
 Before close, the bot sends a provisional Drawdown Pre-Alert when the realtime
 price reaches any actionable tier: a newly reached tier or a previously
 confirmed-but-pending tier. It aggregates them, sends at most once per plan per
-trading date, and does not consume a confirmed market fact.
+trading date, and does not consume a confirmed market fact. Realtime data cannot
+update the current peak, change the anchor, rearm a cycle, or create a cycle.
+Only the after-close confirmed QFQ evaluation can do that.
 
 The Drawdown Add Plan reuses the existing single before-close scheduler time,
 `14:50` Asia/Shanghai. That quote is closer to the close than an earlier check,
@@ -402,7 +423,7 @@ provider framework.
 
 For default MA250 plus its 20-session slope, the evaluator needs at least 270
 valid ETF closes. It requests a safe calendar range large enough for both those
-observations and the locked peak date; the drawdown lookback remains 365 days
+observations and the active cycle's anchor and current-peak dates; the drawdown lookback remains 365 days
 even when more history is fetched for calculation.
 
 Before evaluating, the bot normalizes dates, sorts rows, and keeps the last
@@ -488,9 +509,10 @@ investment reminder.
 
 `/plans` shows one concise overview per Investment Feeder Fund already known from
 a Drawdown Add Plan, enhanced DCA rule, Position Snapshot, or Position-Linked
-Price-Gain Rule. It summarizes configured DCA, current drawdown and next tier,
-position accuracy, and Price-Gain status without detailed history. It is not an
-alias for `/list`, which continues to list raw rule configuration. Plain
+Price-Gain Rule. For Drawdown Add Plans it includes the concise `Rearm: +N% from
+cycle anchor` setting. It summarizes configured DCA, current drawdown and next
+tier, position accuracy, and Price-Gain status without detailed history. It is
+not an alias for `/list`, which continues to list raw rule configuration. Plain
 `/plans` reuses persisted normalized ETF history and a feeder-fund NAV whose date
 reaches the latest completed trading day. An older NAV is refreshed
 automatically instead of remaining cached indefinitely. `/plans refresh`
@@ -527,11 +549,14 @@ also shows the last Position Sync date and how many later contribution estimates
 have been applied, so “estimated” never hides how far it has drifted from the
 platform baseline.
 
-`/check` shows detailed plan measurements, current-cycle tier status, and the next
-tier. Drawdown Add Plan status is read-only: running `/check` never confirms a new
-plan tier. It distinguishes **untriggered**, **triggered pending**, **added**, and
-**skipped for this cycle**; a check mark never implies that the Bot or platform
-completed a purchase. `/check` can still create and send triggered legacy
+`/check` shows detailed plan measurements, including the cycle anchor date and
+price, current peak date and price, rearm margin and threshold, current drawdown,
+current-cycle tier status, and the next tier. A threshold already exceeded after
+lowering the setting is informational; the output does not imply that a cycle is
+due until a future confirmed genuine new high. Drawdown Add Plan status is
+read-only: running `/check` never confirms a new plan tier. It distinguishes
+**untriggered**, **triggered pending**, **added**, and **skipped for this cycle**;
+a check mark never implies that the Bot or platform completed a purchase. `/check` can still create and send triggered legacy
 drawdown, Price-Gain, and due reminder-only DCA alerts.
 
 ## Low-maintenance DCA position tracking

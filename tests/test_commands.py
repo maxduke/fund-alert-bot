@@ -40,6 +40,7 @@ from fund_alert_bot.commands import (
     parse_mark_added_args,
     parse_set_fund_cutoff_args,
     parse_set_fund_fee_args,
+    parse_set_plan_rearm_args,
     parse_sync_position_args,
     parse_thresholds,
     profit_params,
@@ -368,6 +369,64 @@ def test_parse_drawdown_plan_with_quoted_name_and_optional_lookback() -> None:
     assert [tier.amount for tier in command.config.tiers] == [5000, 10000, 15000]
     assert command.params["sma_window"] == 250
     assert command.params["sma_slope_window"] == 20
+
+
+@pytest.mark.parametrize(
+    "args",
+    (
+        ["510300", "000001", '"A500 Core"', "15:5000", "rearm:4%"],
+        ["510300", "000001", '"A500 Core"', "15:5000", "rearm:4"],
+        [
+            "510300",
+            "000001",
+            '"A500 Core"',
+            "15:5000",
+            "lookback:730",
+            "rearm:4%",
+        ],
+        [
+            "510300",
+            "000001",
+            '"A500 Core"',
+            "15:5000",
+            "rearm:4%",
+            "lookback:730",
+        ],
+    ),
+)
+def test_parse_drawdown_plan_rearm_options(args: list[str]) -> None:
+    command = parse_add_drawdown_plan_args(args)
+
+    assert command.config.rearm_margin == pytest.approx(0.04)
+    assert command.params["rearm_margin"] == pytest.approx(0.04)
+    if "lookback:730" in args:
+        assert command.config.lookback_days == 730
+
+
+@pytest.mark.parametrize(
+    "args",
+    (
+        ["510300", "000001", "A500", "15:5000", "rearm:0"],
+        ["510300", "000001", "A500", "15:5000", "rearm:-1"],
+        ["510300", "000001", "A500", "15:5000", "rearm:100"],
+        ["510300", "000001", "A500", "15:5000", "rearm:nan"],
+        ["510300", "000001", "A500", "15:5000", "rearm:inf"],
+        ["510300", "000001", "A500", "15:5000", "rearm:4", "rearm:5"],
+        ["510300", "000001", "A500", "15:5000", "lookback:365", "lookback:730"],
+        ["510300", "000001", "A500", "15:5000", "unknown:1"],
+    ),
+)
+def test_parse_drawdown_plan_rejects_invalid_rearm_options(args: list[str]) -> None:
+    with pytest.raises(CommandParseError):
+        parse_add_drawdown_plan_args(args)
+
+
+@pytest.mark.parametrize("raw", ["4", "4%"])
+def test_parse_set_plan_rearm_args(raw: str) -> None:
+    command = parse_set_plan_rearm_args(["5", raw])
+
+    assert command.plan_id == 5
+    assert command.rearm_margin == pytest.approx(0.04)
 
 
 def test_parse_drawdown_plan_rejects_oversized_rendered_notifications() -> None:
@@ -922,6 +981,131 @@ def test_set_dca_amount_updates_rule_without_replacing_it(tmp_path) -> None:
         f"Updated DCA rule id={rule_id} 科创50 future amount to ¥500. "
         "Existing occurrences are unchanged."
     ]
+
+
+def test_set_plan_rearm_updates_only_plan_config(tmp_path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    with open_connection(sqlite_path) as connection:
+        init_db(connection)
+        plan_id = add_rule(
+            connection,
+            type="drawdown_plan",
+            symbol="510300",
+            name="A500",
+            asset_type="cn_etf",
+            params={
+                "investment_fund_symbol": "000001",
+                "lookback_days": 365,
+                "tiers": [{"drawdown": 0.15, "amount": 5000}],
+                "sma_window": 250,
+                "sma_slope_window": 20,
+            },
+        )
+    handlers = build_command_handlers({123}, sqlite_path=sqlite_path)
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        effective_message=message,
+    )
+
+    asyncio.run(
+        _handler_by_command(handlers, "set_plan_rearm").callback(
+            update,
+            SimpleNamespace(args=[str(plan_id), "4%"]),
+        )
+    )
+
+    with open_connection(sqlite_path) as connection:
+        row = list_rules(connection)[0]
+    assert json.loads(row["params_json"])["rearm_margin"] == pytest.approx(0.04)
+    assert message.replies == [
+        "Updated Drawdown Add Plan id=1\n"
+        "Rearm margin: 2% → 4%\n"
+        "Current cycle, tier records, additions and position state are unchanged.\n"
+        "The new setting applies to future confirmed-close evaluations."
+    ]
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        [],
+        ["1"],
+        ["1", "4", "extra"],
+        ["not-an-id", "4"],
+        ["0", "4"],
+        ["1", "0"],
+        ["1", "100"],
+    ],
+)
+def test_set_plan_rearm_rejects_invalid_args(tmp_path, args: list[str]) -> None:
+    handlers = build_command_handlers(
+        {123},
+        sqlite_path=tmp_path / "fund_alert_bot.sqlite3",
+    )
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        effective_message=message,
+    )
+
+    asyncio.run(
+        _handler_by_command(handlers, "set_plan_rearm").callback(
+            update,
+            SimpleNamespace(args=args),
+        )
+    )
+
+    assert message.replies
+
+
+@pytest.mark.parametrize("rule_kind", ["missing", "dca", "disabled"])
+def test_set_plan_rearm_requires_enabled_drawdown_plan(
+    tmp_path, rule_kind: str
+) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    rule_id = 999
+    with open_connection(sqlite_path) as connection:
+        init_db(connection)
+        if rule_kind != "missing":
+            rule_id = add_rule(
+                connection,
+                type=("dca_reminder" if rule_kind == "dca" else "drawdown_plan"),
+                symbol="510300",
+                name="Rule",
+                asset_type="cn_etf",
+                params=(
+                    {"weekday": "monday", "amount": 100}
+                    if rule_kind == "dca"
+                    else {
+                        "investment_fund_symbol": "000001",
+                        "tiers": [{"drawdown": 0.15, "amount": 5000}],
+                    }
+                ),
+            )
+            if rule_kind == "disabled":
+                connection.execute(
+                    "UPDATE rules SET enabled = 0 WHERE id = ?", (rule_id,)
+                )
+                connection.commit()
+    handlers = build_command_handlers({123}, sqlite_path=sqlite_path)
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        effective_message=message,
+    )
+
+    asyncio.run(
+        _handler_by_command(handlers, "set_plan_rearm").callback(
+            update,
+            SimpleNamespace(args=[str(rule_id), "4"]),
+        )
+    )
+
+    assert message.replies == ["Enabled drawdown plan was not found."]
 
 
 def test_add_enhanced_dca_persists_settings_and_plans_instructions(tmp_path) -> None:

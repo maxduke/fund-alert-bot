@@ -22,6 +22,7 @@ _EN_TO_ZH = {
     "Change a fund subscription cutoff": "修改基金申购截止时间",
     "Sync a feeder-fund position": "同步联接基金持仓",
     "Add a drawdown buy plan": "添加回撤加仓计划",
+    "Change a plan rearm margin": "修改计划重启幅度",
     "Record a completed addition": "记录已完成的加仓",
     "Test enabled notification channels": "测试已启用的通知渠道",
     "Reminder only": "仅提醒",
@@ -96,6 +97,18 @@ _EN_TO_ZH = {
     "Investment fund:": "实际投资基金：",
     "Display name:": "显示名称：",
     "Lookback:": "回看周期：",
+    "Rearm margin:": "重启幅度：",
+    "Cycle anchor:": "周期锚点：",
+    "Rearm threshold:": "重启阈值：",
+    "Current peak:": "当前高点：",
+    "Rearm:": "重启：",
+    "A new allocation cycle requires a confirmed new peak at least ": (
+        "新的配置周期需要确认的新高至少高于周期锚点 "
+    ),
+    " above the cycle anchor.": "。",
+    "Rearm occurs only on a future confirmed new peak.": (
+        "只有未来确认的新高才会触发重新启动。"
+    ),
     "calendar days": "个日历日",
     "days": "天",
     "RMB": "元",
@@ -149,6 +162,7 @@ _EN_TO_ZH = {
     "Confirm pair + domestic calendar": "确认配对及境内估值日历",
     "Drawdown Add Plan creation cancelled.": "已取消创建回撤加仓计划。",
     "Saved Drawdown Add Plan": "已保存回撤加仓计划",
+    "Updated Drawdown Add Plan": "已更新回撤加仓计划",
     "No order has been placed.": "未执行任何交易。",
     "No order has been placed": "未执行任何交易",
     "No trade has been placed.": "未执行任何交易。",
@@ -460,6 +474,13 @@ _EN_TO_ZH.update(
         "Added DCA rule id=": "已添加定投规则 id=",
         "Added fixed DCA rule id=": "已添加固定定投规则 id=",
         "Saved Drawdown Add Plan id=": "已保存回撤加仓计划 id=",
+        "Updated Drawdown Add Plan id=": "已更新回撤加仓计划 id=",
+        "Current cycle, tier records, additions and position state are unchanged.": (
+            "当前周期、档位记录、加仓记录和持仓状态均未改变。"
+        ),
+        "The new setting applies to future confirmed-close evaluations.": (
+            "新设置仅适用于未来的收盘确认评估。"
+        ),
         "Disabled drawdown plan id=": "已停用回撤加仓计划 id=",
         "Disabled fixed DCA rule id=": "已停用固定定投规则 id=",
         "Disabled auto-cost Price-Gain rule id=": "已停用自动成本涨幅规则 id=",
@@ -533,6 +554,7 @@ _DYNAMIC_PREFIXES = (
     "Added DCA rule id=",
     "Added fixed DCA rule id=",
     "Saved Drawdown Add Plan id=",
+    "Updated Drawdown Add Plan id=",
     "Updated DCA rule id=",
     "Updated fund",
     "Disabled drawdown plan id=",
@@ -572,7 +594,7 @@ _LABEL_VALUE_TRANSLATIONS = {
         "permanently delete": "永久删除",
     },
 }
-_DATED_LABELS = {"Peak:", "Latest:"}
+_DATED_LABELS = {"Peak:", "Latest:", "Cycle anchor:", "Current peak:"}
 
 
 def set_language(language: str) -> None:
@@ -592,6 +614,8 @@ def _localize_label_value(label: str, value: str, replacements: dict[str, str]) 
     if _language == "en" and label == "• 计划金额：":
         value = value.removesuffix(" 元") + " RMB"
     elif _language == "zh-CN":
+        if label == "Rearm:":
+            value = value.replace(" from cycle anchor", " 距周期锚点")
         value = _LABEL_VALUE_TRANSLATIONS.get(label, {}).get(value.strip(), value)
         dated_value, separator, dated_on = value.rpartition(" on ")
         if (
@@ -631,6 +655,16 @@ def _localize_line(line: str) -> str:
     if line.startswith("/") and " - " in line:
         command, description = line.split(" - ", 1)
         return f"{command} - {replacements.get(description, description)}"
+
+    if _language == "zh-CN":
+        rearm_sentence = (
+            "A new allocation cycle requires a confirmed new peak at least "
+        )
+        if line.startswith(rearm_sentence) and line.endswith(
+            " above the cycle anchor."
+        ):
+            margin = line[len(rearm_sentence) : -len(" above the cycle anchor.")]
+            return "新的配置周期需要确认的新高至少高于周期锚点 " + margin + "。"
 
     full_line_label = next(
         (

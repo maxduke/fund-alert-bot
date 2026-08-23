@@ -18,6 +18,7 @@ from fund_alert_bot.market_data.models import AssetType, RealtimeQuote
 _THRESHOLD_TOLERANCE = 1e-12
 _PRICE_RELATIVE_TOLERANCE = 1e-4
 _PRICE_ABSOLUTE_TOLERANCE = 1e-6
+DEFAULT_REARM_MARGIN = 0.02
 _MAX_FIXED_DECIMAL_CHARS = 24
 _MAX_TIERS = 50
 _TELEGRAM_TEXT_LIMIT = 4096
@@ -49,6 +50,7 @@ class DrawdownPlanConfig:
     tiers: tuple[DrawdownTier, ...]
     sma_window: int
     sma_slope_window: int
+    rearm_margin: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +58,8 @@ class ActiveDrawdownCycle:
     """Persisted active cycle state required by the pure evaluator."""
 
     cycle_id: int
+    initial_peak_date: date
+    initial_peak_price: float
     peak_date: date
     peak_price: float
     last_evaluated_date: date
@@ -68,6 +72,8 @@ class DrawdownPlanEvaluation:
 
     latest_date: date
     latest_price: float
+    initial_peak_date: date
+    initial_peak_price: float
     peak_date: date
     peak_price: float
     drawdown: float
@@ -137,6 +143,7 @@ def required_history_start(
     evaluation_date: date,
     config: DrawdownPlanConfig,
     active_peak_date: date | None = None,
+    initial_peak_date: date | None = None,
 ) -> date:
     """Return a safe calendar start for drawdown, trend, and cycle recovery."""
 
@@ -145,8 +152,9 @@ def required_history_start(
         2 * (config.sma_window + config.sma_slope_window),
     )
     start = evaluation_date - timedelta(days=calendar_days - 1)
-    if active_peak_date is not None:
-        start = min(start, active_peak_date)
+    for locked_date in (active_peak_date, initial_peak_date):
+        if locked_date is not None:
+            start = min(start, locked_date)
     return start
 
 
@@ -177,6 +185,7 @@ def parse_drawdown_plan_config(
         default=20,
         minimum=1,
     )
+    rearm_margin = _read_rearm_margin(params.get("rearm_margin", DEFAULT_REARM_MARGIN))
     tiers = _read_tiers(params.get("tiers"))
     return DrawdownPlanConfig(
         investment_fund_symbol=fund_symbol,
@@ -184,6 +193,7 @@ def parse_drawdown_plan_config(
         tiers=tiers,
         sma_window=sma_window,
         sma_slope_window=slope_window,
+        rearm_margin=rearm_margin,
     )
 
 
@@ -208,11 +218,12 @@ def evaluate_drawdown_plan(
     latest_price = float(latest["close"])
 
     if active_cycle is None:
-        peak_date, peak_price = _initial_peak(
+        initial_peak_date, initial_peak_price = _initial_peak(
             frame,
             latest_date=latest_date,
             lookback_days=config.lookback_days,
         )
+        peak_date, peak_price = initial_peak_date, initial_peak_price
         saw_below_peak = any(
             float(row.close) < peak_price
             and not math.isclose(
@@ -230,10 +241,16 @@ def evaluate_drawdown_plan(
     else:
         if latest_date < active_cycle.last_evaluated_date:
             raise ValueError("Confirmed history is older than the active cycle state.")
-        peak_date, peak_price, cycle_changed, saw_below_peak = _recover_cycle(
-            frame,
-            active_cycle,
-        )
+        (
+            initial_peak_date,
+            initial_peak_price,
+            peak_date,
+            peak_price,
+            cycle_changed,
+            saw_below_peak,
+        ) = _recover_cycle(frame, active_cycle, rearm_margin=config.rearm_margin)
+        if cycle_changed:
+            initial_peak_date, initial_peak_price = peak_date, peak_price
         cycle_initialized = False
 
     drawdown = max(0.0, 1 - latest_price / peak_price)
@@ -256,6 +273,8 @@ def evaluate_drawdown_plan(
     return DrawdownPlanEvaluation(
         latest_date=latest_date,
         latest_price=latest_price,
+        initial_peak_date=initial_peak_date,
+        initial_peak_price=initial_peak_price,
         peak_date=peak_date,
         peak_price=peak_price,
         drawdown=drawdown,
@@ -497,6 +516,9 @@ def build_drawdown_plan_pre_alert(
             "confirmed_close_date": confirmed_date.isoformat(),
             "source": evaluation.source,
             "quote_time": quote_time.isoformat(),
+            "rearm_margin": config.rearm_margin,
+            "initial_peak_date": evaluation.initial_peak_date.isoformat(),
+            "initial_peak_price": evaluation.initial_peak_price,
             "peak_date": evaluation.peak_date.isoformat(),
             "peak_price": evaluation.peak_price,
             "latest_price": evaluation.latest_price,
@@ -640,6 +662,9 @@ def build_drawdown_plan_alert(
             "data_date": evaluation.latest_date.isoformat(),
             "source": evaluation.source,
             "price_basis": "qfq",
+            "rearm_margin": config.rearm_margin,
+            "initial_peak_date": evaluation.initial_peak_date.isoformat(),
+            "initial_peak_price": evaluation.initial_peak_price,
             "peak_date": evaluation.peak_date.isoformat(),
             "peak_price": evaluation.peak_price,
             "latest_price": evaluation.latest_price,
@@ -672,6 +697,8 @@ def validate_drawdown_plan_notification_size(
     evaluation = DrawdownPlanEvaluation(
         latest_date=latest_date,
         latest_price=1,
+        initial_peak_date=date(2099, 1, 1),
+        initial_peak_price=1e308,
         peak_date=date(2099, 1, 1),
         peak_price=1e308,
         drawdown=0.999,
@@ -911,6 +938,19 @@ def _read_finite_number(value: object, name: str) -> float:
     return number
 
 
+def _read_rearm_margin(value: object) -> float:
+    """Read the persisted decimal fraction without coercing strings/bools."""
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("rearm_margin must be a finite number.")
+    margin = float(value)
+    if not math.isfinite(margin):
+        raise ValueError("rearm_margin must be a finite number.")
+    if margin <= 0 or margin >= 1:
+        raise ValueError("rearm_margin must be greater than 0 and less than 1.")
+    return margin
+
+
 def _canonical_number(value: float) -> str:
     return format(Decimal(str(value)).normalize(), "f")
 
@@ -933,39 +973,114 @@ def _initial_peak(
 def _recover_cycle(
     frame: pd.DataFrame,
     active_cycle: ActiveDrawdownCycle,
-) -> tuple[date, float, bool, bool]:
-    _require_positive_finite(active_cycle.peak_price, "active cycle peak price")
-    peak_timestamp = pd.Timestamp(active_cycle.peak_date)
+    *,
+    rearm_margin: float,
+) -> tuple[date, float, date, float, bool, bool]:
+    """Recover persisted cycle prices and process only new confirmed closes.
+
+    Historical rows can repair QFQ-restated prices and the moving peak, but
+    they cannot rearm a cycle.  A cycle change is possible only while scanning
+    rows newer than ``last_evaluated_date``.
+    """
+
+    margin = _read_rearm_margin(rearm_margin)
+    initial_peak_date = _require_cycle_date(
+        active_cycle.initial_peak_date,
+        "active cycle initial peak date",
+    )
+    peak_date = _require_cycle_date(active_cycle.peak_date, "active cycle peak date")
+    last_evaluated_date = _require_cycle_date(
+        active_cycle.last_evaluated_date,
+        "active cycle last evaluated date",
+    )
+    if initial_peak_date > last_evaluated_date:
+        raise ValueError("Active cycle initial peak date is after its last evaluation.")
+    if peak_date < initial_peak_date or peak_date > last_evaluated_date:
+        raise ValueError("Active cycle peak date is outside its cycle range.")
+    _require_positive_finite(
+        active_cycle.initial_peak_price,
+        "persisted active cycle initial peak price",
+    )
+    _require_positive_finite(
+        active_cycle.peak_price,
+        "persisted active cycle peak price",
+    )
+
+    initial_peak_timestamp = pd.Timestamp(initial_peak_date)
+    peak_timestamp = pd.Timestamp(peak_date)
+    initial_rows = frame.loc[frame["date"] == initial_peak_timestamp]
+    if initial_rows.empty:
+        raise ValueError(
+            "Confirmed history does not include the active initial peak date."
+        )
     peak_rows = frame.loc[frame["date"] == peak_timestamp]
     if peak_rows.empty:
         raise ValueError("Confirmed history does not include the active peak date.")
 
-    peak_date = active_cycle.peak_date
+    # Dates, not the stored QFQ numbers, identify both peaks.  This is what
+    # makes a factor/restatement safe while retaining a small durable state.
+    initial_peak_price = float(initial_rows.iloc[-1]["close"])
     peak_price = float(peak_rows.iloc[-1]["close"])
-    saw_below = active_cycle.saw_below_peak
-    changed = False
-    for row in frame.loc[frame["date"] > peak_timestamp].itertuples(index=False):
+    _require_positive_finite(initial_peak_price, "active cycle initial peak price")
+    _require_positive_finite(peak_price, "active cycle peak price")
+
+    # Reconstruct a higher current peak from already-evaluated history when a
+    # provider restatement or an older retention gap made persisted numbers
+    # stale.  This is deliberately never a cycle-change event.
+    historical = frame.loc[
+        (frame["date"] >= initial_peak_timestamp)
+        & (frame["date"] <= pd.Timestamp(last_evaluated_date))
+    ]
+    for row in historical.itertuples(index=False):
         current_date = row.date.date()
         current_price = float(row.close)
-        equal_peak = math.isclose(
+        if current_price > peak_price and not _approximately_equal(
             current_price,
             peak_price,
-            rel_tol=_PRICE_RELATIVE_TOLERANCE,
-            abs_tol=_PRICE_ABSOLUTE_TOLERANCE,
-        )
+        ):
+            peak_date = current_date
+            peak_price = current_price
+
+    saw_below = bool(active_cycle.saw_below_peak)
+    changed = False
+    new_rows = frame.loc[frame["date"] > pd.Timestamp(last_evaluated_date)]
+    for row in new_rows.itertuples(index=False):
+        current_date = row.date.date()
+        current_price = float(row.close)
+        equal_peak = _approximately_equal(current_price, peak_price)
         if current_price > peak_price and not equal_peak:
             peak_date = current_date
             peak_price = current_price
             saw_below = False
-            changed = True
-        elif equal_peak and saw_below:
-            peak_date = current_date
-            peak_price = current_price
-            saw_below = False
-            changed = True
+            changed = changed or (
+                peak_price / initial_peak_price - 1 + _THRESHOLD_TOLERANCE >= margin
+            )
         elif current_price < peak_price and not equal_peak:
             saw_below = True
-    return peak_date, peak_price, changed, saw_below
+
+    return (
+        initial_peak_date,
+        initial_peak_price,
+        peak_date,
+        peak_price,
+        changed,
+        saw_below,
+    )
+
+
+def _approximately_equal(left: float, right: float) -> bool:
+    return math.isclose(
+        left,
+        right,
+        rel_tol=_PRICE_RELATIVE_TOLERANCE,
+        abs_tol=_PRICE_ABSOLUTE_TOLERANCE,
+    )
+
+
+def _require_cycle_date(value: object, name: str) -> date:
+    if not isinstance(value, date):
+        raise ValueError(f"{name} must be a valid date.")
+    return value
 
 
 def _require_positive_finite(value: object, name: str) -> None:

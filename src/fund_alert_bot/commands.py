@@ -71,6 +71,7 @@ from fund_alert_bot.db import (
     skip_scheduled_dca_occurrence,
     snooze_drawdown_tiers_for_date,
     update_dca_rule_amount,
+    update_drawdown_plan_rearm_margin,
     upsert_fund_cutoff,
     upsert_fund_fee,
     upsert_position_snapshot,
@@ -95,6 +96,7 @@ from fund_alert_bot.notifications.dispatch import send_alert_notifications
 from fund_alert_bot.notifications.service import build_notification_service
 from fund_alert_bot.rules.dca import normalize_weekday
 from fund_alert_bot.rules.drawdown_plan import (
+    DEFAULT_REARM_MARGIN,
     TIER_STATE_ADDED,
     TIER_STATE_PENDING,
     TIER_STATE_SKIPPED,
@@ -140,8 +142,9 @@ SET_FUND_CUTOFF_USAGE = "Usage: /set_fund_cutoff <fund_symbol> <HH:MM>"
 SYNC_POSITION_USAGE = "Usage: /sync_position <fund_symbol> <units> <average_unit_cost>"
 ADD_DRAWDOWN_PLAN_USAGE = (
     "Usage: /add_drawdown_plan <reference_etf_symbol> <feeder_fund_symbol> "
-    "<name> <tiers> [lookback:<calendar_days>]"
+    "<name> <tiers> [lookback:<calendar_days>] [rearm:<percent>]"
 )
+SET_PLAN_REARM_USAGE = "Usage: /set_plan_rearm <plan_id> <percent>"
 MARK_ADDED_USAGE = "Usage: /mark_added <plan_id> <tier_percentages> [YYYY-MM-DD]"
 START_MESSAGE = "fund-alert-bot is running. Use /help to see available commands."
 HELP_MESSAGE = "\n".join(
@@ -161,7 +164,8 @@ HELP_MESSAGE = "\n".join(
         "/set_fund_cutoff <fund_symbol> <HH:MM>",
         "/sync_position <fund_symbol> <units> <average_unit_cost>",
         "/add_drawdown_plan <reference_etf> <feeder_fund> <name> <tiers> "
-        "[lookback:<days>]",
+        "[lookback:<days>] [rearm:<percent>]",
+        "/set_plan_rearm <plan_id> <percent> - Change a plan rearm margin",
         "/mark_added <plan_id> <tier_percentages> [YYYY-MM-DD] "
         "- Record an addition you made",
         "/plans - Show investment-plan status",
@@ -198,6 +202,7 @@ BOT_COMMAND_MENU = (
     ("set_fund_cutoff", "Change a fund subscription cutoff"),
     ("sync_position", "Sync a feeder-fund position"),
     ("add_drawdown_plan", "Add a drawdown buy plan"),
+    ("set_plan_rearm", "Change a plan rearm margin"),
     ("mark_added", "Record a completed addition"),
     ("plans", "Show investment-plan status"),
     ("list", "List configured rules and IDs"),
@@ -300,6 +305,14 @@ class DrawdownPlanCommand:
     name: str
     params: dict[str, object]
     config: DrawdownPlanConfig
+
+
+@dataclass(frozen=True, slots=True)
+class SetPlanRearmCommand:
+    """Parsed /set_plan_rearm command fields."""
+
+    plan_id: int
+    rearm_margin: float
 
 
 @dataclass(slots=True)
@@ -913,7 +926,7 @@ def parse_add_drawdown_plan_args(args: Sequence[str]) -> DrawdownPlanCommand:
         words = shlex.split(" ".join(args))
     except ValueError as exc:
         raise CommandParseError(f"{ADD_DRAWDOWN_PLAN_USAGE}\n{exc}") from exc
-    if len(words) not in {4, 5}:
+    if len(words) not in {4, 5, 6}:
         raise CommandParseError(ADD_DRAWDOWN_PLAN_USAGE)
 
     reference_symbol = _parse_fund_symbol(words[0])
@@ -922,21 +935,39 @@ def parse_add_drawdown_plan_args(args: Sequence[str]) -> DrawdownPlanCommand:
     if not name:
         raise CommandParseError("name must not be empty")
     lookback_days = 365
-    if len(words) == 5:
-        option = words[4]
-        if not option.startswith("lookback:"):
-            raise CommandParseError("only trailing lookback:<calendar_days> is allowed")
-        try:
-            lookback_days = int(option.removeprefix("lookback:"))
-        except ValueError as exc:
-            raise CommandParseError("lookback must be a positive integer") from exc
-        if lookback_days <= 0:
-            raise CommandParseError("lookback must be a positive integer")
+    rearm_margin = DEFAULT_REARM_MARGIN
+    seen_options: set[str] = set()
+    for option in words[4:]:
+        if option.startswith("lookback:"):
+            option_name = "lookback"
+            if option_name in seen_options:
+                raise CommandParseError("duplicate lookback option")
+            seen_options.add(option_name)
+            try:
+                lookback_days = int(option.removeprefix("lookback:"))
+            except ValueError as exc:
+                raise CommandParseError("lookback must be a positive integer") from exc
+            if lookback_days <= 0:
+                raise CommandParseError("lookback must be a positive integer")
+        elif option.startswith("rearm:"):
+            option_name = "rearm"
+            if option_name in seen_options:
+                raise CommandParseError("duplicate rearm option")
+            seen_options.add(option_name)
+            rearm_margin = parse_rearm_percent(
+                option.removeprefix("rearm:"),
+            )
+        else:
+            raise CommandParseError(
+                "unknown option; only trailing lookback:<calendar_days> or "
+                "rearm:<percent> options are allowed"
+            )
 
     tiers = _parse_drawdown_plan_tiers(words[3])
     params: dict[str, object] = {
         "investment_fund_symbol": investment_fund_symbol,
         "lookback_days": lookback_days,
+        "rearm_margin": rearm_margin,
         "tiers": tiers,
         "sma_window": 250,
         "sma_slope_window": 20,
@@ -961,6 +992,39 @@ def parse_add_drawdown_plan_args(args: Sequence[str]) -> DrawdownPlanCommand:
         params,
         config,
     )
+
+
+def parse_rearm_percent(raw_percent: str) -> float:
+    """Parse a user-facing rearm percentage into a decimal fraction."""
+
+    raw_value = raw_percent.strip()
+    if raw_value.endswith("%"):
+        raw_value = raw_value[:-1]
+    try:
+        percent = float(raw_value)
+    except ValueError as exc:
+        raise CommandParseError(
+            "rearm percent must be finite and between 0 and 100"
+        ) from exc
+    if not math.isfinite(percent) or percent <= 0 or percent >= 100:
+        raise CommandParseError(
+            "rearm percent must be greater than 0 and less than 100"
+        )
+    return percent / 100
+
+
+def parse_set_plan_rearm_args(args: Sequence[str]) -> SetPlanRearmCommand:
+    """Parse /set_plan_rearm arguments."""
+
+    if len(args) != 2:
+        raise CommandParseError(SET_PLAN_REARM_USAGE)
+    try:
+        plan_id = int(args[0])
+    except ValueError as exc:
+        raise CommandParseError("plan_id must be a positive integer") from exc
+    if plan_id <= 0:
+        raise CommandParseError("plan_id must be a positive integer")
+    return SetPlanRearmCommand(plan_id, parse_rearm_percent(args[1]))
 
 
 def _parse_drawdown_plan_tiers(raw_tiers: str) -> list[dict[str, int | float]]:
@@ -1296,6 +1360,9 @@ def build_drawdown_plan_preview(
         f"Investment feeder fund: {command.investment_fund_symbol}",
         f"Display name: {command.name}",
         f"Lookback: {command.config.lookback_days} calendar days",
+        f"Rearm margin: {format_plan_percent(command.config.rearm_margin)}",
+        "A new allocation cycle requires a confirmed new peak at least "
+        f"{format_plan_percent(command.config.rearm_margin)} above the cycle anchor.",
         "Tiers (incremental):",
         *(
             f"-{format_plan_percent(tier.drawdown)} → {format_plan_amount(tier.amount)}"
@@ -1501,6 +1568,8 @@ def format_plan_overview(
             f"{status.name} (plan {status.rule_id}) — {status.readiness}",
             f"ETF {status.reference_symbol} → fund "
             f"{status.config.investment_fund_symbol}",
+            "Rearm: +"
+            f"{format_plan_percent(status.config.rearm_margin)} from cycle anchor",
             f"Drawdown: {_format_plan_drawdown(status.evaluation.drawdown)} "
             f"({status.evaluation.latest_date}, {status.evaluation.source})",
         ]
@@ -1600,6 +1669,9 @@ def format_plan_details(result: DrawdownPlanStatusResult) -> str:
     lines = ["", "📉 Drawdown Add Plan status (read-only)"]
     for status in result.statuses:
         evaluation = status.evaluation
+        rearm_threshold = evaluation.initial_peak_price * (
+            1 + status.config.rearm_margin
+        )
         lines.extend(
             (
                 "",
@@ -1608,7 +1680,12 @@ def format_plan_details(result: DrawdownPlanStatusResult) -> str:
                 f"Investment fund: {status.config.investment_fund_symbol}",
                 f"Data: {evaluation.latest_date} / {evaluation.source} qfq close",
                 f"Current: {evaluation.latest_price:.6g}",
-                f"Peak: {evaluation.peak_price:.6g} on {evaluation.peak_date}",
+                f"Cycle anchor: {evaluation.initial_peak_price:.6g} on "
+                f"{evaluation.initial_peak_date}",
+                f"Current peak: {evaluation.peak_price:.6g} on {evaluation.peak_date}",
+                f"Rearm margin: {format_plan_percent(status.config.rearm_margin)}",
+                f"Rearm threshold: {rearm_threshold:.6g}",
+                "Rearm occurs only on a future confirmed new peak.",
                 f"Drawdown: {_format_plan_drawdown(evaluation.drawdown)}",
                 *_format_plan_trend(status),
                 f"Readiness: {status.readiness}",
@@ -1807,15 +1884,21 @@ def _format_rule_row(row: Any) -> str:
     try:
         params = _load_params(str(row["params_json"]))
         if row["type"] == DRAW_DOWN_PLAN_RULE_TYPE:
+            config = parse_drawdown_plan_config(
+                reference_symbol=str(row["symbol"]),
+                asset_type=str(row["asset_type"]),
+                params=params,
+            )
             tiers = ", ".join(
-                f"-{format_plan_percent(float(item['drawdown']))}:"
-                f"{format_plan_amount(float(item['amount']))}"
-                for item in params["tiers"]
+                f"-{format_plan_percent(tier.drawdown)}:"
+                f"{format_plan_amount(tier.amount)}"
+                for tier in config.tiers
             )
             lines.extend(
                 (
                     f"Reference ETF: {row['symbol']}",
                     f"Investment fund: {params['investment_fund_symbol']}",
+                    f"Rearm margin: {format_plan_percent(config.rearm_margin)}",
                     f"Tiers: {tiers}",
                 )
             )
@@ -2473,6 +2556,47 @@ def build_command_handlers(
             (
                 f"Updated DCA rule id={rule_id} {row['name']} future amount to "
                 f"{format_plan_amount(amount)}. Existing occurrences are unchanged."
+            ),
+        )
+
+    async def set_plan_rearm(
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        if await reject_if_unauthorized(update, allowed_user_ids):
+            return
+        try:
+            command = parse_set_plan_rearm_args(getattr(context, "args", ()))
+        except CommandParseError as exc:
+            await _reply_text(update, str(exc))
+            return
+
+        def update_rearm_margin() -> tuple[Any, float]:
+            with open_connection(sqlite_path) as connection:
+                initialize_database(connection)
+                return update_drawdown_plan_rearm_margin(
+                    connection,
+                    rule_id=command.plan_id,
+                    rearm_margin=command.rearm_margin,
+                )
+
+        try:
+            row, old_margin = await run_serialized(work_lock, update_rearm_margin)
+        except (ValueError, sqlite3.IntegrityError) as exc:
+            await _reply_text(update, str(exc))
+            return
+        await _reply_text(
+            update,
+            "\n".join(
+                (
+                    f"Updated Drawdown Add Plan id={row['id']}",
+                    "Rearm margin: "
+                    f"{format_plan_percent(old_margin)} → "
+                    f"{format_plan_percent(command.rearm_margin)}",
+                    "Current cycle, tier records, additions and position state "
+                    "are unchanged.",
+                    "The new setting applies to future confirmed-close evaluations.",
+                )
             ),
         )
 
@@ -4312,6 +4436,7 @@ def build_command_handlers(
         CommandHandler("add_profit", add_profit),
         CommandHandler("add_dca", add_dca),
         CommandHandler("set_dca_amount", set_dca_amount),
+        CommandHandler("set_plan_rearm", set_plan_rearm),
         CommandHandler("add_drawdown_plan", add_drawdown_plan),
         CommandHandler("mark_added", mark_added),
         CommandHandler("set_fund_fee", set_fund_fee),

@@ -5,6 +5,7 @@ from fund_alert_bot.rules.drawdown import (
     calculate_drawdown_from_high,
 )
 from fund_alert_bot.rules.drawdown_plan import (
+    DEFAULT_REARM_MARGIN,
     ActiveDrawdownCycle,
     DrawdownPlanConfig,
     DrawdownPlanEvaluation,
@@ -27,6 +28,7 @@ from fund_alert_bot.rules.profit import (
 
 __all__ = [
     "ActiveDrawdownCycle",
+    "DEFAULT_REARM_MARGIN",
     "DrawdownPlanConfig",
     "DrawdownPlanEvaluation",
     "DrawdownTier",

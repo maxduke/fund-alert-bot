@@ -463,6 +463,8 @@ def evaluate_drawdown_plan_rule(
             else active_cycle.last_evaluated_date.isoformat()
         ),
         start_new_cycle=active_cycle is None or evaluation.cycle_changed,
+        initial_peak_date=evaluation.initial_peak_date.isoformat(),
+        initial_peak_price=evaluation.initial_peak_price,
         peak_date=evaluation.peak_date.isoformat(),
         peak_price=evaluation.peak_price,
         evaluation_date=evaluation.latest_date.isoformat(),
@@ -472,7 +474,9 @@ def evaluate_drawdown_plan_rule(
     )
     LOGGER.info(
         "Drawdown plan evaluation rule_id=%s cycle_id=%s symbol=%s evaluation_date=%s "
-        "latest_price=%s peak_price=%s drawdown=%s newly_crossed_tiers=%s "
+        "latest_price=%s initial_peak_price=%s initial_peak_date=%s "
+        "peak_price=%s peak_date=%s rearm_margin=%s cycle_changed=%s "
+        "drawdown=%s newly_crossed_tiers=%s "
         "actionable_tiers=%s sma=%s distance_to_sma=%s sma_slope=%s "
         "alert_reserved=%s",
         rule_id,
@@ -480,7 +484,12 @@ def evaluate_drawdown_plan_rule(
         reference_symbol,
         evaluation.latest_date,
         evaluation.latest_price,
+        evaluation.initial_peak_price,
+        evaluation.initial_peak_date,
         evaluation.peak_price,
+        evaluation.peak_date,
+        config.rearm_margin,
+        evaluation.cycle_changed,
         evaluation.drawdown,
         [tier.key for tier in tiers_to_record],
         [tier.key for tier in actionable_tiers],
@@ -748,7 +757,8 @@ def evaluate_drawdown_plan_prealerts(
             LOGGER.info(
                 "Drawdown plan pre-alert rule_id=%s cycle_id=%s symbol=%s "
                 "evaluation_date=%s "
-                "latest_price=%s peak_price=%s drawdown=%s "
+                "latest_price=%s initial_peak_price=%s initial_peak_date=%s "
+                "peak_price=%s peak_date=%s rearm_margin=%s drawdown=%s "
                 "newly_crossed_tiers=%s sma=%s distance_to_sma=%s sma_slope=%s "
                 "actionable_tiers=%s alert_reserved=true",
                 rule_id,
@@ -756,7 +766,11 @@ def evaluate_drawdown_plan_prealerts(
                 reference_symbol,
                 realtime.latest_date,
                 realtime.latest_price,
+                realtime.initial_peak_price,
+                realtime.initial_peak_date,
                 realtime.peak_price,
+                realtime.peak_date,
+                config.rearm_margin,
                 realtime.drawdown,
                 [tier.key for tier in newly_realtime_tiers],
                 realtime.sma,
@@ -1235,6 +1249,8 @@ def _load_drawdown_plan_state(
         return config, None, set()
     active_cycle = ActiveDrawdownCycle(
         cycle_id=int(active_row["id"]),
+        initial_peak_date=date.fromisoformat(str(active_row["initial_peak_date"])),
+        initial_peak_price=float(active_row["initial_peak_price"]),
         peak_date=date.fromisoformat(str(active_row["peak_date"])),
         peak_price=float(active_row["peak_price"]),
         last_evaluated_date=date.fromisoformat(str(active_row["last_evaluated_date"])),
@@ -1533,6 +1549,9 @@ def _fetch_drawdown_plan_history(
         start_date=required_history_start(
             evaluation_date=end_date,
             config=config,
+            initial_peak_date=(
+                None if active_cycle is None else active_cycle.initial_peak_date
+            ),
             active_peak_date=None if active_cycle is None else active_cycle.peak_date,
         ),
         end_date=end_date,
