@@ -1272,7 +1272,8 @@ def _english_price_history() -> pd.DataFrame:
             "close": ["2.0", "2.3", "2.2"],
             "volume": ["900", "1100", "1000"],
             "amount": ["9000", "11000", "10000"],
-        }
+        },
+        dtype=object,
     )
 
 

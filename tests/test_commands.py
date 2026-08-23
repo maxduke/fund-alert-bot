@@ -3072,6 +3072,7 @@ def test_check_sends_due_dca_without_market_data_fetch(tmp_path) -> None:
         {123},
         sqlite_path=sqlite_path,
         market_data_provider=provider,
+        timezone="UTC",
     )
     message = FakeMessage()
     update = SimpleNamespace(
