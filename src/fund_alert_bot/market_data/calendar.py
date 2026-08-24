@@ -50,6 +50,8 @@ class CNMarketCalendar:
 
         was_cached = self._trade_days is not None
         trade_days = self._load_trade_days()
+        if self._cache_is_stale_for(check_date):
+            return is_cn_market_weekday(check_date)
         if was_cached and trade_days is not None and check_date > max(trade_days):
             trade_days = self._load_trade_days(refresh=True)
         if trade_days is None or check_date > max(trade_days):
@@ -63,6 +65,10 @@ class CNMarketCalendar:
         trade_days = self._load_trade_days()
         if trade_days is None:
             raise MarketCalendarUnavailableError("CN trade calendar is unavailable.")
+        if self._cache_is_stale_for(check_date):
+            raise MarketCalendarUnavailableError(
+                "CN trade calendar refresh is unavailable for the requested date."
+            )
         if was_cached and not _covers(trade_days, check_date):
             trade_days = self._load_trade_days(refresh=True)
         if trade_days is None or not _covers(trade_days, check_date):
@@ -77,7 +83,7 @@ class CNMarketCalendar:
             if self._loaded_on == today:
                 return self._trade_days
             if self._load_attempted_on == today:
-                return None
+                return self._trade_days
             self._load_attempted_on = today
         elif self._coverage_refresh_on == today:
             return None if self._coverage_refresh_failed else self._trade_days
@@ -96,7 +102,7 @@ class CNMarketCalendar:
             )
             if refresh:
                 self._coverage_refresh_failed = True
-            return None
+            return None if refresh else self._trade_days
 
         if trade_days is None:
             LOGGER.warning(
@@ -105,12 +111,20 @@ class CNMarketCalendar:
             )
             if refresh:
                 self._coverage_refresh_failed = True
-            return None
+            return None if refresh else self._trade_days
 
         self._trade_days = trade_days
         self._loaded_on = today
         self._coverage_refresh_failed = False
         return self._trade_days
+
+    def _cache_is_stale_for(self, check_date: date) -> bool:
+        today = self._today_factory()
+        return (
+            self._trade_days is not None
+            and self._loaded_on != today
+            and check_date >= today
+        )
 
     @property
     def _akshare(self) -> Any:
