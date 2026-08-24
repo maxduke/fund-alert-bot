@@ -359,6 +359,7 @@ class DrawdownPlanStatus:
     position: Any | None
     fund_nav: FundNav | None
     position_sync_required_since: str | None
+    fund_nav_unavailable_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1032,6 +1033,7 @@ def read_drawdown_plan_statuses(
     *,
     end_date: date | None = None,
     minimum_fund_nav_date: date | None = None,
+    fund_nav_unavailable_reason: str | None = None,
     force_refresh: bool = False,
 ) -> DrawdownPlanStatusResult:
     """Calculate current plan state without reserving alerts or changing cycles."""
@@ -1112,23 +1114,27 @@ def read_drawdown_plan_statuses(
                     if row["snoozed_market_date"] == check_date.isoformat()
                 )
             fund_nav = None
+            nav_unavailable_reason = None
             if position is not None and float(position["units"]) > 0:
-                try:
-                    fund_nav = get_cached_or_fetch_fund_nav(
-                        connection,
-                        market_data_provider,
-                        config.investment_fund_symbol,
-                        minimum_date=minimum_fund_nav_date,
-                        force_refresh=force_refresh,
-                    )
-                except MarketDataProviderError as exc:
-                    no_data_skips.append(
-                        RuleNoDataSkip(
-                            int(rule["id"]),
+                if fund_nav_unavailable_reason is not None:
+                    nav_unavailable_reason = fund_nav_unavailable_reason
+                else:
+                    try:
+                        fund_nav = get_cached_or_fetch_fund_nav(
+                            connection,
+                            market_data_provider,
                             config.investment_fund_symbol,
-                            str(exc),
+                            minimum_date=minimum_fund_nav_date,
+                            force_refresh=force_refresh,
                         )
-                    )
+                    except MarketDataProviderError as exc:
+                        no_data_skips.append(
+                            RuleNoDataSkip(
+                                int(rule["id"]),
+                                config.investment_fund_symbol,
+                                str(exc),
+                            )
+                        )
             statuses.append(
                 DrawdownPlanStatus(
                     rule_id=int(rule["id"]),
@@ -1151,6 +1157,7 @@ def read_drawdown_plan_statuses(
                         if settings is None
                         else settings["position_sync_required_since"]
                     ),
+                    fund_nav_unavailable_reason=nav_unavailable_reason,
                 )
             )
         except MarketDataProviderError as exc:

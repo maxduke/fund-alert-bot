@@ -268,6 +268,51 @@ def test_chinese_localizes_known_label_suffixes_and_active_decorations() -> None
         set_language("en")
 
 
+def test_chinese_localizes_dynamic_position_and_validation_messages() -> None:
+    set_language("zh-CN")
+    try:
+        assert (
+            localize_text("Position: estimated; average cost 1.200000; reached 1/2")
+            == "持仓： 估算；平均成本 1.200000；已达到 1/2"
+        )
+        assert localize_text("Position: not synced — remember /sync_position") == (
+            "持仓：尚未同步——请记得运行 /sync_position"
+        )
+        assert (
+            localize_text(
+                "Position Sync required — reminders paused; run /sync_position"
+            )
+            == "需要同步持仓——提醒已暂停；请运行 /sync_position"
+        )
+        assert (
+            localize_text("Position value: ¥1,500.00 using NAV 1.23 on 2026-08-23")
+            == "持仓市值： ¥1,500.00 使用净值 1.23，日期：2026-08-23"
+        )
+        assert (
+            localize_text("Position value: unavailable (dated fund NAV missing)")
+            == "持仓市值：不可用（缺少对应日期的基金净值）"
+        )
+        assert (
+            localize_text(
+                "Position value: unavailable: confirmed feeder-fund NAV date "
+                "unavailable"
+            )
+            == "持仓市值：不可用：无法确认基金净值日期"
+        )
+        assert localize_text("Confirmed ETF history has no dated rows.") == (
+            "已确认的 ETF 历史没有带日期的记录。"
+        )
+        assert (
+            localize_text(
+                "weekday must be one of 周一, 周二, 周三, 周四, 周五, 周六, 周日, "
+                "or Monday through Sunday"
+            )
+            == "weekday 必须是周一至周日"
+        )
+    finally:
+        set_language("en")
+
+
 def test_chinese_localizes_complete_drawdown_and_profit_alerts() -> None:
     set_language("zh-CN")
     try:

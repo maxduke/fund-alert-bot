@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from datetime import date
 from typing import Any, Protocol
 
@@ -30,15 +31,27 @@ class MarketCalendar(Protocol):
 class CNMarketCalendar:
     """CN trading calendar backed by AKShare with weekday fallback."""
 
-    def __init__(self, *, ak_module: Any | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        ak_module: Any | None = None,
+        today_factory: Callable[[], date] = date.today,
+    ) -> None:
         self._ak_module = ak_module
+        self._today_factory = today_factory
         self._trade_days: set[date] | None = None
+        self._loaded_on: date | None = None
+        self._load_attempted_on: date | None = None
+        self._coverage_refresh_on: date | None = None
+        self._coverage_refresh_failed = False
 
     def is_trading_day(self, check_date: date) -> bool:
         """Return True when check_date is a CN trading day."""
 
         was_cached = self._trade_days is not None
         trade_days = self._load_trade_days()
+        if self._cache_is_stale_for(check_date):
+            return is_cn_market_weekday(check_date)
         if was_cached and trade_days is not None and check_date > max(trade_days):
             trade_days = self._load_trade_days(refresh=True)
         if trade_days is None or check_date > max(trade_days):
@@ -52,6 +65,10 @@ class CNMarketCalendar:
         trade_days = self._load_trade_days()
         if trade_days is None:
             raise MarketCalendarUnavailableError("CN trade calendar is unavailable.")
+        if self._cache_is_stale_for(check_date):
+            raise MarketCalendarUnavailableError(
+                "CN trade calendar refresh is unavailable for the requested date."
+            )
         if was_cached and not _covers(trade_days, check_date):
             trade_days = self._load_trade_days(refresh=True)
         if trade_days is None or not _covers(trade_days, check_date):
@@ -61,8 +78,18 @@ class CNMarketCalendar:
         return check_date in trade_days
 
     def _load_trade_days(self, *, refresh: bool = False) -> set[date] | None:
-        if self._trade_days is not None and not refresh:
-            return self._trade_days
+        today = self._today_factory()
+        if not refresh:
+            if self._loaded_on == today:
+                return self._trade_days
+            if self._load_attempted_on == today:
+                return self._trade_days
+            self._load_attempted_on = today
+        elif self._coverage_refresh_on == today:
+            return None if self._coverage_refresh_failed else self._trade_days
+        else:
+            self._coverage_refresh_on = today
+            self._coverage_refresh_failed = False
 
         try:
             raw_data = self._akshare.tool_trade_date_hist_sina()
@@ -73,17 +100,31 @@ class CNMarketCalendar:
                 "falling back to weekday logic: %s",
                 exc,
             )
-            return None
+            if refresh:
+                self._coverage_refresh_failed = True
+            return None if refresh else self._trade_days
 
         if trade_days is None:
             LOGGER.warning(
                 "AKShare CN trade calendar was empty or missing a date column; "
                 "falling back to weekday logic."
             )
-            return None
+            if refresh:
+                self._coverage_refresh_failed = True
+            return None if refresh else self._trade_days
 
         self._trade_days = trade_days
+        self._loaded_on = today
+        self._coverage_refresh_failed = False
         return self._trade_days
+
+    def _cache_is_stale_for(self, check_date: date) -> bool:
+        today = self._today_factory()
+        return (
+            self._trade_days is not None
+            and self._loaded_on != today
+            and check_date >= today
+        )
 
     @property
     def _akshare(self) -> Any:

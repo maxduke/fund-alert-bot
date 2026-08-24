@@ -1441,7 +1441,7 @@ def build_drawdown_plan_preview(
 
 def format_plan_overview(
     result: DrawdownPlanStatusResult,
-    unmatched_positions: Sequence[tuple[Any, FundNav | None, str]] = (),
+    unmatched_positions: Sequence[tuple[Any, FundNav | None, str, str | None]] = (),
     dca_statuses: Sequence[Any] = (),
     profit_statuses: Sequence[Any] = (),
     profit_setup_funds: Sequence[tuple[str, str]] = (),
@@ -1620,7 +1620,7 @@ def format_plan_overview(
         )
         plan_lines.extend(_format_position_lines(status))
         lines.extend(plan_lines)
-    for position, nav, ownership in unmatched_positions:
+    for position, nav, ownership, nav_unavailable_reason in unmatched_positions:
         units = float(position["units"])
         accuracy = "estimated" if position["is_estimated"] else "exact"
         lines.extend(
@@ -1641,7 +1641,12 @@ def format_plan_overview(
         if units == 0:
             lines.append("Position value: ¥0.00 (closed)")
         elif nav is None:
-            lines.append("Position value: unavailable (dated fund NAV missing)")
+            reason = (
+                f": {nav_unavailable_reason}"
+                if nav_unavailable_reason is not None
+                else " (dated fund NAV missing)"
+            )
+            lines.append(f"Position value: unavailable{reason}")
         else:
             lines.append(
                 f"Position value: ¥{units * nav.value:,.2f} using NAV "
@@ -1850,7 +1855,11 @@ def _format_position_lines(status: DrawdownPlanStatus) -> tuple[str, ...]:
     if units == 0:
         lines.append("Position value: ¥0.00 (closed)")
     elif status.fund_nav is None:
-        lines.append("Position value: unavailable (dated fund NAV missing)")
+        if status.fund_nav_unavailable_reason is None:
+            lines.append("Position value: unavailable (dated fund NAV missing)")
+        else:
+            reason = status.fund_nav_unavailable_reason
+            lines.append(f"Position value: unavailable: {reason}")
     else:
         lines.append(
             f"Position value: ¥{units * status.fund_nav.value:,.2f} using NAV "
@@ -1867,11 +1876,6 @@ def _append_plan_failures(
         lines.append(f"⚠️ {skip.symbol}: data unavailable — {skip.message}")
     for error in result.errors:
         lines.append(f"❌ Plan {error.rule_id} {error.symbol}: {error.message}")
-
-
-def get_start_message() -> str:
-    """Return the current start message."""
-    return START_MESSAGE
 
 
 def _format_rule_row(row: Any) -> str:
@@ -1985,9 +1989,11 @@ def get_update_chat_id(update: object) -> int | None:
     return chat_id if isinstance(chat_id, int) else None
 
 
-def can_use_command(update: object, allowed_user_ids: Collection[int]) -> bool:
-    """Return whether an update-like object may use bot commands."""
-    return is_allowed_telegram_user(get_update_user_id(update), allowed_user_ids)
+def get_update_chat_type(update: object) -> str | None:
+    """Read the effective Telegram chat type from an update-like object."""
+    effective_chat = getattr(update, "effective_chat", None)
+    chat_type = getattr(effective_chat, "type", None)
+    return chat_type if isinstance(chat_type, str) else None
 
 
 def _dca_skip_response(status: str, rule_id: int, due_date: str) -> str:
@@ -2099,6 +2105,18 @@ async def reject_if_unauthorized(
     allowed_user_ids: frozenset[int],
 ) -> bool:
     user_id = get_update_user_id(update)
+    chat_type = get_update_chat_type(update)
+
+    # Telegram supplies a chat type on real updates. Missing types remain accepted
+    # for small update-like test doubles and backward-compatible integrations.
+    if chat_type not in (None, "private"):
+        LOGGER.warning(
+            "Rejected Telegram command outside a private chat user_id=%s chat_type=%s",
+            user_id if user_id is not None else "unknown",
+            chat_type,
+        )
+        await _reply_text(update, UNAUTHORIZED_MESSAGE)
+        return True
 
     if not allowed_user_ids:
         LOGGER.warning("TELEGRAM_ALLOWED_USER_IDS is empty; rejecting Telegram command")
@@ -4018,6 +4036,7 @@ def build_command_handlers(
         plan_date = _clock_now(clock).astimezone(timezone_info).date()
 
         def read_plans() -> tuple[Any, list[Any], list[Any], list[Any], list[Any]]:
+            fund_nav_unavailable_reason = None
             try:
                 minimum_fund_nav_date = latest_completed_open_date(
                     market_calendar,
@@ -4029,6 +4048,9 @@ def build_command_handlers(
                     exc,
                 )
                 minimum_fund_nav_date = None
+                fund_nav_unavailable_reason = (
+                    "confirmed feeder-fund NAV date unavailable"
+                )
             with open_connection(sqlite_path) as connection:
                 initialize_database(connection)
                 current_result = read_drawdown_plan_statuses(
@@ -4036,6 +4058,7 @@ def build_command_handlers(
                     market_data_provider,
                     end_date=plan_date,
                     minimum_fund_nav_date=minimum_fund_nav_date,
+                    fund_nav_unavailable_reason=fund_nav_unavailable_reason,
                     force_refresh=force_refresh,
                 )
                 planned_funds = set(list_enabled_drawdown_plan_fund_symbols(connection))
@@ -4055,12 +4078,21 @@ def build_command_handlers(
                 ]
                 current_unmatched_positions = []
                 for row in unmatched_rows:
-                    nav = None
                     sync_required = (
                         row["position_sync_required_since"] is not None
                         or row["settings_sync_required_since"] is not None
                     )
-                    if float(row["units"]) > 0 and not sync_required:
+                    nav = None
+                    nav_unavailable_reason = (
+                        fund_nav_unavailable_reason
+                        if float(row["units"]) > 0 and not sync_required
+                        else None
+                    )
+                    if (
+                        float(row["units"]) > 0
+                        and not sync_required
+                        and nav_unavailable_reason is None
+                    ):
                         try:
                             nav = get_cached_or_fetch_fund_nav(
                                 connection,
@@ -4079,7 +4111,9 @@ def build_command_handlers(
                         if row["fund_symbol"] in planned_funds
                         else "no enabled Drawdown Add Plan"
                     )
-                    current_unmatched_positions.append((row, nav, ownership))
+                    current_unmatched_positions.append(
+                        (row, nav, ownership, nav_unavailable_reason)
+                    )
                 known_funds = {
                     status.config.investment_fund_symbol: status.name
                     for status in current_result.statuses
@@ -4305,6 +4339,7 @@ def build_command_handlers(
 
         def run_check() -> tuple[Any, Any, Any, Any]:
             calendar = market_calendar
+            fund_nav_unavailable_reason = None
             try:
                 confirmed_end_date = latest_completed_open_date(
                     calendar,
@@ -4317,6 +4352,9 @@ def build_command_handlers(
                     exc,
                 )
                 confirmed_end_date = None
+                fund_nav_unavailable_reason = (
+                    "confirmed feeder-fund NAV date unavailable"
+                )
 
             with open_connection(sqlite_path) as connection:
                 initialize_database(connection)
@@ -4352,6 +4390,7 @@ def build_command_handlers(
                     market_data_provider,
                     end_date=check_date,
                     minimum_fund_nav_date=confirmed_end_date,
+                    fund_nav_unavailable_reason=fund_nav_unavailable_reason,
                 )
             return (
                 current_result,

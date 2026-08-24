@@ -13,7 +13,6 @@ from fund_alert_bot.db import (
     add_drawdown_plan_rule,
     add_rule,
     alert_exists,
-    clear_drawdown_tier_skip,
     connect,
     delete_rule,
     get_cached_fund_nav,
@@ -188,24 +187,6 @@ def test_drawdown_tier_reminder_preferences_are_idempotent_and_cycle_scoped(
         assert [row["tier_key"] for row in states] == ["0.15", "0.2"]
         assert all(row["skipped_for_cycle"] == 1 for row in states)
         assert all(row["snoozed_market_date"] is None for row in states)
-
-        clear_drawdown_tier_skip(
-            connection,
-            cycle_id=cycle_id,
-            tier_keys=("0.15",),
-        )
-        assert (
-            get_drawdown_tier_reminder_states(connection, cycle_id)["0.15"][
-                "skipped_for_cycle"
-            ]
-            == 0
-        )
-        assert (
-            get_drawdown_tier_reminder_states(connection, cycle_id)["0.2"][
-                "skipped_for_cycle"
-            ]
-            == 1
-        )
 
 
 def test_drawdown_tier_reminder_keys_are_canonical_and_unique(

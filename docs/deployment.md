@@ -47,6 +47,7 @@ Create a dedicated directory for this bot:
 sudo mkdir -p /opt/fund-alert-bot/data
 sudo chown -R "$USER":"$USER" /opt/fund-alert-bot
 cd /opt/fund-alert-bot
+chmod 700 data
 ```
 
 Copy `deploy/docker-compose.prod.yml` from this repository to:
@@ -86,6 +87,7 @@ settings:
 
 ```bash
 nano /opt/fund-alert-bot/.env
+chmod 600 /opt/fund-alert-bot/.env
 ```
 
 Use a Telegram bot token dedicated to `fund-alert-bot`. Do not reuse the token
@@ -108,8 +110,9 @@ FUND_NAV_PROCESS_TIME=08:30
 ```
 
 Replace `123456789` with at least one authorized numeric Telegram user ID; use
-commas for multiple IDs. An empty allowlist rejects every command and leaves the
-default Telegram notification channel with no recipient.
+commas for multiple IDs. Commands are accepted only in private chats. An empty
+allowlist is valid only when Bark, ntfy, or webhook is enabled; startup otherwise
+fails instead of running reminder jobs with no recipient.
 
 `BOT_LANGUAGE` controls all user-facing replies, buttons, and notification
 channels. Supported values are `zh-CN` and `en`; restart the container after a
@@ -158,8 +161,16 @@ drawdown tier or fabricate a price.
 
 ## 4. Log In To GHCR If Needed
 
-If `ghcr.io/maxduke/fund-alert-bot:latest` is private, log in with a GitHub
-token that has permission to read packages:
+The production Compose file requires an explicit immutable image tag in
+`BOT_IMAGE_TAG`; use the full commit SHA published by GitHub Actions, for
+example:
+
+```dotenv
+BOT_IMAGE_TAG=sha-0123456789abcdef0123456789abcdef01234567
+```
+
+If the image is private, log in with a GitHub token that has permission to read
+packages:
 
 ```bash
 echo "$GHCR_TOKEN" | docker login ghcr.io -u maxduke --password-stdin
@@ -172,6 +183,8 @@ If the image is public, this step can be skipped.
 From `/opt/fund-alert-bot`, pull the image and start the service:
 
 ```bash
+grep -Eq '^BOT_IMAGE_TAG=sha-[0-9a-f]{40}$' .env
+docker compose config >/dev/null
 docker compose pull
 docker compose up -d
 ```
@@ -182,6 +195,16 @@ on scheduled reminders:
 ```bash
 docker compose run --rm --entrypoint sh fund-alert-bot -c 'test -w /app/data'
 ```
+
+The image health check expects the scheduler to update
+`data/fund_alert_bot.sqlite3.heartbeat` at least once per minute. Confirm the
+container is healthy before relying on reminders:
+
+```bash
+docker compose ps
+```
+
+The check fails when the heartbeat is older than three minutes.
 
 Follow logs:
 
@@ -227,9 +250,13 @@ The production Compose file refuses to start when either setting is missing;
 this prevents an upgrade from silently making an existing SQLite database
 unwritable.
 
-Then pull the latest image, recreate the container, and verify data access:
+Edit `.env` and set `BOT_IMAGE_TAG` to the new published `sha-<full-commit>`
+tag. Keep the previous value so it can be restored if the health check fails.
+Then pull the pinned image, recreate the container, and verify data access:
 
 ```bash
+grep -Eq '^BOT_IMAGE_TAG=sha-[0-9a-f]{40}$' .env
+docker compose config >/dev/null
 docker compose pull
 docker compose up -d
 docker compose run --rm --entrypoint sh fund-alert-bot -c 'test -w /app/data'
@@ -255,12 +282,38 @@ the service again:
 ```bash
 cd /opt/fund-alert-bot
 mkdir -p backups
+chmod 700 backups
 docker compose stop
-cp data/fund_alert_bot.sqlite3 "backups/fund_alert_bot-$(date +%F-%H%M%S).sqlite3"
+umask 077
+backup="backups/fund_alert_bot-$(date +%F-%H%M%S).sqlite3"
+cp data/fund_alert_bot.sqlite3 "$backup"
 docker compose up -d
+age -r "$AGE_RECIPIENT" -o "$backup.age" "$backup"
+rm -f "$backup"
+rclone copy "$backup.age" remote:fund-alert-bot-backups/
 ```
 
-The important file to copy is `data/fund_alert_bot.sqlite3`.
+Use a scheduled job to run this backup at least daily. `AGE_RECIPIENT` is the
+public recipient; keep its private identity outside the VPS (for example in an
+offline password manager). Never put the private identity in the repository,
+Compose file, shell history, or logs. `remote:` above is an example encrypted
+off-site storage configured in `rclone`.
+
+At least monthly, perform a restore drill on a separate machine or directory:
+
+```bash
+mkdir -m 700 restore-drill
+rclone copy remote:fund-alert-bot-backups/ restore-drill/
+age -d -i /secure/offline-age-identity.txt \
+  -o restore-drill/fund_alert_bot.sqlite3 \
+  restore-drill/fund_alert_bot-YYYY-MM-DD-HHMMSS.sqlite3.age
+sqlite3 restore-drill/fund_alert_bot.sqlite3 'PRAGMA integrity_check;'
+```
+
+Proceed only when SQLite prints `ok`; record the drill date and tested backup.
+
+To roll back an application image, restore the previous `BOT_IMAGE_TAG` in
+`.env`, run `docker compose pull && docker compose up -d`, and inspect logs.
 
 ## Running Alongside `rsi6_monitor_bot`
 

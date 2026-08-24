@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -559,6 +560,7 @@ def test_register_jobs_passes_calendar_to_calendar_aware_jobs() -> None:
     after_close_job = fake_scheduler.jobs[scheduler.MARKET_AFTER_CLOSE_JOB_ID]
     fund_nav_job = fake_scheduler.jobs[scheduler.FUND_NAV_PROCESS_JOB_ID]
     dca_job = fake_scheduler.jobs[scheduler.DCA_MORNING_JOB_ID]
+    heartbeat_job = fake_scheduler.jobs[scheduler.HEARTBEAT_JOB_ID]
 
     assert before_close_job["func"] is scheduler.run_scheduled_before_close_check
     assert before_close_job["kwargs"]["market_calendar"] is market_calendar
@@ -569,7 +571,78 @@ def test_register_jobs_passes_calendar_to_calendar_aware_jobs() -> None:
     assert fund_nav_job["func"] is scheduler.run_scheduled_fund_nav_process
     assert fund_nav_job["kwargs"]["market_calendar"] is market_calendar
     assert fund_nav_job["kwargs"]["market_data_provider"] is provider
+    assert dca_job["func"] is scheduler.run_due_dca_checks
     assert dca_job["kwargs"]["market_calendar"] is market_calendar
+    assert heartbeat_job["func"] is scheduler.write_runtime_heartbeat
+
+
+def test_runtime_heartbeat_is_owner_only(tmp_path: Path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+
+    scheduler.write_runtime_heartbeat(sqlite_path=sqlite_path)
+
+    heartbeat_path = Path(f"{sqlite_path}.heartbeat")
+    assert heartbeat_path.exists()
+    if os.name == "posix":
+        assert heartbeat_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_due_dca_checks_replay_dates_missed_during_downtime(tmp_path: Path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    _add_dca_rule(sqlite_path)
+    with open_connection(sqlite_path) as connection:
+        connection.execute(
+            "INSERT INTO app_metadata (key, value) VALUES (?, ?)",
+            (scheduler.DCA_LAST_CHECKED_DATE_KEY, "2024-01-01"),
+        )
+        connection.commit()
+    application = FakeApplication()
+
+    checked = asyncio.run(
+        scheduler.run_due_dca_checks(
+            application=application,
+            sqlite_path=sqlite_path,
+            allowed_user_ids={123},
+            timezone="Asia/Shanghai",
+            reminder_time="09:30",
+            now=datetime(2024, 1, 4, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+        )
+    )
+
+    assert checked == 3
+    assert len(application.bot.messages) == 1
+    with open_connection(sqlite_path) as connection:
+        cursor = connection.execute(
+            "SELECT value FROM app_metadata WHERE key = ?",
+            (scheduler.DCA_LAST_CHECKED_DATE_KEY,),
+        ).fetchone()["value"]
+    assert cursor == "2024-01-04"
+
+
+def test_due_dca_checks_seed_cursor_before_first_reminder_time(tmp_path: Path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    _add_dca_rule(sqlite_path)
+    application = FakeApplication()
+
+    checked = asyncio.run(
+        scheduler.run_due_dca_checks(
+            application=application,
+            sqlite_path=sqlite_path,
+            allowed_user_ids={123},
+            timezone="Asia/Shanghai",
+            reminder_time="09:30",
+            now=datetime(2024, 1, 4, 8, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+        )
+    )
+
+    assert checked == 0
+    assert application.bot.messages == []
+    with open_connection(sqlite_path) as connection:
+        cursor = connection.execute(
+            "SELECT value FROM app_metadata WHERE key = ?",
+            (scheduler.DCA_LAST_CHECKED_DATE_KEY,),
+        ).fetchone()["value"]
+    assert cursor == "2024-01-03"
 
 
 def test_scheduled_before_close_check_uses_latest_drawdown_price(

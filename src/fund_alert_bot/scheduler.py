@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Collection, Iterator
 from contextlib import contextmanager
-from datetime import date, datetime, time, tzinfo
+from datetime import date, datetime, time, timedelta, tzinfo
 from pathlib import Path
 from threading import Lock
 from typing import TYPE_CHECKING, Any
@@ -64,9 +65,10 @@ DEFAULT_DCA_REMINDER_TIME = "09:30"
 DEFAULT_FUND_NAV_PROCESS_TIME = "08:30"
 MARKET_AFTER_CLOSE_JOB_ID = "market-after-close-check"
 MARKET_BEFORE_CLOSE_JOB_ID = "market-before-close-check"
-DRAW_DOWN_AFTER_CLOSE_JOB_ID = MARKET_AFTER_CLOSE_JOB_ID
 DCA_MORNING_JOB_ID = "dca-morning-reminder-check"
 FUND_NAV_PROCESS_JOB_ID = "fund-nav-process"
+HEARTBEAT_JOB_ID = "runtime-heartbeat"
+DCA_LAST_CHECKED_DATE_KEY = "dca_last_checked_date"
 WEEKDAY_CRON_FILTER = "mon-fri"
 
 
@@ -166,6 +168,18 @@ def register_jobs(
         work_lock = Lock()
 
     scheduler.add_job(
+        write_runtime_heartbeat,
+        trigger="interval",
+        minutes=1,
+        id=HEARTBEAT_JOB_ID,
+        name="Runtime heartbeat",
+        kwargs={"sqlite_path": sqlite_path},
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+    )
+
+    scheduler.add_job(
         run_scheduled_market_check,
         trigger=create_weekday_after_close_trigger(
             check_time=parsed_time,
@@ -194,7 +208,6 @@ def register_jobs(
         parsed_time.strftime("%H:%M"),
         timezone,
     )
-
     scheduler.add_job(
         run_scheduled_fund_nav_process,
         trigger=create_daily_dca_trigger(
@@ -255,7 +268,7 @@ def register_jobs(
     )
 
     scheduler.add_job(
-        run_scheduled_dca_check,
+        run_due_dca_checks,
         trigger=create_daily_dca_trigger(
             reminder_time=parsed_dca_time,
             timezone=timezone,
@@ -267,6 +280,7 @@ def register_jobs(
             "sqlite_path": sqlite_path,
             "allowed_user_ids": frozenset(allowed_user_ids),
             "timezone": timezone,
+            "reminder_time": dca_reminder_time,
             "market_calendar": market_calendar,
             "notification_settings": notification_settings,
             "work_lock": work_lock,
@@ -281,6 +295,15 @@ def register_jobs(
         parsed_dca_time.strftime("%H:%M"),
         timezone,
     )
+
+
+def write_runtime_heartbeat(*, sqlite_path: str | Path) -> None:
+    """Touch the local runtime heartbeat used by the container health check."""
+    heartbeat_path = Path(f"{sqlite_path}.heartbeat")
+    heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
+    heartbeat_path.touch(mode=0o600)
+    if os.name == "posix":
+        heartbeat_path.chmod(0o600)
 
 
 async def run_scheduled_before_close_check(
@@ -890,6 +913,7 @@ async def run_scheduled_dca_check(
             notifications=result.notifications,
             notification_settings=notification_settings,
         )
+        _write_dca_check_date(sqlite_path, check_date)
     except Exception:
         LOGGER.exception("Scheduled DCA reminder check failed")
         raise
@@ -905,6 +929,84 @@ async def run_scheduled_dca_check(
                 result.skipped_duplicates,
                 len(result.errors),
             )
+
+
+async def run_due_dca_checks(
+    *,
+    application: Application[Any, Any, Any, Any, Any, Any],
+    sqlite_path: str | Path,
+    allowed_user_ids: Collection[int],
+    timezone: str | tzinfo,
+    reminder_time: str = DEFAULT_DCA_REMINDER_TIME,
+    market_calendar: MarketCalendar | None = None,
+    notification_settings: NotificationSettings | None = None,
+    work_lock: Lock | None = None,
+    now: datetime | None = None,
+) -> int:
+    """Replay every DCA reminder date missed since the last completed check."""
+
+    timezone_info = ZoneInfo(timezone) if isinstance(timezone, str) else timezone
+    current = now or datetime.now(timezone_info)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone_info)
+    parsed_reminder_time = parse_dca_reminder_time(reminder_time)
+    latest_due_date = current.date()
+    if current.timetz().replace(tzinfo=None) < parsed_reminder_time:
+        latest_due_date -= timedelta(days=1)
+
+    with open_connection(sqlite_path) as connection:
+        initialize_database(connection)
+        row = connection.execute(
+            "SELECT value FROM app_metadata WHERE key = ?",
+            (DCA_LAST_CHECKED_DATE_KEY,),
+        ).fetchone()
+
+    if row is None:
+        if latest_due_date < current.date():
+            # Establish an upgrade-safe baseline without inventing reminders from
+            # dates that predate cursor tracking.
+            _write_dca_check_date(sqlite_path, latest_due_date)
+            return 0
+        first_pending_date = latest_due_date
+    else:
+        try:
+            last_checked_date = date.fromisoformat(str(row["value"]))
+        except ValueError:
+            LOGGER.warning("Ignoring invalid persisted DCA check date")
+            _write_dca_check_date(sqlite_path, latest_due_date)
+            return 0
+        first_pending_date = last_checked_date + timedelta(days=1)
+
+    pending_count = max(0, (latest_due_date - first_pending_date).days + 1)
+    for offset in range(pending_count):
+        check_date = first_pending_date + timedelta(days=offset)
+        await run_scheduled_dca_check(
+            application=application,
+            sqlite_path=sqlite_path,
+            allowed_user_ids=allowed_user_ids,
+            timezone=timezone,
+            market_calendar=market_calendar,
+            run_date=check_date,
+            notification_settings=notification_settings,
+            work_lock=work_lock,
+        )
+    return pending_count
+
+
+def _write_dca_check_date(sqlite_path: str | Path, check_date: date) -> None:
+    with open_connection(sqlite_path) as connection:
+        initialize_database(connection)
+        connection.execute(
+            """
+            INSERT INTO app_metadata (key, value, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at
+            """,
+            (DCA_LAST_CHECKED_DATE_KEY, check_date.isoformat()),
+        )
+        connection.commit()
 
 
 async def send_scheduled_notifications(

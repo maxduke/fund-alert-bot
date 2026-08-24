@@ -141,6 +141,23 @@ def test_notification_service_continues_after_channel_failure() -> None:
     assert recording.messages == [NotificationMessage(title="Hello", body="World")]
 
 
+def test_notification_service_sends_independent_targets_concurrently() -> None:
+    both_started = asyncio.Event()
+    started = [0]
+    service = NotificationService(
+        [
+            RendezvousChannel("first", started, both_started),
+            RendezvousChannel("second", started, both_started),
+        ]
+    )
+
+    results = asyncio.run(
+        asyncio.wait_for(service.send_alert(title="Hello", body="World"), timeout=1)
+    )
+
+    assert [result.channel for result in results] == ["first", "second"]
+
+
 def test_request_failures_do_not_log_sensitive_webhook_url(
     monkeypatch,
     caplog,
@@ -192,6 +209,26 @@ class RecordingChannel:
 
     async def send(self, message: NotificationMessage) -> NotificationResult:
         self.messages.append(message)
+        return NotificationResult(channel=self.name, success=True, detail="sent")
+
+
+class RendezvousChannel:
+    def __init__(
+        self,
+        name: str,
+        started: list[int],
+        both_started: asyncio.Event,
+    ) -> None:
+        self.name = name
+        self._started = started
+        self._both_started = both_started
+
+    async def send(self, message: NotificationMessage) -> NotificationResult:
+        del message
+        self._started[0] += 1
+        if self._started[0] == 2:
+            self._both_started.set()
+        await self._both_started.wait()
         return NotificationResult(channel=self.name, success=True, detail="sent")
 
 

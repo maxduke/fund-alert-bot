@@ -83,6 +83,13 @@ _EN_TO_ZH = {
     "Position: closed": "持仓：已清仓",
     "Position: not synced": "持仓：尚未同步",
     "Position Sync required": "需要同步持仓",
+    "Position value: unavailable (dated fund NAV missing)": "持仓市值：不可用（缺少对应日期的基金净值）",
+    "Position value: unavailable: confirmed feeder-fund NAV date unavailable": "持仓市值：不可用：无法确认基金净值日期",
+    "unavailable: confirmed feeder-fund NAV date unavailable": "不可用：无法确认基金净值日期",
+    "Confirmed ETF history has no dated rows.": "已确认的 ETF 历史没有带日期的记录。",
+    "Confirmed ETF history has no dated row.": "已确认的 ETF 历史没有带日期的记录。",
+    "Position Sync required — reminders paused; run /sync_position": "需要同步持仓——提醒已暂停；请运行 /sync_position",
+    "weekday must be one of 周一, 周二, 周三, 周四, 周五, 周六, 周日, or Monday through Sunday": "weekday 必须是周一至周日",
     "Unit NAV was not requested.": "未请求单位净值。",
     "unit NAV could not be fetched": "无法获取单位净值",
     "Latest unit NAV:": "最新单位净值：",
@@ -580,7 +587,10 @@ _DYNAMIC_PREFIXES = (
 _LABEL_VALUE_SUFFIXES = {
     "Gross amount:": ("RMB",),
     "Lookback:": ("calendar days", "days"),
-    "Position value:": ("unavailable (unit NAV could not be fetched)",),
+    "Position value:": (
+        "unavailable (unit NAV could not be fetched)",
+        "unavailable: confirmed feeder-fund NAV date unavailable",
+    ),
     "Total planned amount:": ("RMB",),
 }
 _LABEL_VALUE_TRANSLATIONS = {
@@ -616,6 +626,13 @@ def _localize_label_value(label: str, value: str, replacements: dict[str, str]) 
     elif _language == "zh-CN":
         if label == "Rearm:":
             value = value.replace(" from cycle anchor", " 距周期锚点")
+        elif label == "Position value:" and " using NAV " in value:
+            amount, _, nav_and_date = value.partition(" using NAV ")
+            nav, separator, nav_date = nav_and_date.rpartition(" on ")
+            if separator and nav_date:
+                return (
+                    replacements[label] + amount + f" 使用净值 {nav}，日期：{nav_date}"
+                )
         value = _LABEL_VALUE_TRANSLATIONS.get(label, {}).get(value.strip(), value)
         dated_value, separator, dated_on = value.rpartition(" on ")
         if (
@@ -682,6 +699,40 @@ def _localize_line(line: str) -> str:
     content = line[len(decoration) :]
     if content in replacements:
         return decoration + replacements[content]
+
+    if _language == "zh-CN":
+        if content.startswith("Position: "):
+            position = content.removeprefix("Position: ")
+            if "; average cost " in position and "; reached " in position:
+                accuracy, remainder = position.split("; average cost ", 1)
+                cost, _, reached = remainder.partition("; reached ")
+                accuracy_text = {"estimated": "估算", "exact": "精确"}.get(
+                    accuracy, accuracy
+                )
+                return (
+                    decoration
+                    + f"持仓： {accuracy_text}；平均成本 {cost}；已达到 {reached}"
+                )
+            if position.startswith("not synced — remember "):
+                return (
+                    decoration
+                    + "持仓：尚未同步——请记得运行 "
+                    + position.removeprefix("not synced — remember ")
+                )
+            if position.startswith("unavailable — remember "):
+                return (
+                    decoration
+                    + "持仓：不可用——请记得运行 "
+                    + position.removeprefix("unavailable — remember ")
+                )
+            if position == "closed (exact zero units)":
+                return decoration + "持仓：已清仓（精确零份额）"
+            if position.startswith("cycle unavailable — rerun "):
+                return (
+                    decoration
+                    + "持仓周期不可用——请重新运行 "
+                    + position.removeprefix("cycle unavailable — rerun ")
+                )
 
     if _language == "zh-CN" and content.startswith("Updated DCA rule id="):
         before_amount, separator, after_amount = content.rpartition(

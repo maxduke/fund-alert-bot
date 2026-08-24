@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import sqlite3
 from collections.abc import Iterator, Mapping, Sequence
@@ -48,6 +49,8 @@ def connect(sqlite_path: str | Path) -> sqlite3.Connection:
         path.parent.mkdir(parents=True, exist_ok=True)
 
     connection = sqlite3.connect(path)
+    if path != Path(":memory:") and os.name == "posix":
+        path.chmod(0o600)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     connection.execute("PRAGMA busy_timeout = 5000")
@@ -4045,36 +4048,6 @@ def skip_drawdown_tiers_for_cycle(
                 updated_at = excluded.updated_at
             """,
             [(cycle_id, key, now, now) for key in keys],
-        )
-        connection.commit()
-    except Exception:
-        connection.rollback()
-        raise
-    return keys
-
-
-def clear_drawdown_tier_skip(
-    connection: sqlite3.Connection,
-    *,
-    cycle_id: int,
-    tier_keys: Sequence[str],
-) -> tuple[str, ...]:
-    """Clear cycle skips after a user records an actual addition."""
-
-    keys = _normalize_drawdown_tier_keys(tier_keys)
-    if not keys:
-        return ()
-    connection.execute("BEGIN IMMEDIATE")
-    try:
-        _require_drawdown_cycle(connection, cycle_id)
-        now = _utc_now_text()
-        connection.executemany(
-            """
-            UPDATE drawdown_tier_reminder_states
-            SET skipped_for_cycle = 0, updated_at = ?
-            WHERE cycle_id = ? AND tier_key = ?
-            """,
-            [(now, cycle_id, key) for key in keys],
         )
         connection.commit()
     except Exception:
