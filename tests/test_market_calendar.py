@@ -46,6 +46,22 @@ def test_cn_market_calendar_uses_akshare_trade_dates_and_caches() -> None:
     assert fake_ak.calls == 1
 
 
+def test_cn_market_calendar_refreshes_once_when_local_day_changes() -> None:
+    current_day = date(2024, 1, 2)
+    fake_ak = FakeAkshareCalendar(pd.DataFrame({"trade_date": ["2024-01-02"]}))
+    calendar = CNMarketCalendar(ak_module=fake_ak, today_factory=lambda: current_day)
+
+    assert calendar.is_trading_day(date(2024, 1, 2)) is True
+    assert calendar.is_trading_day(date(2024, 1, 2)) is True
+    assert fake_ak.calls == 1
+
+    current_day = date(2024, 1, 3)
+    fake_ak.raw_data = pd.DataFrame({"trade_date": ["2024-01-02", "2024-01-03"]})
+    assert calendar.is_trading_day(date(2024, 1, 3)) is True
+    assert calendar.is_trading_day(date(2024, 1, 3)) is True
+    assert fake_ak.calls == 2
+
+
 def test_cn_market_calendar_accepts_chinese_date_column() -> None:
     fake_ak = FakeAkshareCalendar(
         pd.DataFrame({"\u65e5\u671f": ["2024-01-02", "2024-01-03"]})

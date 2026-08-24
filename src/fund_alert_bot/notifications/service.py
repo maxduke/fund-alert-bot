@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Collection, Sequence
 from typing import Any
@@ -20,6 +21,7 @@ from fund_alert_bot.notifications.telegram import TelegramNotificationChannel
 from fund_alert_bot.notifications.webhook import WebhookNotificationChannel
 
 LOGGER = logging.getLogger(__name__)
+MAX_CONCURRENT_DELIVERIES = 4
 
 
 class NotificationService:
@@ -108,17 +110,22 @@ class NotificationService:
             LOGGER.warning("Notification skipped; no enabled notification channels")
             return []
 
-        results: list[NotificationResult] = []
-        for target_key, _, _ in self._targets:
-            results.append(
-                await self.send_target(
+        semaphore = asyncio.Semaphore(MAX_CONCURRENT_DELIVERIES)
+
+        async def send(target_key: str) -> NotificationResult:
+            async with semaphore:
+                return await self.send_target(
                     target_key,
                     title=title,
                     body=body,
                     telegram_actions=telegram_actions,
                 )
+
+        return list(
+            await asyncio.gather(
+                *(send(target_key) for target_key, _, _ in self._targets)
             )
-        return results
+        )
 
 
 def build_notification_service(

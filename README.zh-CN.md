@@ -322,11 +322,17 @@ Bot 使用直连数据源，并通过已启用的通知渠道发送启动提醒�
 生产镜像：
 
 ```text
-ghcr.io/maxduke/fund-alert-bot:latest
+ghcr.io/maxduke/fund-alert-bot:sha-<full-commit>
 ```
 
-测试或生产建议固定 `sha-<commit>` 标签，避免 `latest` 后续变化。完整的首次
-安装、非 root UID/GID、升级、SQLite 备份和回滚注意事项见
+生产 Compose 要求在 `.env` 中设置完整的不可变标签：
+
+```dotenv
+BOT_IMAGE_TAG=sha-0123456789abcdef0123456789abcdef01234567
+```
+
+完整的首次安装、非 root UID/GID、升级、SQLite 备份、加密异地备份、恢复演练和
+回滚注意事项见
 [中文 VPS 部署指南](docs/deployment.zh-CN.md)。
 
 ## 本地开发
@@ -334,8 +340,9 @@ ghcr.io/maxduke/fund-alert-bot:latest
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -U pip
-python -m pip install -e ".[dev]"
+python -m pip install --constraint constraints.txt \
+  editables==0.6 hatchling==1.32.0 setuptools==84.0.0 wheel==0.48.0
+python -m pip install --no-build-isolation --constraint constraints.txt -e ".[dev]"
 Copy-Item .env.example .env
 ruff check .
 pytest
@@ -366,7 +373,6 @@ Compose 不会自动以 root 创建缺失的 `data`。已有部署切换 UID/GID
 - [`docs/investment-plan-guide.zh-CN.md`](docs/investment-plan-guide.zh-CN.md)：投资计划操作与边界（[English](docs/investment-plan-guide.md)）
 - [`docs/architecture.md`](docs/architecture.md)：当前模块职责（开发者文档，英文）
 - [`docs/investment-plan-implementation.md`](docs/investment-plan-implementation.md)：技术设计与验收清单（英文）
-- [`docs/roadmap.md`](docs/roadmap.md)：历史实现阶段（英文）
 - [`AGENTS.md`](AGENTS.md)：贡献者和编码代理边界（英文）
 - [`.env.example`](.env.example)：只包含占位符的配置模板
 

@@ -2654,6 +2654,65 @@ def test_plans_refreshes_nav_older_than_latest_completed_open_day(tmp_path) -> N
     assert provider.nav_calls == ["000001"]
 
 
+def test_plans_fail_closed_when_calendar_is_unavailable(tmp_path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    _prepare_ready_plan_alert(
+        sqlite_path,
+        closes=[100, 84],
+        expected_date=date(2024, 1, 2),
+    )
+    with open_connection(sqlite_path) as connection:
+        upsert_position_snapshot(
+            connection,
+            fund_symbol="000002",
+            units=50,
+            average_unit_cost=1.0,
+        )
+        for fund_symbol in ("000001", "000002"):
+            upsert_fund_nav(
+                connection,
+                fund_symbol=fund_symbol,
+                nav_date=date(2024, 1, 1),
+                unit_nav=1.2,
+                source="cached",
+            )
+    provider = FakeProvider(
+        _plan_history([100, 84]),
+        nav=FundNav("000001", date(2024, 1, 3), 1.5, "akshare_eastmoney"),
+    )
+    handlers = build_command_handlers(
+        {123},
+        sqlite_path=sqlite_path,
+        market_data_provider=provider,
+        market_calendar=FakeMarketCalendar(
+            confirmed_error=MarketCalendarUnavailableError("calendar unavailable")
+        ),
+        now_factory=lambda: datetime(2024, 1, 4, 6, tzinfo=UTC),
+    )
+    message = FakeMessage()
+
+    asyncio.run(
+        _handler_by_command(handlers, "plans").callback(
+            SimpleNamespace(
+                effective_user=SimpleNamespace(id=123),
+                effective_chat=SimpleNamespace(id=456),
+                effective_message=message,
+            ),
+            SimpleNamespace(bot=FakeBot(), args=[]),
+        )
+    )
+
+    response = message.replies[0]
+    assert "confirmed feeder-fund NAV date unavailable" in response
+    assert (
+        "Position value: unavailable: confirmed feeder-fund NAV date unavailable"
+        in response
+    )
+    assert "using NAV 1.2 on 2024-01-01" not in response
+    assert "using NAV 1.5 on 2024-01-03" not in response
+    assert provider.nav_calls == []
+
+
 def test_plans_keeps_position_linked_when_plan_market_data_fails(tmp_path) -> None:
     sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
     with open_connection(sqlite_path) as connection:

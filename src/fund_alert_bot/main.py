@@ -21,6 +21,7 @@ from fund_alert_bot.notifications.service import build_notification_service
 from fund_alert_bot.scheduler import (
     create_scheduler,
     register_jobs,
+    run_due_dca_checks,
     run_scheduled_fund_nav_process,
 )
 
@@ -46,6 +47,16 @@ def run() -> None:
     configure_logging()
     settings = load_settings()
     set_language(settings.bot_language)
+    if not (
+        settings.telegram_allowed_user_ids
+        or settings.notifications.bark_enabled
+        or settings.notifications.ntfy_enabled
+        or settings.notifications.webhook_enabled
+    ):
+        raise ValueError(
+            "At least one notification target is required: configure "
+            "TELEGRAM_ALLOWED_USER_IDS or enable Bark, ntfy, or webhook."
+        )
     proxy_active = install_akshare_proxy(
         enabled=settings.akshare_proxy_enabled,
         auth_token=settings.akshare_proxy_auth_token,
@@ -125,13 +136,26 @@ def run() -> None:
                 )
             except Exception:
                 LOGGER.exception("Startup feeder-fund NAV catch-up failed")
+            try:
+                await run_due_dca_checks(
+                    application=application,
+                    sqlite_path=settings.sqlite_path,
+                    allowed_user_ids=settings.telegram_allowed_user_ids,
+                    timezone=settings.timezone,
+                    reminder_time=settings.dca_reminder_time,
+                    market_calendar=market_calendar,
+                    notification_settings=settings.notifications,
+                    work_lock=work_lock,
+                )
+            except Exception:
+                LOGGER.exception("Startup DCA reminder catch-up failed")
 
         application.create_task(startup_catchup())
 
     async def stop_scheduler(application) -> None:
         del application
         if getattr(scheduler, "running", False):
-            scheduler.shutdown(wait=False)
+            scheduler.shutdown(wait=True)
             LOGGER.info("APScheduler stopped")
 
     application = create_application(
@@ -173,7 +197,7 @@ def run() -> None:
         application.run_polling()
     finally:
         if getattr(scheduler, "running", False):
-            scheduler.shutdown(wait=False)
+            scheduler.shutdown(wait=True)
         LOGGER.info("fund-alert-bot stopped")
 
 

@@ -35,6 +35,7 @@ _SINA_QUOTE_URL = "https://hq.sinajs.cn/list={symbol}"
 _REALTIME_HTTP_TIMEOUT_SECONDS = 8
 _CN_TIMEZONE = ZoneInfo("Asia/Shanghai")
 LOGGER = logging.getLogger(__name__)
+_CACHE_MAX_ENTRIES = 128
 
 
 class AkshareMarketDataProvider(MarketDataProvider):
@@ -221,6 +222,8 @@ class AkshareMarketDataProvider(MarketDataProvider):
                 time.monotonic(),
                 history.copy(deep=True),
             )
+            if len(self._history_cache) > _CACHE_MAX_ENTRIES:
+                self._history_cache.pop(next(iter(self._history_cache)))
 
     def get_etf_realtime_quote(self, instrument: Instrument) -> RealtimeQuote:
         """Return one bounded per-symbol ETF quote with a Sina fallback."""
@@ -269,6 +272,8 @@ class AkshareMarketDataProvider(MarketDataProvider):
             quote = _parse_sina_etf_quote(response, symbol)
         except Exception as exc:  # noqa: BLE001
             self._sina_failed_at[symbol] = time.monotonic()
+            if len(self._sina_failed_at) > _CACHE_MAX_ENTRIES:
+                self._sina_failed_at.pop(next(iter(self._sina_failed_at)))
             raise MarketDataFetchError("Sina realtime ETF quote failed.") from exc
         self._sina_failed_at.pop(symbol, None)
         self._write_etf_quote_cache("sina", symbol, quote)
@@ -477,6 +482,8 @@ class AkshareMarketDataProvider(MarketDataProvider):
     ) -> None:
         if self._realtime_spot_ttl_seconds > 0:
             self._etf_quote_cache[(source, symbol)] = (time.monotonic(), quote)
+            if len(self._etf_quote_cache) > _CACHE_MAX_ENTRIES:
+                self._etf_quote_cache.pop(next(iter(self._etf_quote_cache)))
 
     def _raise_if_source_cooling_down(
         self,
@@ -590,9 +597,13 @@ class AkshareMarketDataProvider(MarketDataProvider):
         except MarketDataFetchError:
             if self._fund_nav_cache_ttl_seconds > 0:
                 self._fund_nav_cache[symbol] = (time.monotonic(), None)
+                if len(self._fund_nav_cache) > _CACHE_MAX_ENTRIES:
+                    self._fund_nav_cache.pop(next(iter(self._fund_nav_cache)))
             raise
         if self._fund_nav_cache_ttl_seconds > 0:
             self._fund_nav_cache[symbol] = (time.monotonic(), raw_data)
+            if len(self._fund_nav_cache) > _CACHE_MAX_ENTRIES:
+                self._fund_nav_cache.pop(next(iter(self._fund_nav_cache)))
         return raw_data, True
 
     def _fetch_cn_etf_history(

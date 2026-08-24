@@ -1,4 +1,6 @@
-FROM python:3.12-slim-bookworm AS builder
+# syntax=docker/dockerfile:1.7
+
+FROM python:3.12-slim-bookworm@sha256:a116514e19457bcb7af7efe9c3dd0b9b71e85b317694e7882a1c52aa15a78134 AS builder
 
 WORKDIR /app
 
@@ -6,16 +8,21 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml README.md ./
+COPY pyproject.toml constraints.txt README.md ./
 COPY src ./src
 
-RUN python -m pip install --no-cache-dir --upgrade \
-        pip==25.2 \
-        setuptools==75.1.0 \
-        wheel==0.44.0 \
-    && python -m pip wheel --no-cache-dir --wheel-dir /wheels .
+RUN python -m pip install --no-cache-dir \
+        --constraint constraints.txt \
+        hatchling==1.32.0 \
+        setuptools==84.0.0 \
+        wheel==0.48.0 \
+    && python -m pip wheel \
+        --no-build-isolation \
+        --no-cache-dir \
+        --constraint constraints.txt \
+        --wheel-dir /wheels .
 
-FROM python:3.12-slim-bookworm
+FROM python:3.12-slim-bookworm@sha256:a116514e19457bcb7af7efe9c3dd0b9b71e85b317694e7882a1c52aa15a78134
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -28,14 +35,18 @@ WORKDIR /app
 RUN groupadd -r appuser \
     && useradd -r -s /bin/false -g appuser appuser
 
-COPY --from=builder /wheels /wheels
-
-RUN python -m pip install --no-cache-dir /wheels/* \
-    && rm -rf /wheels \
+# BuildKit mounts the builder wheels without copying them into a final layer.
+RUN --mount=type=bind,from=builder,source=/wheels,target=/wheels,ro \
+    python -m pip install --no-cache-dir --no-index --no-deps /wheels/*.whl \
+    && python -m pip uninstall --yes pip setuptools wheel \
     && mkdir -p /app/data \
     && chown appuser:appuser /app/data
 
 VOLUME ["/app/data"]
+
+# The scheduler writes SQLITE_PATH + ".heartbeat" at least once per minute.
+HEALTHCHECK --interval=60s --timeout=5s --start-period=120s --retries=3 \
+    CMD python -c "import os,time; p=os.environ.get('SQLITE_PATH','/app/data/fund_alert_bot.sqlite3')+'.heartbeat'; raise SystemExit(0 if os.path.isfile(p) and time.time()-os.path.getmtime(p) <= 180 else 1)"
 
 USER appuser
 

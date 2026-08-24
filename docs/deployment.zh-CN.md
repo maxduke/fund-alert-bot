@@ -44,6 +44,7 @@ docker compose version
 sudo mkdir -p /opt/fund-alert-bot/data
 sudo chown -R "$USER":"$USER" /opt/fund-alert-bot
 cd /opt/fund-alert-bot
+chmod 700 data
 ```
 
 把仓库中的 `deploy/docker-compose.prod.yml` 复制为：
@@ -81,6 +82,7 @@ printf 'BOT_UID=%s\nBOT_GID=%s\n' "$BOT_OWNER_UID" "$BOT_OWNER_GID"
 
 ```bash
 nano /opt/fund-alert-bot/.env
+chmod 600 /opt/fund-alert-bot/.env
 ```
 
 使用 `fund-alert-bot` 专用 Telegram Bot Token，不要复用
@@ -103,8 +105,8 @@ FUND_NAV_PROCESS_TIME=08:30
 ```
 
 必须把 `123456789` 替换为至少一个获准使用的 Telegram 数字用户 ID；多个 ID
-使用英文逗号分隔。allowlist 留空会拒绝所有命令，并使默认 Telegram 通知没有
-接收者。
+使用英文逗号分隔。命令仅允许在私聊中使用。只有启用了 Bark、ntfy 或 webhook
+时才能留空 allowlist；否则进程会拒绝启动，避免提醒任务在没有接收者时静默运行。
 
 `BOT_LANGUAGE` 控制全部用户可见回复、按钮和通知渠道，仅支持 `zh-CN` 与
 `en`。修改后重启容器；Telegram 命令名称仍使用英文。
@@ -144,8 +146,14 @@ Bot 只代理自身使用的东方财富域名，并始终关闭插件的并发 
 
 ## 4. 必要时登录 GHCR
 
-如果 `ghcr.io/maxduke/fund-alert-bot:latest` 是私有镜像，使用有 package
-读取权限的 GitHub Token 登录：
+生产 Compose 要求在 `BOT_IMAGE_TAG` 中显式填写不可变镜像标签，使用 GitHub
+Actions 发布的完整 commit SHA，例如：
+
+```dotenv
+BOT_IMAGE_TAG=sha-0123456789abcdef0123456789abcdef01234567
+```
+
+如果镜像是私有的，使用有 package 读取权限的 GitHub Token 登录：
 
 ```bash
 echo "$GHCR_TOKEN" | docker login ghcr.io -u maxduke --password-stdin
@@ -158,6 +166,8 @@ echo "$GHCR_TOKEN" | docker login ghcr.io -u maxduke --password-stdin
 在 `/opt/fund-alert-bot` 中拉取镜像并启动：
 
 ```bash
+grep -Eq '^BOT_IMAGE_TAG=sha-[0-9a-f]{40}$' .env
+docker compose config >/dev/null
 docker compose pull
 docker compose up -d
 ```
@@ -167,6 +177,15 @@ docker compose up -d
 ```bash
 docker compose run --rm --entrypoint sh fund-alert-bot -c 'test -w /app/data'
 ```
+
+镜像健康检查要求调度器至少每分钟更新一次
+`data/fund_alert_bot.sqlite3.heartbeat`。依赖提醒前确认容器健康：
+
+```bash
+docker compose ps
+```
+
+心跳文件超过三分钟未更新时，健康检查会失败。
 
 查看日志：
 
@@ -210,9 +229,12 @@ sudo chown -R "$BOT_OWNER_UID:$BOT_OWNER_GID" data
 生产 Compose 在 `BOT_UID` 或 `BOT_GID` 缺失时会拒绝启动，防止升级后悄悄
 把现有 SQLite 变成不可写。
 
-然后拉取最新镜像、重建容器并验证数据访问：
+编辑 `.env`，将 `BOT_IMAGE_TAG` 改为新发布的 `sha-<完整 commit>` 标签；保留
+旧值，以便健康检查失败时回滚。然后拉取固定版本并重建容器：
 
 ```bash
+grep -Eq '^BOT_IMAGE_TAG=sha-[0-9a-f]{40}$' .env
+docker compose config >/dev/null
 docker compose pull
 docker compose up -d
 docker compose run --rm --entrypoint sh fund-alert-bot -c 'test -w /app/data'
@@ -223,9 +245,6 @@ docker compose run --rm --entrypoint sh fund-alert-bot -c 'test -w /app/data'
 ```bash
 docker compose logs -f
 ```
-
-测试期间建议在 Compose 中固定 `sha-<commit>` 镜像标签；验收完成后再决定
-是否跟随 `latest`。
 
 ## 备份 SQLite
 
@@ -240,13 +259,35 @@ docker compose logs -f
 ```bash
 cd /opt/fund-alert-bot
 mkdir -p backups
+chmod 700 backups
 docker compose stop
-cp data/fund_alert_bot.sqlite3 "backups/fund_alert_bot-$(date +%F-%H%M%S).sqlite3"
+umask 077
+backup="backups/fund_alert_bot-$(date +%F-%H%M%S).sqlite3"
+cp data/fund_alert_bot.sqlite3 "$backup"
 docker compose up -d
+age -r "$AGE_RECIPIENT" -o "$backup.age" "$backup"
+rm -f "$backup"
+rclone copy "$backup.age" remote:fund-alert-bot-backups/
 ```
 
-必须保存的核心文件是 `data/fund_alert_bot.sqlite3`。停止服务后复制可避免只
-复制主文件而漏掉仍在使用的 SQLite WAL 状态。
+建议通过定时任务至少每天运行一次。`AGE_RECIPIENT` 是公开接收者，私钥必须保存
+在 VPS 之外（例如离线密码管理器）；不得放入仓库、Compose、Shell 历史或日志。
+上面的 `remote:` 是通过 `rclone` 配置的加密异地存储示例。
+
+至少每月在另一台机器或独立目录做一次恢复演练：
+
+```bash
+mkdir -m 700 restore-drill
+rclone copy remote:fund-alert-bot-backups/ restore-drill/
+age -d -i /secure/offline-age-identity.txt \
+  -o restore-drill/fund_alert_bot.sqlite3 \
+  restore-drill/fund_alert_bot-YYYY-MM-DD-HHMMSS.sqlite3.age
+sqlite3 restore-drill/fund_alert_bot.sqlite3 'PRAGMA integrity_check;'
+```
+
+只有 SQLite 输出 `ok` 才算恢复成功，并记录演练日期和所用备份。应用镜像回滚
+时，把 `.env` 中的 `BOT_IMAGE_TAG` 恢复为旧值，再执行
+`docker compose pull && docker compose up -d` 并检查日志。
 
 ## 与 `rsi6_monitor_bot` 同机运行
 

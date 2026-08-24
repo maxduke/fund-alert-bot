@@ -2,14 +2,14 @@ services:
   bot:
     build: .
     # For production, use the image published by the Docker Build workflow:
-    # image: ghcr.io/maxduke/fund-alert-bot:latest
+    # image: ghcr.io/maxduke/fund-alert-bot:${BOT_IMAGE_TAG:?Set BOT_IMAGE_TAG=sha-<commit> in .env}
     container_name: fund_alert_bot
     restart: unless-stopped
     user: "${BOT_UID:?Set BOT_UID in .env}:${BOT_GID:?Set BOT_GID in .env}"
     env_file: .env
     environment:
       SQLITE_PATH: /app/data/fund_alert_bot.sqlite3
-      TZ: Asia/Shanghai
+      TZ: "${TZ:-Asia/Shanghai}"
       AFTER_CLOSE_CHECK_TIME: "${AFTER_CLOSE_CHECK_TIME:-17:10}"
       BEFORE_CLOSE_CHECK_TIME: "${BEFORE_CLOSE_CHECK_TIME:-14:50}"
       DCA_REMINDER_TIME: "${DCA_REMINDER_TIME:-09:30}"

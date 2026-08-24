@@ -356,8 +356,9 @@ The local development flow is:
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -U pip
-python -m pip install -e ".[dev]"
+python -m pip install --constraint constraints.txt \
+  editables==0.6 hatchling==1.32.0 setuptools==84.0.0 wheel==0.48.0
+python -m pip install --no-build-isolation --constraint constraints.txt -e ".[dev]"
 ```
 
 Configuration should be created from `.env.example`:
@@ -437,7 +438,6 @@ especially on Windows workstations.
 - [`docs/architecture.md`](docs/architecture.md): current module responsibilities
 - [`docs/investment-plan-guide.md`](docs/investment-plan-guide.md): Drawdown Add Plan, DCA, position, and Price-Gain behavior ([简体中文](docs/investment-plan-guide.zh-CN.md))
 - [`docs/investment-plan-implementation.md`](docs/investment-plan-implementation.md): accepted technical design and acceptance checks
-- [`docs/roadmap.md`](docs/roadmap.md): historical implementation phases
 - `.env.example`: placeholder-only configuration template
 
 ## Scope Boundaries

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,7 +17,10 @@ from fund_alert_bot.db import (
     open_connection,
     refresh_alert_notification_status,
 )
-from fund_alert_bot.notifications.service import NotificationService
+from fund_alert_bot.notifications.service import (
+    MAX_CONCURRENT_DELIVERIES,
+    NotificationService,
+)
 from fund_alert_bot.rules.dca import format_dca_amount
 
 LOGGER = logging.getLogger(__name__)
@@ -46,6 +50,7 @@ async def send_alert_notifications(
     notification_by_event = {item.event_id: item for item in notifications}
     delivery_targets = notification_service.delivery_targets
     event_ids = tuple(notification_by_event)
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_DELIVERIES)
     for batch in _notification_batches(notifications):
         batch_ids = tuple(item.event_id for item in batch)
         with open_connection(sqlite_path) as connection:
@@ -56,6 +61,9 @@ async def send_alert_notifications(
                 targets=delivery_targets,
             )
         claimed_target_keys: list[str] = []
+        claimed_deliveries = []
+        # ponytail: personal-scale target lists fit the 120-second delivery lease;
+        # claim in chunks if deployments grow beyond dozens of recipients.
         for target_key, _channel in delivery_targets:
             with open_connection(sqlite_path) as connection:
                 initialize_database(connection)
@@ -70,12 +78,17 @@ async def send_alert_notifications(
             notification = _merge_dca_batch(
                 [notification_by_event[claim.event_id] for claim in target_claims]
             )
-            result = await notification_service.send_target(
-                target_key,
-                title=notification.title,
-                body=notification.text,
-                telegram_actions=notification.telegram_actions,
-            )
+            claimed_deliveries.append((target_key, target_claims, notification))
+
+        async def deliver(claimed_delivery: tuple) -> None:
+            target_key, target_claims, notification = claimed_delivery
+            async with semaphore:
+                result = await notification_service.send_target(
+                    target_key,
+                    title=notification.title,
+                    body=notification.text,
+                    telegram_actions=notification.telegram_actions,
+                )
             with open_connection(sqlite_path) as connection:
                 initialize_database(connection)
                 for claim in target_claims:
@@ -86,6 +99,8 @@ async def send_alert_notifications(
                         claim_token=claim.claim_token,
                         result=result,
                     )
+
+        await asyncio.gather(*(deliver(item) for item in claimed_deliveries))
         with open_connection(sqlite_path) as connection:
             initialize_database(connection)
             refresh_alert_notification_status(connection, event_ids=batch_ids)

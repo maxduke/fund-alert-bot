@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from datetime import date
 from typing import Any, Protocol
 
@@ -30,9 +31,19 @@ class MarketCalendar(Protocol):
 class CNMarketCalendar:
     """CN trading calendar backed by AKShare with weekday fallback."""
 
-    def __init__(self, *, ak_module: Any | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        ak_module: Any | None = None,
+        today_factory: Callable[[], date] = date.today,
+    ) -> None:
         self._ak_module = ak_module
+        self._today_factory = today_factory
         self._trade_days: set[date] | None = None
+        self._loaded_on: date | None = None
+        self._load_attempted_on: date | None = None
+        self._coverage_refresh_on: date | None = None
+        self._coverage_refresh_failed = False
 
     def is_trading_day(self, check_date: date) -> bool:
         """Return True when check_date is a CN trading day."""
@@ -61,8 +72,18 @@ class CNMarketCalendar:
         return check_date in trade_days
 
     def _load_trade_days(self, *, refresh: bool = False) -> set[date] | None:
-        if self._trade_days is not None and not refresh:
-            return self._trade_days
+        today = self._today_factory()
+        if not refresh:
+            if self._loaded_on == today:
+                return None if self._coverage_refresh_failed else self._trade_days
+            if self._load_attempted_on == today:
+                return None
+            self._load_attempted_on = today
+        elif self._coverage_refresh_on == today:
+            return None if self._coverage_refresh_failed else self._trade_days
+        else:
+            self._coverage_refresh_on = today
+            self._coverage_refresh_failed = False
 
         try:
             raw_data = self._akshare.tool_trade_date_hist_sina()
@@ -73,6 +94,8 @@ class CNMarketCalendar:
                 "falling back to weekday logic: %s",
                 exc,
             )
+            if refresh:
+                self._coverage_refresh_failed = True
             return None
 
         if trade_days is None:
@@ -80,9 +103,13 @@ class CNMarketCalendar:
                 "AKShare CN trade calendar was empty or missing a date column; "
                 "falling back to weekday logic."
             )
+            if refresh:
+                self._coverage_refresh_failed = True
             return None
 
         self._trade_days = trade_days
+        self._loaded_on = today
+        self._coverage_refresh_failed = False
         return self._trade_days
 
     @property

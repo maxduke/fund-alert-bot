@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import os
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -8,8 +10,6 @@ import pytest
 from fund_alert_bot import __version__
 from fund_alert_bot.commands import (
     UNAUTHORIZED_MESSAGE,
-    can_use_command,
-    get_start_message,
     reject_if_unauthorized,
 )
 from fund_alert_bot.config import (
@@ -56,6 +56,16 @@ def test_sqlite_path_from_environment(monkeypatch, tmp_path) -> None:
     settings = load_settings(load_env_file=False)
 
     assert settings.sqlite_path == sqlite_path
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes only")
+def test_sqlite_database_is_owner_only(tmp_path) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+
+    with open_connection(sqlite_path):
+        pass
+
+    assert sqlite_path.stat().st_mode & 0o777 == 0o600
 
 
 def test_scheduler_defaults_from_environment(monkeypatch) -> None:
@@ -175,6 +185,19 @@ def test_notification_urls_require_http_or_https(
         load_settings(load_env_file=False)
 
 
+def test_example_environment_templates_match_and_load(monkeypatch) -> None:
+    root = Path(__file__).parents[1]
+    example = (root / ".env.example").read_text()
+    assert (root / "deploy/.env.example").read_text() == example
+    for line in example.splitlines():
+        if line and not line.startswith("#") and "=" in line:
+            monkeypatch.delenv(line.partition("=")[0], raising=False)
+
+    settings = load_settings(env_file=root / ".env.example")
+
+    assert settings.notifications == NotificationSettings()
+
+
 def test_load_settings_strips_non_secret_string_values(monkeypatch) -> None:
     monkeypatch.setenv("TZ", " Asia/Shanghai ")
     monkeypatch.setenv("BARK_SERVER_URL", " https://bark.example.test ")
@@ -218,6 +241,7 @@ def test_compose_preserves_schedule_environment_overrides() -> None:
     compose = (Path(__file__).parents[1] / "docker-compose.yml").read_text()
 
     for name, default in (
+        ("TZ", "Asia/Shanghai"),
         ("AFTER_CLOSE_CHECK_TIME", "17:10"),
         ("BEFORE_CLOSE_CHECK_TIME", "14:50"),
         ("DCA_REMINDER_TIME", "09:30"),
@@ -226,12 +250,15 @@ def test_compose_preserves_schedule_environment_overrides() -> None:
         assert f"${{{name}:-{default}}}" in compose
 
 
-def test_startup_processes_fund_nav_with_configured_timezone_date() -> None:
-    source = (Path(__file__).parents[1] / "src/fund_alert_bot/main.py").read_text()
+def test_production_artifacts_are_immutable_and_actions_are_sha_pinned() -> None:
+    root = Path(__file__).parents[1]
+    production_compose = (root / "deploy/docker-compose.prod.yml").read_text()
+    assert "BOT_IMAGE_TAG:?" in production_compose
+    assert ":latest" not in production_compose
 
-    assert "await run_scheduled_fund_nav_process(" in source
-    assert "run_date=datetime.now(ZoneInfo(settings.timezone)).date()" in source
-    assert "await publish_bot_command_menu(application)" in source
+    for workflow in (root / ".github/workflows").glob("*.yml"):
+        for action in re.findall(r"uses:\s+[^@\s]+@([^\s#]+)", workflow.read_text()):
+            assert re.fullmatch(r"[0-9a-f]{40}", action)
 
 
 def test_akshare_settings_from_environment(monkeypatch) -> None:
@@ -375,20 +402,6 @@ def test_initialize_database_creates_metadata_table(tmp_path: Path) -> None:
     assert row is not None
 
 
-def test_placeholder_start_message() -> None:
-    assert "/help" in get_start_message()
-
-
-def test_permission_check_allows_only_configured_user_ids() -> None:
-    allowed_update = SimpleNamespace(effective_user=SimpleNamespace(id=123))
-    blocked_update = SimpleNamespace(effective_user=SimpleNamespace(id=456))
-    anonymous_update = SimpleNamespace(effective_user=None)
-
-    assert can_use_command(allowed_update, {123})
-    assert not can_use_command(blocked_update, {123})
-    assert not can_use_command(anonymous_update, {123})
-
-
 class FakeMessage:
     def __init__(self) -> None:
         self.replies: list[str] = []
@@ -410,3 +423,19 @@ def test_empty_allowed_user_ids_rejects_and_logs_warning(caplog) -> None:
     assert rejected
     assert message.replies == [UNAUTHORIZED_MESSAGE]
     assert "TELEGRAM_ALLOWED_USER_IDS is empty" in caplog.text
+
+
+def test_allowed_user_is_rejected_outside_private_chat(caplog) -> None:
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=-456, type="group"),
+        effective_message=message,
+    )
+    caplog.set_level(logging.WARNING, logger="fund_alert_bot.commands")
+
+    rejected = asyncio.run(reject_if_unauthorized(update, frozenset({123})))
+
+    assert rejected
+    assert message.replies == [UNAUTHORIZED_MESSAGE]
+    assert "outside a private chat" in caplog.text

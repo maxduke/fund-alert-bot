@@ -15,6 +15,7 @@ from fund_alert_bot.market_data import (
     MarketDataFetchError,
     MarketDataNormalizeError,
     PriceBasis,
+    RealtimeQuote,
     UnsupportedAssetTypeError,
 )
 from fund_alert_bot.market_data.normalize import NORMALIZED_COLUMNS, normalize_history
@@ -149,6 +150,58 @@ def test_history_cache_reuses_wider_request_for_narrower_range() -> None:
         "2024-01-02",
     ]
     assert [name for name, _kwargs in fake_ak.calls] == ["fund_etf_hist_em"]
+
+
+def test_provider_caches_and_sina_failures_have_bounded_size() -> None:
+    provider = AkshareMarketDataProvider(
+        ak_module=FakeAkshare(), retries=1, retry_delay_seconds=0
+    )
+    history = _price_history()
+    quote = RealtimeQuote(
+        symbol="510300",
+        price=1.2,
+        previous_close=1.1,
+        volume=None,
+        amount=None,
+        source="test",
+        fetched_at=datetime(2024, 1, 1, tzinfo=UTC),
+    )
+
+    for index in range(129):
+        provider._write_history_cache(
+            (str(index), "cn_etf", "20240101", "20240103", "unadjusted"),
+            history,
+        )
+        provider._write_etf_quote_cache("test", str(index), quote)
+
+    assert len(provider._history_cache) == 128
+    assert len(provider._etf_quote_cache) == 128
+    assert next(iter(provider._history_cache))[0] == "1"
+    assert next(iter(provider._etf_quote_cache))[1] == "1"
+
+    for index in range(129):
+        provider._fetch_open_fund_history(str(index))
+
+    assert len(provider._fund_nav_cache) == 128
+    assert next(iter(provider._fund_nav_cache)) == "1"
+
+    def failing_http_get(*_args: Any, **_kwargs: Any) -> FakeResponse:
+        raise TimeoutError("Sina unavailable")
+
+    failing_provider = AkshareMarketDataProvider(
+        ak_module=FakeAkshare(),
+        retries=1,
+        retry_delay_seconds=0,
+        http_get=failing_http_get,
+    )
+    for index in range(129):
+        with pytest.raises(MarketDataFetchError):
+            failing_provider.get_sina_etf_realtime_quote(
+                Instrument(str(index), "ETF", AssetType.CN_ETF)
+            )
+
+    assert len(failing_provider._sina_failed_at) == 128
+    assert next(iter(failing_provider._sina_failed_at)) == "1"
 
 
 def test_fund_type_uses_single_symbol_xueqiu_metadata_request() -> None:
