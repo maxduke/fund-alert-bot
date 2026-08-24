@@ -356,7 +356,7 @@ The local development flow is:
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install --constraint constraints.txt \
+python -m pip install --constraint constraints.txt `
   editables==0.6 hatchling==1.32.0 setuptools==84.0.0 wheel==0.48.0
 python -m pip install --no-build-isolation --constraint constraints.txt -e ".[dev]"
 ```

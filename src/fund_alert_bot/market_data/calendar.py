@@ -75,7 +75,7 @@ class CNMarketCalendar:
         today = self._today_factory()
         if not refresh:
             if self._loaded_on == today:
-                return None if self._coverage_refresh_failed else self._trade_days
+                return self._trade_days
             if self._load_attempted_on == today:
                 return None
             self._load_attempted_on = today

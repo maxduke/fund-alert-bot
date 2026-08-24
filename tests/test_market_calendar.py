@@ -62,6 +62,24 @@ def test_cn_market_calendar_refreshes_once_when_local_day_changes() -> None:
     assert fake_ak.calls == 2
 
 
+def test_failed_coverage_refresh_preserves_cached_holiday_status() -> None:
+    fake_ak = FakeAkshareCalendar(
+        pd.DataFrame({"trade_date": ["2024-01-01", "2024-01-03"]})
+    )
+    calendar = CNMarketCalendar(
+        ak_module=fake_ak,
+        today_factory=lambda: date(2024, 1, 3),
+    )
+
+    assert calendar.confirmed_status(date(2024, 1, 2)) is False
+    fake_ak.error = RuntimeError("refresh unavailable")
+    with pytest.raises(MarketCalendarUnavailableError):
+        calendar.confirmed_status(date(2024, 1, 4))
+
+    assert calendar.confirmed_status(date(2024, 1, 2)) is False
+    assert fake_ak.calls == 2
+
+
 def test_cn_market_calendar_accepts_chinese_date_column() -> None:
     fake_ak = FakeAkshareCalendar(
         pd.DataFrame({"\u65e5\u671f": ["2024-01-02", "2024-01-03"]})
