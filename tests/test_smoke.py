@@ -17,6 +17,7 @@ from fund_alert_bot.config import (
     DEFAULT_AKSHARE_HISTORY_CACHE_TTL_SECONDS,
     DEFAULT_AKSHARE_LATEST_LOOKBACK_DAYS,
     DEFAULT_AKSHARE_PROXY_RETRY,
+    DEFAULT_AKSHARE_REQUEST_TIMEOUT_SECONDS,
     DEFAULT_AKSHARE_RETRIES,
     DEFAULT_AKSHARE_RETRY_DELAY_SECONDS,
     DEFAULT_BOT_LANGUAGE,
@@ -264,24 +265,31 @@ def test_production_artifacts_are_immutable_and_actions_are_sha_pinned() -> None
 def test_akshare_settings_from_environment(monkeypatch) -> None:
     monkeypatch.setenv("AKSHARE_RETRIES", "5")
     monkeypatch.setenv("AKSHARE_RETRY_DELAY_SECONDS", "1.25")
+    monkeypatch.setenv("AKSHARE_REQUEST_TIMEOUT_SECONDS", "60")
     monkeypatch.setenv("AKSHARE_LATEST_LOOKBACK_DAYS", "60")
 
     settings = load_settings(load_env_file=False)
 
     assert settings.akshare_retries == 5
     assert settings.akshare_retry_delay_seconds == 1.25
+    assert settings.akshare_request_timeout_seconds == 60
     assert settings.akshare_latest_lookback_days == 60
 
 
 def test_akshare_settings_use_defaults(monkeypatch) -> None:
     monkeypatch.delenv("AKSHARE_RETRIES", raising=False)
     monkeypatch.delenv("AKSHARE_RETRY_DELAY_SECONDS", raising=False)
+    monkeypatch.delenv("AKSHARE_REQUEST_TIMEOUT_SECONDS", raising=False)
     monkeypatch.delenv("AKSHARE_LATEST_LOOKBACK_DAYS", raising=False)
 
     settings = load_settings(load_env_file=False)
 
     assert settings.akshare_retries == DEFAULT_AKSHARE_RETRIES
     assert settings.akshare_retry_delay_seconds == DEFAULT_AKSHARE_RETRY_DELAY_SECONDS
+    assert (
+        settings.akshare_request_timeout_seconds
+        == DEFAULT_AKSHARE_REQUEST_TIMEOUT_SECONDS
+    )
     assert settings.akshare_latest_lookback_days == DEFAULT_AKSHARE_LATEST_LOOKBACK_DAYS
     assert (
         settings.akshare_history_cache_ttl_seconds

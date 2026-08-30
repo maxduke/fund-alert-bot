@@ -17,7 +17,7 @@ _PROXY_GATEWAY = "101.201.173.125"
 # with header/body credentials here if one becomes available.
 _PROXY_BALANCE_URL = "http://101.201.173.125:47001/api/token/{token}"
 _PROXY_BALANCE_TIMEOUT_SECONDS = 5
-_DEFAULT_REQUEST_TIMEOUT_SECONDS = 15
+_PROXY_REQUEST_TIMEOUT_SECONDS = 5
 _EASTMONEY_HOOK_DOMAINS = (
     "fund.eastmoney.com",
     "push2.eastmoney.com",
@@ -26,14 +26,14 @@ _EASTMONEY_HOOK_DOMAINS = (
 )
 
 
-def install_default_requests_timeout() -> None:
+def install_default_requests_timeout(timeout_seconds: int) -> None:
     """Bound upstream ``requests.get`` calls that omit a timeout."""
 
     original_get = requests.get
 
     def get(*args: object, **kwargs: object) -> object:
         if kwargs.get("timeout") is None:
-            kwargs["timeout"] = _DEFAULT_REQUEST_TIMEOUT_SECONDS
+            kwargs["timeout"] = timeout_seconds
         return original_get(*args, **kwargs)
 
     # ponytail: one process-wide default covers AKShare's bare requests.get
@@ -72,6 +72,7 @@ def install_akshare_proxy(
         _PROXY_GATEWAY,
         auth_token=auth_token,
         retry=retry,
+        timeout=_PROXY_REQUEST_TIMEOUT_SECONDS,
         hook_domains=list(_EASTMONEY_HOOK_DOMAINS),
         # The plugin's fast mode creates concurrent page requests. It is not
         # appropriate for this bot's paid, low-volume reminder workload.

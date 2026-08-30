@@ -63,7 +63,7 @@ def run() -> None:
         auth_token=settings.akshare_proxy_auth_token,
         retry=settings.akshare_proxy_retry,
     )
-    install_default_requests_timeout()
+    install_default_requests_timeout(settings.akshare_request_timeout_seconds)
 
     startup_date = datetime.now(ZoneInfo(settings.timezone)).date()
     with open_connection(settings.sqlite_path) as connection:

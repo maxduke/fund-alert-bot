@@ -43,12 +43,12 @@ def test_default_requests_timeout_only_fills_unbounded_calls(monkeypatch) -> Non
 
     monkeypatch.setattr(proxy_module.requests, "get", fake_get)
 
-    install_default_requests_timeout()
+    install_default_requests_timeout(30)
 
     proxy_module.requests.get("https://example.test")
     proxy_module.requests.get("https://example.test", timeout=None)
     proxy_module.requests.get("https://example.test", timeout=3)
-    assert [call["timeout"] for call in calls] == [15, 15, 3]
+    assert [call["timeout"] for call in calls] == [30, 30, 3]
 
 
 def test_paid_proxy_requires_positive_retry() -> None:
@@ -86,6 +86,7 @@ def test_paid_proxy_uses_narrow_non_concurrent_configuration(
             "args": ("101.201.173.125",),
             "auth_token": "paid-token",
             "retry": 1,
+            "timeout": 5,
             "hook_domains": [
                 "fund.eastmoney.com",
                 "push2.eastmoney.com",

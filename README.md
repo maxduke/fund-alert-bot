@@ -257,6 +257,7 @@ Default scheduler configuration:
 - `FUND_NAV_PROCESS_TIME=08:30`
 - `AKSHARE_RETRIES=3`
 - `AKSHARE_RETRY_DELAY_SECONDS=0.5`
+- `AKSHARE_REQUEST_TIMEOUT_SECONDS=30`
 - `AKSHARE_LATEST_LOOKBACK_DAYS=45`
 - `BARK_ENABLED=false`
 - `NTFY_ENABLED=false`
@@ -300,8 +301,10 @@ metadata remain direct requests. Concurrent `fast` pagination is deliberately
 disabled because it can multiply paid requests. Keep the retry value low and
 never commit or log the token. When enabled, the proxy patch is the only retry
 layer for paid Eastmoney requests; the provider invokes each Eastmoney AKShare
-operation once. `AKSHARE_RETRIES` remains the retry budget for other data
-sources. History, realtime quotes, and feeder-NAV data also use short
+operation once. Each proxy attempt keeps the patch's five-second timeout;
+`AKSHARE_REQUEST_TIMEOUT_SECONDS` only bounds requests that do not already set
+a timeout. `AKSHARE_RETRIES` remains the retry budget for other data sources.
+History, realtime quotes, and feeder-NAV data also use short
 in-process caches. Confirmed normalized ETF history and exact feeder-fund NAVs
 are additionally stored in SQLite. After the first backfill, the after-close
 job refreshes the full required QFQ history window (unadjusted history uses a

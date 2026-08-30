@@ -32,6 +32,7 @@ DEFAULT_FUND_NAV_PROCESS_TIME = "08:30"
 DEFAULT_BOT_LANGUAGE = "zh-CN"
 DEFAULT_AKSHARE_RETRIES = 3
 DEFAULT_AKSHARE_RETRY_DELAY_SECONDS = 0.5
+DEFAULT_AKSHARE_REQUEST_TIMEOUT_SECONDS = 30
 DEFAULT_AKSHARE_LATEST_LOOKBACK_DAYS = 45
 DEFAULT_AKSHARE_HISTORY_CACHE_TTL_SECONDS = 300.0
 DEFAULT_AKSHARE_PROXY_RETRY = 1
@@ -176,6 +177,7 @@ class Settings:
     telegram_allowed_user_ids: frozenset[int]
     akshare_retries: int
     akshare_retry_delay_seconds: float
+    akshare_request_timeout_seconds: int
     akshare_latest_lookback_days: int
     akshare_history_cache_ttl_seconds: float
     akshare_proxy_enabled: bool
@@ -294,6 +296,11 @@ def load_settings(
             os.environ.get("AKSHARE_RETRY_DELAY_SECONDS"),
             name="AKSHARE_RETRY_DELAY_SECONDS",
             default=DEFAULT_AKSHARE_RETRY_DELAY_SECONDS,
+        ),
+        akshare_request_timeout_seconds=parse_positive_int_env(
+            os.environ.get("AKSHARE_REQUEST_TIMEOUT_SECONDS"),
+            name="AKSHARE_REQUEST_TIMEOUT_SECONDS",
+            default=DEFAULT_AKSHARE_REQUEST_TIMEOUT_SECONDS,
         ),
         akshare_latest_lookback_days=parse_positive_int_env(
             os.environ.get("AKSHARE_LATEST_LOOKBACK_DAYS"),
