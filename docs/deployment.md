@@ -280,18 +280,38 @@ For a simple consistent backup, stop the service, copy the database, then start
 the service again:
 
 ```bash
+set -Eeuo pipefail
 cd /opt/fund-alert-bot
 mkdir -p backups
 chmod 700 backups
-docker compose stop
 umask 077
 backup="backups/fund_alert_bot-$(date +%F-%H%M%S).sqlite3"
+restart=1
+restart_service() {
+  status=$?
+  if [ "$restart" -eq 1 ] && ! docker compose up -d; then
+    echo "Failed to restart fund-alert-bot; check Docker immediately." >&2
+    status=1
+  fi
+  exit "$status"
+}
+trap restart_service EXIT
+docker compose stop
 cp data/fund_alert_bot.sqlite3 "$backup"
-docker compose up -d
+test "$(sqlite3 "$backup" 'PRAGMA integrity_check;')" = "ok"
 age -r "$AGE_RECIPIENT" -o "$backup.age" "$backup"
+test -s "$backup.age"
+rclone copyto "$backup.age" "remote:fund-alert-bot-backups/$(basename "$backup.age")"
+rclone check "$backup.age" \
+  "remote:fund-alert-bot-backups/$(basename "$backup.age")" --download
 rm -f "$backup"
-rclone copy "$backup.age" remote:fund-alert-bot-backups/
+docker compose up -d
+restart=0
 ```
+
+If any step fails, the exit trap attempts to restart the service. Encryption or
+upload failures leave the plaintext copy for investigation; remove it manually
+only after fixing the failure and confirming the encrypted backup is safe.
 
 Use a scheduled job to run this backup at least daily. `AGE_RECIPIENT` is the
 public recipient; keep its private identity outside the VPS (for example in an

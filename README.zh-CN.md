@@ -344,8 +344,24 @@ python -m pip install --constraint constraints.txt `
   editables==0.6 hatchling==1.32.0 setuptools==84.0.0 wheel==0.48.0
 python -m pip install --no-build-isolation --constraint constraints.txt -e ".[dev]"
 Copy-Item .env.example .env
-ruff check .
-pytest
+# 编辑 .env，替换 Telegram Token 和允许的用户 ID。
+New-Item -ItemType Directory -Force data | Out-Null
+python -m fund_alert_bot.main
+```
+
+提交前运行与 CI 相同的检查：
+
+```powershell
+python -m ruff format --check .
+python -m ruff check .
+python -m pytest
+```
+
+修改 `pyproject.toml` 后，在已激活的虚拟环境中重新生成 Python 3.12 依赖约束：
+
+```powershell
+python -m pip install pip-tools
+python -m piptools compile --all-extras --output-file=constraints.txt --strip-extras pyproject.toml
 ```
 
 Linux 使用 Docker Compose 时，必须在 `.env` 中把 `BOT_UID`、`BOT_GID`
@@ -363,9 +379,8 @@ Compose 不会自动以 root 创建缺失的 `data`。已有部署切换 UID/GID
 
 ## GitHub Actions
 
-- `CI`：在 Python 3.12 上安装开发依赖，运行 Ruff 和 pytest。
-- `Docker`：PR 构建镜像；`main` 推送成功后发布到
-  `ghcr.io/maxduke/fund-alert-bot`。
+- `CI`：在 Python 3.12 上运行 Ruff 和 pytest，PR 通过后构建并冒烟测试镜像；
+  `main` 或版本标签的检查通过后发布到 `ghcr.io/maxduke/fund-alert-bot`。
 
 ## 项目文档
 

@@ -19,6 +19,53 @@ from fund_alert_bot.notifications.service import NotificationService
 from fund_alert_bot.notifications.telegram import TelegramNotificationChannel
 
 
+def test_telegram_splits_long_body_and_keeps_actions_on_last_chunk() -> None:
+    calls: list[dict[str, object]] = []
+
+    class RecordingBot:
+        async def send_message(self, **kwargs: object) -> None:
+            calls.append(kwargs)
+
+    body = "x" * 9000
+    result = asyncio.run(
+        TelegramNotificationChannel(bot=RecordingBot(), chat_ids=(123,)).send_to(
+            "telegram:123",
+            NotificationMessage(
+                title="Reminder",
+                body=body,
+                telegram_actions=((("Confirm", "confirm:1"),),),
+            ),
+        )
+    )
+
+    assert result.success is True
+    assert "".join(str(call["text"]) for call in calls) == body
+    assert all(len(str(call["text"])) <= 4096 for call in calls)
+    assert "reply_markup" not in calls[0]
+    assert "reply_markup" in calls[-1]
+
+
+def test_telegram_target_fails_when_one_chunk_send_raises() -> None:
+    calls: list[dict[str, object]] = []
+
+    class FailingBot:
+        async def send_message(self, **kwargs: object) -> None:
+            calls.append(kwargs)
+            if len(calls) == 2:
+                raise RuntimeError("temporary Telegram failure")
+
+    result = asyncio.run(
+        TelegramNotificationChannel(bot=FailingBot(), chat_ids=(123,)).send_to(
+            "telegram:123",
+            NotificationMessage(title="Reminder", body="x" * 9000),
+        )
+    )
+
+    assert result.success is False
+    assert result.detail == "unexpected_error=RuntimeError"
+    assert len(calls) == 2
+
+
 def test_concurrent_dispatch_claims_each_target_once(tmp_path: Path) -> None:
     sqlite_path = tmp_path / "alerts.sqlite3"
     with open_connection(sqlite_path) as connection:

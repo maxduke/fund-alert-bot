@@ -19,8 +19,11 @@ class RecordingChannel:
 def test_chinese_localizes_text_buttons_and_all_notification_channels() -> None:
     set_language("zh-CN")
     try:
+        assert localize_text("📉 Drawdown Add Plan reminder — A500") == (
+            "📉 回撤加仓计划提醒 — A500"
+        )
         assert localize_text("📉 Buy-plan reminder — A500") == (
-            "📉 加仓计划提醒 — A500"
+            "📉 回撤加仓计划提醒 — A500"
         )
         assert localize_actions(((("Cancel", "keep:callback"),),)) == (
             (("取消", "keep:callback"),),

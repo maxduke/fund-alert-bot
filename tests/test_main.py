@@ -32,6 +32,11 @@ def test_run_executes_startup_catchups_and_drains_scheduler(
 
     monkeypatch.setattr(main, "load_settings", lambda: settings)
     monkeypatch.setattr(main, "install_akshare_proxy", lambda **kwargs: False)
+    monkeypatch.setattr(
+        main,
+        "install_default_requests_timeout",
+        lambda: events.append("timeout"),
+    )
     monkeypatch.setattr(main, "AkshareMarketDataProvider", lambda **kwargs: object())
     monkeypatch.setattr(main, "CNMarketCalendar", object)
     monkeypatch.setattr(main, "create_scheduler", lambda **kwargs: scheduler)
@@ -47,7 +52,7 @@ def test_run_executes_startup_catchups_and_drains_scheduler(
 
     main.run()
 
-    assert events == ["menu", "nav", "dca"]
+    assert events == ["timeout", "menu", "nav", "dca"]
     assert scheduler.shutdown_waits == [True]
 
 

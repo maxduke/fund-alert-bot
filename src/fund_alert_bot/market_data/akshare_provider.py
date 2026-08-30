@@ -744,7 +744,10 @@ def _format_akshare_date(value: DateLike) -> str:
 
 
 def _to_timestamp(value: DateLike) -> pd.Timestamp:
-    return pd.to_datetime(value, errors="raise").normalize()
+    timestamp = pd.Timestamp(pd.to_datetime(value, errors="raise"))
+    if timestamp.tzinfo is not None:
+        timestamp = timestamp.tz_localize(None)
+    return timestamp.normalize()
 
 
 def _format_sina_etf_symbol(symbol: str) -> str:

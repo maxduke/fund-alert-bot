@@ -913,6 +913,11 @@ async def run_scheduled_dca_check(
             notifications=result.notifications,
             notification_settings=notification_settings,
         )
+        if result.errors:
+            raise RuntimeError(
+                "Scheduled DCA reminder check had "
+                f"{len(result.errors)} evaluation error(s)."
+            )
         _write_dca_check_date(sqlite_path, check_date)
     except Exception:
         LOGGER.exception("Scheduled DCA reminder check failed")

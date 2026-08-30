@@ -317,6 +317,48 @@ def test_scheduled_dca_check_merges_same_day_fixed_reminders(
     ]
 
 
+def test_scheduled_dca_check_retries_date_after_evaluation_error(
+    tmp_path: Path,
+) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    _add_dca_rule(sqlite_path)
+    with open_connection(sqlite_path) as connection:
+        initialize_database(connection)
+        add_rule(
+            connection,
+            type=commands.DCA_RULE_TYPE,
+            symbol="broken",
+            name="Broken",
+            asset_type="dca",
+            params={"weekday": "THU"},
+        )
+
+    application = FakeApplication()
+    with pytest.raises(RuntimeError, match="evaluation error"):
+        asyncio.run(
+            scheduler.run_scheduled_dca_check(
+                application=application,
+                sqlite_path=sqlite_path,
+                allowed_user_ids={123},
+                timezone="Asia/Shanghai",
+                run_date=date(2024, 1, 4),
+            )
+        )
+
+    with open_connection(sqlite_path) as connection:
+        event_rows = connection.execute(
+            "SELECT alert_key FROM alert_events ORDER BY id"
+        ).fetchall()
+        cursor = connection.execute(
+            "SELECT value FROM app_metadata WHERE key = ?",
+            (scheduler.DCA_LAST_CHECKED_DATE_KEY,),
+        ).fetchone()
+
+    assert [row["alert_key"] for row in event_rows] == ["dca:1:2024-01-04"]
+    assert cursor is None
+    assert len(application.bot.messages) == 1
+
+
 def test_failed_same_day_dca_batch_retries_as_one_message(tmp_path: Path) -> None:
     sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
     first_id = _add_fixed_dca_rule(
@@ -808,7 +850,7 @@ def test_before_close_catches_up_missed_confirmed_plan_tiers(tmp_path: Path) -> 
     assert [row["tier_key"] for row in tiers] == ["0.15", "0.2"]
     assert len(application.bot.messages) == 1
     message = application.bot.messages[0]
-    assert "Buy-plan reminder — A500" in message["text"]
+    assert "Drawdown Add Plan reminder — A500" in message["text"]
     assert "/mark_added" not in message["text"]
     assert "/sync_position" in message["text"]
     assert "reply_markup" not in message
@@ -1217,7 +1259,7 @@ def test_scheduled_market_check_confirms_drawdown_plan_once(tmp_path: Path) -> N
         ).fetchall()
 
     assert len(application.bot.messages) == 1
-    assert "Buy-plan reminder — A500" in application.bot.messages[0]["text"]
+    assert "Drawdown Add Plan reminder — A500" in application.bot.messages[0]["text"]
     assert "Data date: 2024-01-02" in application.bot.messages[0]["text"]
     markup = application.bot.messages[0]["reply_markup"]
     assert markup.inline_keyboard[0][0].callback_data == "drawdown_add:1:1:all"
@@ -1539,7 +1581,10 @@ def test_failed_plan_notification_retries_even_when_market_is_closed(
 
     assert status == "sent"
     assert len(success_application.bot.messages) == 1
-    assert "Buy-plan reminder — A500" in success_application.bot.messages[0]["text"]
+    assert (
+        "Drawdown Add Plan reminder — A500"
+        in success_application.bot.messages[0]["text"]
+    )
     assert provider.price_bases == [PriceBasis.QFQ]
 
 

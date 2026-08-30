@@ -4994,7 +4994,7 @@ def _read_result_value(result: Any, key: str, default: Any) -> Any:
 
 
 def _json_text(value: Any) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
 def _normalize_drawdown_tier_keys(tier_keys: Sequence[str]) -> tuple[str, ...]:

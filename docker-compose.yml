@@ -1,7 +1,7 @@
 services:
   bot:
     build: .
-    # For production, use the image published by the Docker Build workflow:
+    # For production, use the image published by the CI workflow:
     # image: ghcr.io/maxduke/fund-alert-bot:${BOT_IMAGE_TAG:?Set BOT_IMAGE_TAG=sha-<commit> in .env}
     container_name: fund_alert_bot
     restart: unless-stopped

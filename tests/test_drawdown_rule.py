@@ -136,6 +136,14 @@ def test_calculate_drawdown_rejects_non_positive_latest_price(
         calculate_drawdown_from_high(df, lookback_days=365)
 
 
+@pytest.mark.parametrize("threshold", [float("nan"), float("inf"), -float("inf")])
+def test_drawdown_rule_rejects_non_finite_thresholds(threshold: float) -> None:
+    df = _history(["2024-01-01", "2024-01-02"], [100.0, 90.0])
+
+    with pytest.raises(ValueError, match="thresholds must be between 0 and 1"):
+        build_drawdown_alerts(_rule(thresholds=[threshold]), df, _never_seen)
+
+
 def _history(
     dates: list[str],
     closes: list[float],

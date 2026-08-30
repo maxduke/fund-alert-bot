@@ -365,6 +365,8 @@ Configuration should be created from `.env.example`:
 
 ```powershell
 Copy-Item .env.example .env
+# Edit .env and replace the Telegram token and allowed user IDs.
+New-Item -ItemType Directory -Force data | Out-Null
 ```
 
 Before using Docker Compose on Linux, set `BOT_UID` and `BOT_GID` in `.env` to
@@ -417,8 +419,23 @@ Do not commit `.env` or real secrets.
 Run:
 
 ```powershell
-ruff check .
-pytest
+python -m fund_alert_bot.main
+```
+
+Run the same checks as CI before submitting changes:
+
+```powershell
+python -m ruff format --check .
+python -m ruff check .
+python -m pytest
+```
+
+After changing `pyproject.toml`, regenerate the Python 3.12 dependency
+constraints from the activated virtual environment:
+
+```powershell
+python -m pip install pip-tools
+python -m piptools compile --all-extras --output-file=constraints.txt --strip-extras pyproject.toml
 ```
 
 Docker builds are validated by GitHub Actions on Linux. Local Docker is optional,
@@ -426,10 +443,10 @@ especially on Windows workstations.
 
 ## GitHub Actions
 
-- `CI`: installs the project with dev dependencies, then runs Ruff and pytest on
-  Python 3.12.
-- `Docker Build`: builds the Docker image on Ubuntu for pull requests and pushes
-  `ghcr.io/maxduke/fund-alert-bot` on non-PR runs.
+- `CI`: runs Ruff and pytest on Python 3.12, then builds and smoke-tests the
+  Docker image for pull requests.
+- After the checks pass on `main` or a version tag, the same workflow publishes
+  `ghcr.io/maxduke/fund-alert-bot`.
 
 ## Project Documents
 
@@ -437,7 +454,7 @@ especially on Windows workstations.
 - [`docs/deployment.md`](docs/deployment.md): VPS deployment and SQLite backup guide ([简体中文](docs/deployment.zh-CN.md))
 - [`docs/architecture.md`](docs/architecture.md): current module responsibilities
 - [`docs/investment-plan-guide.md`](docs/investment-plan-guide.md): Drawdown Add Plan, DCA, position, and Price-Gain behavior ([简体中文](docs/investment-plan-guide.zh-CN.md))
-- [`docs/investment-plan-implementation.md`](docs/investment-plan-implementation.md): accepted technical design and acceptance checks
+- [`docs/investment-plan-implementation.md`](docs/investment-plan-implementation.md): implemented technical design and acceptance checks
 - `.env.example`: placeholder-only configuration template
 
 ## Scope Boundaries

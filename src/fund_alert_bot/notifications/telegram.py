@@ -6,7 +6,11 @@ import logging
 from collections.abc import Collection
 from typing import Any
 
-from fund_alert_bot.notifications.base import NotificationMessage, NotificationResult
+from fund_alert_bot.notifications.base import (
+    NotificationMessage,
+    NotificationResult,
+    split_telegram_text,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -78,10 +82,12 @@ class TelegramNotificationChannel:
                 ]
             )
         try:
-            kwargs = {"chat_id": chat_id, "text": message.body}
-            if reply_markup is not None:
-                kwargs["reply_markup"] = reply_markup
-            await self._bot.send_message(**kwargs)
+            chunks = split_telegram_text(message.body)
+            for index, chunk in enumerate(chunks):
+                kwargs = {"chat_id": chat_id, "text": chunk}
+                if reply_markup is not None and index == len(chunks) - 1:
+                    kwargs["reply_markup"] = reply_markup
+                await self._bot.send_message(**kwargs)
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning(
                 "Telegram notification failed for chat_id=%s: %s",

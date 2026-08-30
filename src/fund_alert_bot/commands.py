@@ -92,6 +92,7 @@ from fund_alert_bot.market_data import (
     MarketDataProviderError,
     PriceBasis,
 )
+from fund_alert_bot.notifications.base import split_telegram_text
 from fund_alert_bot.notifications.dispatch import send_alert_notifications
 from fund_alert_bot.notifications.service import build_notification_service
 from fund_alert_bot.rules.dca import normalize_weekday
@@ -121,7 +122,6 @@ if TYPE_CHECKING:
     from telegram.ext import Application, ContextTypes
 
 LOGGER = logging.getLogger(__name__)
-_TELEGRAM_TEXT_LIMIT = 4096
 
 ADD_DRAWDOWN_USAGE = (
     "Usage: /add_drawdown <asset_type> <symbol> <name> <lookback_days> <thresholds>"
@@ -201,7 +201,7 @@ BOT_COMMAND_MENU = (
     ("set_fund_fee", "Change a fund subscription fee"),
     ("set_fund_cutoff", "Change a fund subscription cutoff"),
     ("sync_position", "Sync a feeder-fund position"),
-    ("add_drawdown_plan", "Add a drawdown buy plan"),
+    ("add_drawdown_plan", "Add a Drawdown Add Plan"),
     ("set_plan_rearm", "Change a plan rearm margin"),
     ("mark_added", "Record a completed addition"),
     ("plans", "Show investment-plan status"),
@@ -2040,7 +2040,7 @@ async def _reply_text(
     text = localize_text(text)
     if reply_markup is not None:
         reply_markup = _localize_reply_markup(reply_markup)
-    chunks = _split_telegram_text(text)
+    chunks = split_telegram_text(text)
     for index, chunk in enumerate(chunks):
         if reply_markup is not None and index == len(chunks) - 1:
             await update.effective_message.reply_text(chunk, reply_markup=reply_markup)
@@ -2082,22 +2082,6 @@ async def _edit_message_text(
         localize_text(text),
         reply_markup=reply_markup,
     )
-
-
-def _split_telegram_text(text: str) -> tuple[str, ...]:
-    chunks: list[str] = []
-    while len(text) > _TELEGRAM_TEXT_LIMIT:
-        split_at = text.rfind("\n", 0, _TELEGRAM_TEXT_LIMIT + 1)
-        if split_at <= 0:
-            split_at = _TELEGRAM_TEXT_LIMIT
-            chunks.append(text[:split_at])
-            text = text[split_at:]
-        else:
-            chunks.append(text[:split_at])
-            text = text[split_at + 1 :]
-    if text or not chunks:
-        chunks.append(text)
-    return tuple(chunks)
 
 
 async def reject_if_unauthorized(

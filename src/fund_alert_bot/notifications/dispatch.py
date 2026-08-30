@@ -17,6 +17,7 @@ from fund_alert_bot.db import (
     open_connection,
     refresh_alert_notification_status,
 )
+from fund_alert_bot.notifications.base import TELEGRAM_TEXT_LIMIT
 from fund_alert_bot.notifications.service import (
     MAX_CONCURRENT_DELIVERIES,
     NotificationService,
@@ -24,7 +25,6 @@ from fund_alert_bot.notifications.service import (
 from fund_alert_bot.rules.dca import format_dca_amount
 
 LOGGER = logging.getLogger(__name__)
-TELEGRAM_TEXT_LIMIT = 4096
 
 
 @dataclass(frozen=True, slots=True)

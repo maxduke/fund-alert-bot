@@ -257,18 +257,37 @@ docker compose logs -f
 最简单的一致性备份方式是停止服务、复制数据库、再启动：
 
 ```bash
+set -Eeuo pipefail
 cd /opt/fund-alert-bot
 mkdir -p backups
 chmod 700 backups
-docker compose stop
 umask 077
 backup="backups/fund_alert_bot-$(date +%F-%H%M%S).sqlite3"
+restart=1
+restart_service() {
+  status=$?
+  if [ "$restart" -eq 1 ] && ! docker compose up -d; then
+    echo "无法重启 fund-alert-bot，请立即检查 Docker。" >&2
+    status=1
+  fi
+  exit "$status"
+}
+trap restart_service EXIT
+docker compose stop
 cp data/fund_alert_bot.sqlite3 "$backup"
-docker compose up -d
+test "$(sqlite3 "$backup" 'PRAGMA integrity_check;')" = "ok"
 age -r "$AGE_RECIPIENT" -o "$backup.age" "$backup"
+test -s "$backup.age"
+rclone copyto "$backup.age" "remote:fund-alert-bot-backups/$(basename "$backup.age")"
+rclone check "$backup.age" \
+  "remote:fund-alert-bot-backups/$(basename "$backup.age")" --download
 rm -f "$backup"
-rclone copy "$backup.age" remote:fund-alert-bot-backups/
+docker compose up -d
+restart=0
 ```
+
+任何步骤失败时，退出陷阱都会尝试重启服务。加密或上传失败时会保留明文副本供
+排查；只有在修复失败原因并确认加密备份安全后，才手动删除明文副本。
 
 建议通过定时任务至少每天运行一次。`AGE_RECIPIENT` 是公开接收者，私钥必须保存
 在 VPS 之外（例如离线密码管理器）；不得放入仓库、Compose、Shell 历史或日志。
