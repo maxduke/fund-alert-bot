@@ -7,7 +7,10 @@ import pytest
 import requests
 
 from fund_alert_bot.market_data import proxy as proxy_module
-from fund_alert_bot.market_data.proxy import install_akshare_proxy
+from fund_alert_bot.market_data.proxy import (
+    install_akshare_proxy,
+    install_default_requests_timeout,
+)
 
 
 def test_paid_proxy_is_disabled_without_installing(
@@ -28,6 +31,24 @@ def test_paid_proxy_is_disabled_without_installing(
 def test_paid_proxy_requires_token() -> None:
     with pytest.raises(ValueError, match="AKSHARE_PROXY_AUTH_TOKEN"):
         install_akshare_proxy(enabled=True, auth_token="", retry=1)
+
+
+def test_default_requests_timeout_only_fills_unbounded_calls(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_get(*args: object, **kwargs: object) -> object:
+        del args
+        calls.append(kwargs)
+        return object()
+
+    monkeypatch.setattr(proxy_module.requests, "get", fake_get)
+
+    install_default_requests_timeout(30)
+
+    proxy_module.requests.get("https://example.test")
+    proxy_module.requests.get("https://example.test", timeout=None)
+    proxy_module.requests.get("https://example.test", timeout=3)
+    assert [call["timeout"] for call in calls] == [30, 30, 3]
 
 
 def test_paid_proxy_requires_positive_retry() -> None:
@@ -65,6 +86,7 @@ def test_paid_proxy_uses_narrow_non_concurrent_configuration(
             "args": ("101.201.173.125",),
             "auth_token": "paid-token",
             "retry": 1,
+            "timeout": 5,
             "hook_domains": [
                 "fund.eastmoney.com",
                 "push2.eastmoney.com",

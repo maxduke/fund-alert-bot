@@ -18,7 +18,10 @@ from fund_alert_bot.market_data.models import (
     RealtimeQuote,
 )
 from fund_alert_bot.market_data.provider import MarketDataProvider
-from fund_alert_bot.market_data.proxy import install_akshare_proxy
+from fund_alert_bot.market_data.proxy import (
+    install_akshare_proxy,
+    install_default_requests_timeout,
+)
 
 __all__ = [
     "AkshareMarketDataProvider",
@@ -28,6 +31,7 @@ __all__ = [
     "FundNav",
     "Instrument",
     "install_akshare_proxy",
+    "install_default_requests_timeout",
     "MarketCalendar",
     "MarketCalendarUnavailableError",
     "MarketDataFetchError",

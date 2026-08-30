@@ -30,6 +30,7 @@ from fund_alert_bot.db import (
     record_manual_addition,
     reserve_alert_event,
     skip_scheduled_dca_occurrence,
+    upsert_dca_evaluation_failure,
     upsert_fund_fee,
     upsert_position_snapshot,
 )
@@ -315,6 +316,160 @@ def test_scheduled_dca_check_merges_same_day_fixed_reminders(
         "sent",
         "sent",
     ]
+
+
+def test_scheduled_dca_check_persists_error_and_advances_date(
+    tmp_path: Path,
+) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    _add_dca_rule(sqlite_path)
+    with open_connection(sqlite_path) as connection:
+        initialize_database(connection)
+        add_rule(
+            connection,
+            type=commands.DCA_RULE_TYPE,
+            symbol="broken",
+            name="Broken",
+            asset_type="dca",
+            params={"weekday": "THU"},
+        )
+
+    application = FakeApplication()
+    asyncio.run(
+        scheduler.run_scheduled_dca_check(
+            application=application,
+            sqlite_path=sqlite_path,
+            allowed_user_ids={123},
+            timezone="Asia/Shanghai",
+            run_date=date(2024, 1, 4),
+        )
+    )
+
+    with open_connection(sqlite_path) as connection:
+        event_rows = connection.execute(
+            "SELECT alert_key FROM alert_events ORDER BY id"
+        ).fetchall()
+        cursor = connection.execute(
+            "SELECT value FROM app_metadata WHERE key = ?",
+            (scheduler.DCA_LAST_CHECKED_DATE_KEY,),
+        ).fetchone()["value"]
+        failure_rows = connection.execute(
+            "SELECT rule_id, check_date FROM dca_evaluation_failures"
+        ).fetchall()
+
+    assert [row["alert_key"] for row in event_rows] == ["dca:1:2024-01-04"]
+    assert cursor == "2024-01-04"
+    assert [(row["rule_id"], row["check_date"]) for row in failure_rows] == [
+        (2, "2024-01-04")
+    ]
+    assert len(application.bot.messages) == 1
+
+
+def test_due_dca_checks_process_later_dates_when_one_rule_keeps_failing(
+    tmp_path: Path,
+) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    _add_dca_rule(sqlite_path)
+    with open_connection(sqlite_path) as connection:
+        initialize_database(connection)
+        broken_id = add_rule(
+            connection,
+            type=commands.DCA_RULE_TYPE,
+            symbol="broken",
+            name="Broken",
+            asset_type="dca",
+            params={"weekday": "THU"},
+        )
+        connection.execute(
+            "INSERT INTO app_metadata (key, value) VALUES (?, ?)",
+            (scheduler.DCA_LAST_CHECKED_DATE_KEY, "2024-01-03"),
+        )
+        connection.commit()
+
+    application = FakeApplication()
+    checked = asyncio.run(
+        scheduler.run_due_dca_checks(
+            application=application,
+            sqlite_path=sqlite_path,
+            allowed_user_ids={123},
+            timezone="Asia/Shanghai",
+            now=datetime(2024, 1, 5, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+        )
+    )
+
+    assert checked == 2
+    assert len(application.bot.messages) == 1
+    with open_connection(sqlite_path) as connection:
+        cursor = connection.execute(
+            "SELECT value FROM app_metadata WHERE key = ?",
+            (scheduler.DCA_LAST_CHECKED_DATE_KEY,),
+        ).fetchone()["value"]
+        failure_rows = connection.execute(
+            "SELECT rule_id, check_date FROM dca_evaluation_failures"
+        ).fetchall()
+    assert cursor == "2024-01-05"
+    assert [(row["rule_id"], row["check_date"]) for row in failure_rows] == [
+        (broken_id, "2024-01-04"),
+    ]
+
+
+def test_due_dca_checks_clears_repaired_and_disabled_failures(
+    tmp_path: Path,
+) -> None:
+    sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
+    _add_dca_rule(sqlite_path)
+    with open_connection(sqlite_path) as connection:
+        initialize_database(connection)
+        repaired_id = add_rule(
+            connection,
+            type=commands.DCA_RULE_TYPE,
+            symbol="repaired",
+            name="Repaired",
+            asset_type="dca",
+            params={"weekday": "THU"},
+        )
+        disabled_id = add_rule(
+            connection,
+            type=commands.DCA_RULE_TYPE,
+            symbol="disabled",
+            name="Disabled",
+            asset_type="dca",
+            params={"weekday": "THU"},
+            enabled=False,
+        )
+        upsert_dca_evaluation_failure(
+            connection,
+            rule_id=repaired_id,
+            check_date=date(2024, 1, 4),
+            error_message="bad params",
+        )
+        upsert_dca_evaluation_failure(
+            connection,
+            rule_id=disabled_id,
+            check_date=date(2024, 1, 4),
+            error_message="disabled",
+        )
+        connection.execute(
+            "UPDATE rules SET params_json = ? WHERE id = ?",
+            ('{"weekday":"THU","amount":1000}', repaired_id),
+        )
+        connection.commit()
+
+    asyncio.run(
+        scheduler.run_due_dca_checks(
+            application=FakeApplication(),
+            sqlite_path=sqlite_path,
+            allowed_user_ids={123},
+            timezone="Asia/Shanghai",
+            now=datetime(2024, 1, 4, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+        )
+    )
+
+    with open_connection(sqlite_path) as connection:
+        assert (
+            connection.execute("SELECT 1 FROM dca_evaluation_failures").fetchone()
+            is None
+        )
 
 
 def test_failed_same_day_dca_batch_retries_as_one_message(tmp_path: Path) -> None:
@@ -808,7 +963,7 @@ def test_before_close_catches_up_missed_confirmed_plan_tiers(tmp_path: Path) -> 
     assert [row["tier_key"] for row in tiers] == ["0.15", "0.2"]
     assert len(application.bot.messages) == 1
     message = application.bot.messages[0]
-    assert "Buy-plan reminder — A500" in message["text"]
+    assert "Drawdown Add Plan reminder — A500" in message["text"]
     assert "/mark_added" not in message["text"]
     assert "/sync_position" in message["text"]
     assert "reply_markup" not in message
@@ -1217,7 +1372,7 @@ def test_scheduled_market_check_confirms_drawdown_plan_once(tmp_path: Path) -> N
         ).fetchall()
 
     assert len(application.bot.messages) == 1
-    assert "Buy-plan reminder — A500" in application.bot.messages[0]["text"]
+    assert "Drawdown Add Plan reminder — A500" in application.bot.messages[0]["text"]
     assert "Data date: 2024-01-02" in application.bot.messages[0]["text"]
     markup = application.bot.messages[0]["reply_markup"]
     assert markup.inline_keyboard[0][0].callback_data == "drawdown_add:1:1:all"
@@ -1539,7 +1694,10 @@ def test_failed_plan_notification_retries_even_when_market_is_closed(
 
     assert status == "sent"
     assert len(success_application.bot.messages) == 1
-    assert "Buy-plan reminder — A500" in success_application.bot.messages[0]["text"]
+    assert (
+        "Drawdown Add Plan reminder — A500"
+        in success_application.bot.messages[0]["text"]
+    )
     assert provider.price_bases == [PriceBasis.QFQ]
 
 

@@ -152,7 +152,9 @@ when available. The bot hooks only its Eastmoney domains and keeps the patch's
 concurrent `fast` mode off. A low retry count and the bot's
 short in-process caches are intentional cost controls. With the proxy enabled,
 the patch owns retries for paid Eastmoney requests and the provider calls each
-Eastmoney operation once; other data sources keep their normal retry budget. Do not
+Eastmoney operation once. Each proxy attempt uses the patch's five-second
+timeout; `AKSHARE_REQUEST_TIMEOUT_SECONDS` only applies when a request has no
+timeout of its own. Other data sources keep their normal retry budget. Do not
 put the token in Compose files, shell history, logs, or Git. ETF, index, and
 stock realtime lookups use one bounded per-symbol request; the bot does not call
 AKShare's full-market paginated spot endpoints. If the proxy and fallback sources
@@ -280,18 +282,38 @@ For a simple consistent backup, stop the service, copy the database, then start
 the service again:
 
 ```bash
+set -Eeuo pipefail
 cd /opt/fund-alert-bot
 mkdir -p backups
 chmod 700 backups
-docker compose stop
 umask 077
 backup="backups/fund_alert_bot-$(date +%F-%H%M%S).sqlite3"
+restart=1
+restart_service() {
+  status=$?
+  if [ "$restart" -eq 1 ] && ! docker compose up -d; then
+    echo "Failed to restart fund-alert-bot; check Docker immediately." >&2
+    status=1
+  fi
+  exit "$status"
+}
+trap restart_service EXIT
+docker compose stop
 cp data/fund_alert_bot.sqlite3 "$backup"
-docker compose up -d
+test "$(sqlite3 "$backup" 'PRAGMA integrity_check;')" = "ok"
 age -r "$AGE_RECIPIENT" -o "$backup.age" "$backup"
+test -s "$backup.age"
+rclone copyto "$backup.age" "remote:fund-alert-bot-backups/$(basename "$backup.age")"
+rclone check "$backup.age" \
+  "remote:fund-alert-bot-backups/$(basename "$backup.age")" --download
 rm -f "$backup"
-rclone copy "$backup.age" remote:fund-alert-bot-backups/
+docker compose up -d
+restart=0
 ```
+
+If any step fails, the exit trap attempts to restart the service. Encryption or
+upload failures leave the plaintext copy for investigation; remove it manually
+only after fixing the failure and confirming the encrypted backup is safe.
 
 Use a scheduled job to run this backup at least daily. `AGE_RECIPIENT` is the
 public recipient; keep its private identity outside the VPS (for example in an

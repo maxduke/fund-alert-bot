@@ -139,8 +139,9 @@ Bot 只代理自身使用的东方财富域名，并始终关闭插件的并发 
 看到它。只有在你明确接受该风险并信任网络路径时才启用；如果服务商提供支持，
 请优先改用 HTTPS 且通过请求头或请求体传递凭据的接口。
 较低的重试次数和短时进程内缓存是控制付费请求的有意设置。启用代理后，东方财富重试
-由代理补丁统一负责，Bot 对每个东方财富操作只调用一次；其他数据源仍使用普通
-重试预算。不要把 Token 放进 Compose 文件、Shell 历史、日志或 Git。代理和备用
+由代理补丁统一负责，Bot 对每个东方财富操作只调用一次。代理补丁的每次尝试使用
+5 秒超时；`AKSHARE_REQUEST_TIMEOUT_SECONDS` 只限制本身未设置超时的请求。
+其他数据源仍使用普通重试预算。不要把 Token 放进 Compose 文件、Shell 历史、日志或 Git。代理和备用
 数据源都不可用时，Bot 会发送“数据
 不可用”提醒，不会消耗回撤档位，也不会伪造价格。ETF、指数和股票的实时行情都使用有边界的单品种请求，Bot 不调用 AKShare 全市场分页行情接口。
 
@@ -257,18 +258,37 @@ docker compose logs -f
 最简单的一致性备份方式是停止服务、复制数据库、再启动：
 
 ```bash
+set -Eeuo pipefail
 cd /opt/fund-alert-bot
 mkdir -p backups
 chmod 700 backups
-docker compose stop
 umask 077
 backup="backups/fund_alert_bot-$(date +%F-%H%M%S).sqlite3"
+restart=1
+restart_service() {
+  status=$?
+  if [ "$restart" -eq 1 ] && ! docker compose up -d; then
+    echo "无法重启 fund-alert-bot，请立即检查 Docker。" >&2
+    status=1
+  fi
+  exit "$status"
+}
+trap restart_service EXIT
+docker compose stop
 cp data/fund_alert_bot.sqlite3 "$backup"
-docker compose up -d
+test "$(sqlite3 "$backup" 'PRAGMA integrity_check;')" = "ok"
 age -r "$AGE_RECIPIENT" -o "$backup.age" "$backup"
+test -s "$backup.age"
+rclone copyto "$backup.age" "remote:fund-alert-bot-backups/$(basename "$backup.age")"
+rclone check "$backup.age" \
+  "remote:fund-alert-bot-backups/$(basename "$backup.age")" --download
 rm -f "$backup"
-rclone copy "$backup.age" remote:fund-alert-bot-backups/
+docker compose up -d
+restart=0
 ```
+
+任何步骤失败时，退出陷阱都会尝试重启服务。加密或上传失败时会保留明文副本供
+排查；只有在修复失败原因并确认加密备份安全后，才手动删除明文副本。
 
 建议通过定时任务至少每天运行一次。`AGE_RECIPIENT` 是公开接收者，私钥必须保存
 在 VPS 之外（例如离线密码管理器）；不得放入仓库、Compose、Shell 历史或日志。

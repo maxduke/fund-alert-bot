@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Collection
+from hashlib import sha256
 from typing import Any
 
-from fund_alert_bot.notifications.base import NotificationMessage, NotificationResult
+from fund_alert_bot.notifications.base import (
+    NotificationMessage,
+    NotificationResult,
+    split_telegram_text,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -48,6 +53,9 @@ class TelegramNotificationChannel:
         self,
         target_key: str,
         message: NotificationMessage,
+        *,
+        resume_sent_chunks: int | None = None,
+        resume_body_fingerprint: str | None = None,
     ) -> NotificationResult:
         try:
             chat_id = int(target_key.removeprefix("telegram:"))
@@ -77,11 +85,28 @@ class TelegramNotificationChannel:
                     for row in message.telegram_actions
                 ]
             )
+        body_fingerprint = ""
+        sent_chunks = 0
         try:
-            kwargs = {"chat_id": chat_id, "text": message.body}
-            if reply_markup is not None:
-                kwargs["reply_markup"] = reply_markup
-            await self._bot.send_message(**kwargs)
+            body_fingerprint = sha256(message.body.encode("utf-8")).hexdigest()
+            chunks = split_telegram_text(message.body)
+            start_index = 0
+            if (
+                resume_sent_chunks is not None
+                and resume_body_fingerprint == body_fingerprint
+                and 0 <= resume_sent_chunks < len(chunks)
+            ):
+                start_index = resume_sent_chunks
+            sent_chunks = start_index
+            for index in range(start_index, len(chunks)):
+                chunk = chunks[index]
+                kwargs = {"chat_id": chat_id, "text": chunk}
+                if reply_markup is not None and index == len(chunks) - 1:
+                    kwargs["reply_markup"] = reply_markup
+                await self._bot.send_message(**kwargs)
+                sent_chunks += 1
+            # ponytail: progress is checkpointed when the adapter returns;
+            # write each chunk only if crash-window duplicates become material.
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning(
                 "Telegram notification failed for chat_id=%s: %s",
@@ -92,5 +117,7 @@ class TelegramNotificationChannel:
                 channel=self.name,
                 success=False,
                 detail=f"unexpected_error={type(exc).__name__}",
+                sent_chunks=sent_chunks,
+                body_fingerprint=body_fingerprint,
             )
         return NotificationResult(channel=self.name, success=True, detail="sent")

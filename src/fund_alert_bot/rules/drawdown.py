@@ -204,7 +204,10 @@ def _read_thresholds(params: Mapping[str, Any]) -> list[float]:
     thresholds = [float(threshold) for threshold in raw_thresholds]
     if not thresholds:
         raise ValueError("thresholds must not be empty.")
-    if any(threshold <= 0 or threshold >= 1 for threshold in thresholds):
+    if any(
+        not math.isfinite(threshold) or threshold <= 0 or threshold >= 1
+        for threshold in thresholds
+    ):
         raise ValueError("thresholds must be between 0 and 1.")
     return thresholds
 

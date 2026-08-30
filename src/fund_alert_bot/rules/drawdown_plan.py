@@ -1,4 +1,4 @@
-"""Trend calculations for drawdown buy plans."""
+"""Trend calculations for Drawdown Add Plans."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from fund_alert_bot.market_data.models import AssetType, RealtimeQuote
+from fund_alert_bot.notifications.base import TELEGRAM_TEXT_LIMIT
 
 _THRESHOLD_TOLERANCE = 1e-12
 _PRICE_RELATIVE_TOLERANCE = 1e-4
@@ -21,7 +22,6 @@ _PRICE_ABSOLUTE_TOLERANCE = 1e-6
 DEFAULT_REARM_MARGIN = 0.02
 _MAX_FIXED_DECIMAL_CHARS = 24
 _MAX_TIERS = 50
-_TELEGRAM_TEXT_LIMIT = 4096
 _SYMBOL_PATTERN = re.compile(r"[0-9]{6}")
 _REALTIME_SOURCES = frozenset({"eastmoney", "sina_fallback"})
 _CONFIRMED_HISTORY_SOURCES = frozenset({"akshare_eastmoney"})
@@ -473,7 +473,7 @@ def build_drawdown_plan_pre_alert(
         "All currently actionable amount" if mixed else "Configured additional amount"
     )
     message_lines = [
-        f"⚠️ Buy-plan pre-alert — {name}",
+        f"⚠️ Drawdown Add Plan pre-alert — {name}",
         "",
         "Realtime estimate before close",
         f"Market date: {evaluation.latest_date.isoformat()}",
@@ -504,7 +504,7 @@ def build_drawdown_plan_pre_alert(
         "alert_key": (
             f"{rule_id}:drawdown_plan:pre_alert:{evaluation.latest_date.isoformat()}"
         ),
-        "title": f"Buy-plan pre-alert — {name}",
+        "title": f"Drawdown Add Plan pre-alert — {name}",
         "message": message,
         "payload": {
             "phase": "before_close",
@@ -614,7 +614,7 @@ def build_drawdown_plan_alert(
             ),
         ]
     message_lines = [
-        f"📉 Buy-plan reminder — {name}",
+        f"📉 Drawdown Add Plan reminder — {name}",
         "",
         f"Data date: {evaluation.latest_date.isoformat()}",
         f"Reference ETF: {reference_symbol}",
@@ -651,7 +651,7 @@ def build_drawdown_plan_alert(
                 f"tiers:{tier_keys}"
             )
         ),
-        "title": f"Buy-plan reminder — {name}",
+        "title": f"Drawdown Add Plan reminder — {name}",
         "message": message,
         "payload": {
             "phase": "after_close",
@@ -778,7 +778,7 @@ def validate_drawdown_plan_notification_size(
         ),
     )
     if any(
-        alert is not None and len(str(alert["message"])) > _TELEGRAM_TEXT_LIMIT
+        alert is not None and len(str(alert["message"])) > TELEGRAM_TEXT_LIMIT
         for alert in alerts
     ):
         raise ValueError(

@@ -310,6 +310,19 @@ def init_db(connection: sqlite3.Connection) -> None:
             UNIQUE(rule_id, due_date)
         );
 
+        CREATE TABLE IF NOT EXISTS dca_evaluation_failures (
+            rule_id INTEGER NOT NULL REFERENCES rules(id) ON DELETE CASCADE,
+            check_date TEXT NOT NULL,
+            error_message TEXT NOT NULL,
+            first_failed_at TEXT NOT NULL,
+            last_failed_at TEXT NOT NULL,
+            attempt_count INTEGER NOT NULL DEFAULT 1 CHECK (attempt_count > 0),
+            PRIMARY KEY (rule_id, check_date)
+        );
+
+        CREATE INDEX IF NOT EXISTS dca_evaluation_failures_date
+        ON dca_evaluation_failures(check_date, rule_id);
+
         CREATE TABLE IF NOT EXISTS market_daily_history (
             symbol TEXT NOT NULL,
             asset_type TEXT NOT NULL,
@@ -1602,6 +1615,73 @@ def list_enabled_rules(connection: sqlite3.Connection) -> list[sqlite3.Row]:
             """
         ).fetchall()
     )
+
+
+def list_dca_evaluation_failures(
+    connection: sqlite3.Connection,
+) -> list[sqlite3.Row]:
+    """Return persisted DCA evaluation failures in retry order."""
+
+    return list(
+        connection.execute(
+            """
+            SELECT rule_id, check_date, error_message,
+                   first_failed_at, last_failed_at, attempt_count
+            FROM dca_evaluation_failures
+            ORDER BY check_date, rule_id
+            """
+        ).fetchall()
+    )
+
+
+def upsert_dca_evaluation_failure(
+    connection: sqlite3.Connection,
+    *,
+    rule_id: int,
+    check_date: date | str,
+    error_message: str,
+) -> None:
+    """Record one failed DCA rule/date evaluation for an independent retry."""
+
+    date_text = (
+        check_date.isoformat() if isinstance(check_date, date) else str(check_date)
+    )
+    now = _utc_now_text()
+    connection.execute(
+        """
+        INSERT INTO dca_evaluation_failures (
+            rule_id, check_date, error_message,
+            first_failed_at, last_failed_at, attempt_count
+        ) VALUES (?, ?, ?, ?, ?, 1)
+        ON CONFLICT(rule_id, check_date) DO UPDATE SET
+            error_message = excluded.error_message,
+            last_failed_at = excluded.last_failed_at,
+            attempt_count = dca_evaluation_failures.attempt_count + 1
+        """,
+        (rule_id, date_text, error_message, now, now),
+    )
+    connection.commit()
+
+
+def clear_dca_evaluation_failure(
+    connection: sqlite3.Connection,
+    *,
+    rule_id: int,
+    check_date: date | str,
+) -> None:
+    """Forget one DCA rule/date failure after a successful evaluation."""
+
+    date_text = (
+        check_date.isoformat() if isinstance(check_date, date) else str(check_date)
+    )
+    connection.execute(
+        """
+        DELETE FROM dca_evaluation_failures
+        WHERE rule_id = ? AND check_date = ?
+        """,
+        (rule_id, date_text),
+    )
+    connection.commit()
 
 
 def is_auto_cost_profit_rule(rule: Any) -> bool:
@@ -3558,6 +3638,8 @@ class NotificationDeliveryClaim:
     target_key: str
     channel: str
     claim_token: str
+    sent_chunks: int = 0
+    body_fingerprint: str = ""
 
 
 def ensure_notification_delivery_targets(
@@ -3667,7 +3749,7 @@ def claim_notification_deliveries(
             params.extend(normalized_target_keys)
         rows = connection.execute(
             f"""
-            SELECT event_id, target_key, channel
+            SELECT event_id, target_key, channel, result_json
             FROM notification_deliveries
             WHERE event_id IN ({event_placeholders})
                 AND (
@@ -3701,12 +3783,15 @@ def claim_notification_deliveries(
                     str(row["target_key"]),
                 ),
             )
+            sent_chunks, body_fingerprint = _delivery_progress(row["result_json"])
             claims.append(
                 NotificationDeliveryClaim(
                     event_id=int(row["event_id"]),
                     target_key=str(row["target_key"]),
                     channel=str(row["channel"]),
                     claim_token=token,
+                    sent_chunks=sent_chunks,
+                    body_fingerprint=body_fingerprint,
                 )
             )
         connection.commit()
@@ -4980,11 +5065,55 @@ def _ensure_fund_settings_columns(connection: sqlite3.Connection) -> None:
 
 
 def _notification_result_payload(result: Any) -> dict[str, object]:
-    return {
+    payload = {
         "channel": str(_read_result_value(result, "channel", "")),
         "success": bool(_read_result_value(result, "success", False)),
         "detail": str(_read_result_value(result, "detail", "")),
     }
+    sent_chunks = _read_result_value(result, "sent_chunks", 0)
+    body_fingerprint = _read_result_value(result, "body_fingerprint", "")
+    if (
+        isinstance(sent_chunks, int)
+        and not isinstance(sent_chunks, bool)
+        and sent_chunks > 0
+        and _is_sha256_fingerprint(body_fingerprint)
+    ):
+        payload.update(
+            sent_chunks=sent_chunks,
+            body_fingerprint=body_fingerprint,
+        )
+    return payload
+
+
+def _delivery_progress(result_json: object) -> tuple[int, str]:
+    if not isinstance(result_json, str):
+        return 0, ""
+    try:
+        payload = json.loads(result_json)
+    except json.JSONDecodeError:
+        return 0, ""
+    if not isinstance(payload, dict):
+        return 0, ""
+    sent_chunks = payload.get("sent_chunks", 0)
+    body_fingerprint = payload.get("body_fingerprint", "")
+    if (
+        not isinstance(sent_chunks, int)
+        or isinstance(sent_chunks, bool)
+        or sent_chunks < 0
+        or not _is_sha256_fingerprint(body_fingerprint)
+    ):
+        return 0, ""
+    return sent_chunks, body_fingerprint
+
+
+def _is_sha256_fingerprint(value: object) -> bool:
+    if not isinstance(value, str) or len(value) != 64:
+        return False
+    try:
+        bytes.fromhex(value)
+    except ValueError:
+        return False
+    return True
 
 
 def _read_result_value(result: Any, key: str, default: Any) -> Any:
@@ -4994,7 +5123,7 @@ def _read_result_value(result: Any, key: str, default: Any) -> Any:
 
 
 def _json_text(value: Any) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
 def _normalize_drawdown_tier_keys(tier_keys: Sequence[str]) -> tuple[str, ...]:

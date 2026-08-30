@@ -66,6 +66,24 @@ def test_init_db_creates_storage_tables(tmp_path: Path) -> None:
     }.issubset(table_names)
 
 
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
+def test_persistent_json_rejects_non_finite_values(value: float) -> None:
+    connection = connect(":memory:")
+    try:
+        init_db(connection)
+        with pytest.raises(ValueError, match="Out of range float values"):
+            add_rule(
+                connection,
+                type="drawdown_from_high",
+                symbol="399006",
+                name="ChiNext",
+                asset_type="cn_index",
+                params={"threshold": value},
+            )
+    finally:
+        connection.close()
+
+
 def test_init_migrates_drawdown_cycle_initial_peak_date_idempotently() -> None:
     connection = connect(":memory:")
     try:

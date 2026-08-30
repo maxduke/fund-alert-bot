@@ -261,6 +261,7 @@ Bot 启动时会注册命令菜单；在 Telegram 输入 `/` 即可看到可用�
 - `FUND_NAV_PROCESS_TIME=08:30`
 - `AKSHARE_RETRIES=3`
 - `AKSHARE_RETRY_DELAY_SECONDS=0.5`
+- `AKSHARE_REQUEST_TIMEOUT_SECONDS=30`
 - `AKSHARE_LATEST_LOOKBACK_DAYS=45`
 
 可选通知配置：
@@ -295,7 +296,9 @@ Bot 使用直连数据源，并通过已启用的通知渠道发送启动提醒�
 为避免放大付费请求，补丁的并发 `fast` 分页始终关闭。请保持重试次数较低，绝不要把 Token
 提交到 Git 或写入日志。启用后，付费东方财富请求只由代理补丁负责重试；Bot 对每个
 东方财富 AKShare 操作只调用一次，避免两层重试相乘。
-新浪、雪球等其他数据源仍使用普通的 `AKSHARE_RETRIES`。历史数据、实时行情和联接基金净值都使用短时进程内
+代理补丁的每次尝试固定使用 5 秒超时；`AKSHARE_REQUEST_TIMEOUT_SECONDS`
+只限制本身未设置超时的请求。新浪、雪球等其他数据源仍使用普通的
+`AKSHARE_RETRIES`。历史数据、实时行情和联接基金净值都使用短时进程内
 缓存，相同或更窄的历史请求会复用结果，不建立可能长期过期的磁盘缓存。修改配置后要重启，
 并查看启动日志；代理或数据源失败时 Bot 会安全跳过，不会猜测行情。
 
@@ -344,8 +347,24 @@ python -m pip install --constraint constraints.txt `
   editables==0.6 hatchling==1.32.0 setuptools==84.0.0 wheel==0.48.0
 python -m pip install --no-build-isolation --constraint constraints.txt -e ".[dev]"
 Copy-Item .env.example .env
-ruff check .
-pytest
+# 编辑 .env，替换 Telegram Token 和允许的用户 ID。
+New-Item -ItemType Directory -Force data | Out-Null
+python -m fund_alert_bot.main
+```
+
+提交前运行与 CI 相同的检查：
+
+```powershell
+python -m ruff format --check .
+python -m ruff check .
+python -m pytest
+```
+
+修改 `pyproject.toml` 后，在已激活的虚拟环境中重新生成 Python 3.12 依赖约束：
+
+```powershell
+python -m pip install pip-tools
+python -m piptools compile --all-extras --output-file=constraints.txt --strip-extras pyproject.toml
 ```
 
 Linux 使用 Docker Compose 时，必须在 `.env` 中把 `BOT_UID`、`BOT_GID`
@@ -363,9 +382,8 @@ Compose 不会自动以 root 创建缺失的 `data`。已有部署切换 UID/GID
 
 ## GitHub Actions
 
-- `CI`：在 Python 3.12 上安装开发依赖，运行 Ruff 和 pytest。
-- `Docker`：PR 构建镜像；`main` 推送成功后发布到
-  `ghcr.io/maxduke/fund-alert-bot`。
+- `CI`：在 Python 3.12 上运行 Ruff 和 pytest，PR 通过后构建并冒烟测试镜像；
+  `main` 或版本标签的检查通过后发布到 `ghcr.io/maxduke/fund-alert-bot`。
 
 ## 项目文档
 

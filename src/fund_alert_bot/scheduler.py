@@ -36,7 +36,9 @@ from fund_alert_bot.checks import (
 )
 from fund_alert_bot.config import NotificationSettings, parse_hhmm_time
 from fund_alert_bot.db import (
+    clear_dca_evaluation_failure,
     initialize_database,
+    list_dca_evaluation_failures,
     list_enabled_rules,
     list_retryable_drawdown_plan_alert_events,
     list_retryable_position_profit_alert_events,
@@ -872,6 +874,8 @@ async def run_scheduled_dca_check(
     run_date: date | None = None,
     notification_settings: NotificationSettings | None = None,
     work_lock: Lock | None = None,
+    rule_ids: Collection[int] | None = None,
+    advance_cursor: bool = True,
 ) -> None:
     """Run the scheduled DCA reminder check and send due notifications."""
 
@@ -894,6 +898,7 @@ async def run_scheduled_dca_check(
                     connection,
                     today=check_date,
                     market_calendar=market_calendar or CNMarketCalendar(),
+                    rule_ids=rule_ids,
                 )
 
         result = await run_serialized(work_lock, evaluate)
@@ -913,7 +918,8 @@ async def run_scheduled_dca_check(
             notifications=result.notifications,
             notification_settings=notification_settings,
         )
-        _write_dca_check_date(sqlite_path, check_date)
+        if advance_cursor:
+            _write_dca_check_date(sqlite_path, check_date)
     except Exception:
         LOGGER.exception("Scheduled DCA reminder check failed")
         raise
@@ -943,7 +949,7 @@ async def run_due_dca_checks(
     work_lock: Lock | None = None,
     now: datetime | None = None,
 ) -> int:
-    """Replay every DCA reminder date missed since the last completed check."""
+    """Retry failed rule dates, then replay dates missed since the cursor."""
 
     timezone_info = ZoneInfo(timezone) if isinstance(timezone, str) else timezone
     current = now or datetime.now(timezone_info)
@@ -956,10 +962,58 @@ async def run_due_dca_checks(
 
     with open_connection(sqlite_path) as connection:
         initialize_database(connection)
+        failures = list_dca_evaluation_failures(connection)
+        enabled_rule_ids = {
+            int(row["id"])
+            for row in list_enabled_rules(connection)
+            if row["type"] == "dca_reminder"
+        }
+        for failure in failures:
+            if int(failure["rule_id"]) not in enabled_rule_ids:
+                clear_dca_evaluation_failure(
+                    connection,
+                    rule_id=int(failure["rule_id"]),
+                    check_date=str(failure["check_date"]),
+                )
         row = connection.execute(
             "SELECT value FROM app_metadata WHERE key = ?",
             (DCA_LAST_CHECKED_DATE_KEY,),
         ).fetchone()
+
+    for failure in failures:
+        rule_id = int(failure["rule_id"])
+        if rule_id not in enabled_rule_ids:
+            continue
+        try:
+            failure_date = date.fromisoformat(str(failure["check_date"]))
+        except ValueError:
+            LOGGER.warning(
+                "Discarding invalid DCA evaluation failure date rule_id=%s date=%s",
+                rule_id,
+                failure["check_date"],
+            )
+            with open_connection(sqlite_path) as connection:
+                initialize_database(connection)
+                clear_dca_evaluation_failure(
+                    connection,
+                    rule_id=rule_id,
+                    check_date=str(failure["check_date"]),
+                )
+            continue
+        if failure_date > latest_due_date:
+            continue
+        await run_scheduled_dca_check(
+            application=application,
+            sqlite_path=sqlite_path,
+            allowed_user_ids=allowed_user_ids,
+            timezone=timezone,
+            market_calendar=market_calendar,
+            run_date=failure_date,
+            notification_settings=notification_settings,
+            work_lock=work_lock,
+            rule_ids={rule_id},
+            advance_cursor=False,
+        )
 
     if row is None:
         if latest_due_date < current.date():
