@@ -24,6 +24,8 @@ class NotificationResult:
     channel: str
     success: bool
     detail: str = ""
+    sent_chunks: int = 0
+    body_fingerprint: str = ""
 
 
 class NotificationChannel(Protocol):

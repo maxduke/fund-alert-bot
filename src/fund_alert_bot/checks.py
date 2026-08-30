@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any
@@ -17,6 +18,7 @@ from fund_alert_bot.db import (
     alert_exists,
     apply_manual_add_estimate,
     apply_scheduled_dca_occurrence,
+    clear_dca_evaluation_failure,
     create_scheduled_dca_occurrence,
     get_active_drawdown_cycle,
     get_active_position_cycle,
@@ -38,6 +40,7 @@ from fund_alert_bot.db import (
     reserve_alert_event,
     set_scheduled_dca_effective_date,
     skip_scheduled_dca_occurrence,
+    upsert_dca_evaluation_failure,
     upsert_fund_nav,
     upsert_market_history,
 )
@@ -2185,12 +2188,19 @@ def evaluate_dca_rules(
     *,
     today: date | None = None,
     market_calendar: MarketCalendar | None = None,
+    rule_ids: Collection[int] | None = None,
 ) -> DcaCheckResult:
     """Evaluate enabled DCA reminder rules and store new alert events."""
 
     check_date = today or date.today()
+    selected_rule_ids = (
+        None if rule_ids is None else {int(rule_id) for rule_id in rule_ids}
+    )
     rules = [
-        row for row in list_enabled_rules(connection) if row["type"] == DCA_RULE_TYPE
+        row
+        for row in list_enabled_rules(connection)
+        if row["type"] == DCA_RULE_TYPE
+        and (selected_rule_ids is None or int(row["id"]) in selected_rule_ids)
     ]
 
     notifications: list[AlertNotification] = []
@@ -2207,6 +2217,11 @@ def evaluate_dca_rules(
                 if normalize_weekday(str(params["weekday"])) != weekday_for_date(
                     check_date
                 ):
+                    clear_dca_evaluation_failure(
+                        connection,
+                        rule_id=int(row["id"]),
+                        check_date=check_date,
+                    )
                     continue
                 policy = str(params.get("holiday_policy", "next"))
                 try:
@@ -2248,6 +2263,12 @@ def evaluate_dca_rules(
                 ),
             )
         except Exception as exc:  # noqa: BLE001
+            upsert_dca_evaluation_failure(
+                connection,
+                rule_id=int(row["id"]),
+                check_date=check_date,
+                error_message=str(exc),
+            )
             errors.append(
                 RuleCheckError(
                     rule_id=int(row["id"]),
@@ -2256,6 +2277,12 @@ def evaluate_dca_rules(
                 )
             )
             continue
+
+        clear_dca_evaluation_failure(
+            connection,
+            rule_id=int(row["id"]),
+            check_date=check_date,
+        )
 
         if alert is None:
             continue

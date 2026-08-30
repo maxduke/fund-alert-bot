@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from pathlib import Path
 
 from fund_alert_bot.checks import AlertNotification, DcaNotificationSummary
 from fund_alert_bot.db import (
     ALERT_NOTIFICATION_SENT,
+    NotificationDeliveryClaim,
     add_alert_event,
     claim_notification_deliveries,
     complete_notification_delivery,
@@ -14,7 +17,10 @@ from fund_alert_bot.db import (
     open_connection,
 )
 from fund_alert_bot.notifications.base import NotificationMessage, NotificationResult
-from fund_alert_bot.notifications.dispatch import send_alert_notifications
+from fund_alert_bot.notifications.dispatch import (
+    _common_delivery_progress,
+    send_alert_notifications,
+)
 from fund_alert_bot.notifications.service import NotificationService
 from fund_alert_bot.notifications.telegram import TelegramNotificationChannel
 
@@ -64,6 +70,66 @@ def test_telegram_target_fails_when_one_chunk_send_raises() -> None:
     assert result.success is False
     assert result.detail == "unexpected_error=RuntimeError"
     assert len(calls) == 2
+    assert result.sent_chunks == 1
+    assert (
+        result.body_fingerprint
+        == hashlib.sha256(("x" * 9000).encode("utf-8")).hexdigest()
+    )
+
+
+def test_telegram_retry_resumes_after_failed_chunk_without_duplicate_chunks(
+    tmp_path: Path,
+) -> None:
+    sqlite_path = tmp_path / "alerts.sqlite3"
+    with open_connection(sqlite_path) as connection:
+        initialize_database(connection)
+        event_id = _add_event(connection, "telegram-chunk-retry")
+
+    body = "A" * 4096 + "B" * 4096 + "C"
+    bot = FailingChunkBot()
+    service = NotificationService(
+        [TelegramNotificationChannel(bot=bot, chat_ids=(123,))]
+    )
+    notification = _notification(event_id, body)
+
+    first = asyncio.run(
+        send_alert_notifications(
+            sqlite_path=sqlite_path,
+            notification_service=service,
+            notifications=[notification],
+        )
+    )
+
+    with open_connection(sqlite_path) as connection:
+        result_json = connection.execute(
+            "SELECT result_json FROM notification_deliveries WHERE event_id = ?",
+            (event_id,),
+        ).fetchone()[0]
+    assert first.failed == 1
+    assert json.loads(result_json)["sent_chunks"] == 1
+
+    second = asyncio.run(
+        send_alert_notifications(
+            sqlite_path=sqlite_path,
+            notification_service=service,
+            notifications=[notification],
+        )
+    )
+
+    assert second.delivered == 1
+    assert bot.calls == ["A" * 4096, "B" * 4096, "B" * 4096, "C"]
+
+
+def test_merged_claim_progress_requires_consistent_metadata() -> None:
+    claims = [
+        NotificationDeliveryClaim(1, "telegram:1", "telegram", "one", 1, "a" * 64),
+        NotificationDeliveryClaim(2, "telegram:1", "telegram", "two", 1, "a" * 64),
+    ]
+    assert _common_delivery_progress(claims) == (1, "a" * 64)
+    claims[-1] = NotificationDeliveryClaim(
+        2, "telegram:1", "telegram", "two", 2, "a" * 64
+    )
+    assert _common_delivery_progress(claims) is None
 
 
 def test_concurrent_dispatch_claims_each_target_once(tmp_path: Path) -> None:
@@ -319,6 +385,17 @@ class PartialFailureBot:
         del text, kwargs
         self.calls.append(chat_id)
         if chat_id == 202 and self.calls.count(chat_id) == 1:
+            raise RuntimeError("temporary Telegram failure")
+
+
+class FailingChunkBot:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def send_message(self, *, text: str, **kwargs: object) -> None:
+        del kwargs
+        self.calls.append(text)
+        if len(self.calls) == 2:
             raise RuntimeError("temporary Telegram failure")
 
 

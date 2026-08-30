@@ -83,11 +83,14 @@ async def send_alert_notifications(
         async def deliver(claimed_delivery: tuple) -> None:
             target_key, target_claims, notification = claimed_delivery
             async with semaphore:
+                resume = _common_delivery_progress(target_claims)
                 result = await notification_service.send_target(
                     target_key,
                     title=notification.title,
                     body=notification.text,
                     telegram_actions=notification.telegram_actions,
+                    resume_sent_chunks=None if resume is None else resume[0],
+                    resume_body_fingerprint=None if resume is None else resume[1],
                 )
             with open_connection(sqlite_path) as connection:
                 initialize_database(connection)
@@ -131,6 +134,17 @@ async def send_alert_notifications(
         delivered=delivered,
         failed=failed,
     )
+
+
+def _common_delivery_progress(claims: list) -> tuple[int, str] | None:
+    """Return resumable progress only when every merged claim agrees."""
+    progress = {(claim.sent_chunks, claim.body_fingerprint) for claim in claims}
+    if len(progress) != 1:
+        return None
+    sent_chunks, body_fingerprint = progress.pop()
+    if sent_chunks <= 0 or not body_fingerprint:
+        return None
+    return sent_chunks, body_fingerprint
 
 
 def _notification_batches(
