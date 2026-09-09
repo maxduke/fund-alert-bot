@@ -96,7 +96,7 @@ requests==2.34.2
     #   akshare
     #   akshare-proxy-patch
     #   fund-alert-bot (pyproject.toml)
-ruff==0.16.4
+ruff==0.16.6
     # via fund-alert-bot (pyproject.toml)
 setuptools==84.0.0
     # via build-system support for jsonpath
