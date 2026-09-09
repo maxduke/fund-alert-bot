@@ -4,11 +4,16 @@ import asyncio
 import json
 from datetime import date, datetime
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
 from fund_alert_bot import runtime_status, scheduler
-from fund_alert_bot.checks import DrawdownCheckResult, RuleNoDataSkip
+from fund_alert_bot.checks import (
+    DrawdownCheckResult,
+    DrawdownPlanCheckResult,
+    RuleNoDataSkip,
+)
 from fund_alert_bot.commands import build_command_handlers
 from fund_alert_bot.db import (
     add_enhanced_dca_rule,
@@ -21,6 +26,7 @@ from fund_alert_bot.db import (
     upsert_fund_nav,
 )
 from fund_alert_bot.i18n import get_language, set_language
+from fund_alert_bot.market_data import MarketCalendarUnavailableError
 from fund_alert_bot.runtime_status import format_runtime_status
 
 
@@ -87,6 +93,71 @@ def test_task_status_preserves_last_success_through_no_data_skip_and_failure(
     summary = format_runtime_status(path, timezone="Asia/Shanghai")
     assert "After-close check: Execution failed" in summary
     assert "Last complete success:" in summary
+
+
+@pytest.mark.parametrize("rule_type", ["drawdown_from_high", "drawdown_plan"])
+@pytest.mark.parametrize("current_day_confirmed", [False, True])
+def test_before_close_calendar_gap_cannot_replace_last_success(
+    tmp_path, monkeypatch, rule_type, current_day_confirmed
+) -> None:
+    path = tmp_path / "bot.sqlite3"
+    with open_connection(path) as connection:
+        initialize_database(connection)
+        for enabled in (True, False):
+            add_rule(
+                connection,
+                type=rule_type,
+                symbol="510300",
+                name="Test drawdown",
+                asset_type="cn_etf",
+                params={},
+                enabled=enabled,
+            )
+    drawdown = Mock(return_value=DrawdownCheckResult(1, [], 0, [], [], []))
+    plan = Mock(return_value=DrawdownPlanCheckResult(1, [], [], []))
+    monkeypatch.setattr(scheduler, "evaluate_drawdown_rules", drawdown)
+    monkeypatch.setattr(scheduler, "evaluate_drawdown_plan_prealerts", plan)
+    messages = []
+
+    async def send_message(**kwargs):
+        messages.append(kwargs["text"])
+
+    run_date = date(2026, 9, 9)
+    calendar = SimpleNamespace(
+        is_trading_day=lambda _: True, confirmed_status=lambda _: True
+    )
+    kwargs = dict(
+        application=SimpleNamespace(bot=SimpleNamespace(send_message=send_message)),
+        sqlite_path=path,
+        allowed_user_ids={123},
+        market_data_provider=object(),
+        market_calendar=calendar,
+        timezone="Asia/Shanghai",
+        run_date=run_date,
+    )
+    asyncio.run(scheduler.run_scheduled_before_close_check(**kwargs))
+    successful = _task_state(path, scheduler.MARKET_BEFORE_CLOSE_JOB_ID)
+    assert successful["outcome"] == "ok"
+    drawdown.reset_mock()
+    plan.reset_mock()
+
+    def unavailable(check_date):
+        if current_day_confirmed and check_date == run_date:
+            return True
+        raise MarketCalendarUnavailableError("Previous market date unavailable")
+
+    calendar.confirmed_status = unavailable
+    asyncio.run(scheduler.run_scheduled_before_close_check(**kwargs))
+    partial = _task_state(path, scheduler.MARKET_BEFORE_CLOSE_JOB_ID)
+    assert partial["outcome"] == "partial"
+    assert partial["no_data"] == 1  # Disabled rules are not affected checks.
+    assert partial["errors"] == partial["delivery_failures"] == 0
+    assert partial["last_success_at"] == successful["last_success_at"]
+    drawdown.assert_not_called()
+    plan.assert_not_called()
+    summary = format_runtime_status(path, timezone="Asia/Shanghai")
+    assert "Before-close check: Incomplete (data or delivery problems)" in summary
+    assert len(messages) == (1 if rule_type == "drawdown_plan" else 0)
 
 
 def test_delivery_failure_is_not_a_complete_task_success(tmp_path) -> None:

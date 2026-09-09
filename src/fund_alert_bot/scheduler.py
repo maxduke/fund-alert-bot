@@ -345,6 +345,7 @@ async def run_scheduled_before_close_check(
             if not calendar.is_trading_day(check_date):
                 return None
 
+            confirmed_date_error = "Confirmed previous market date unavailable."
             try:
                 confirmed_end_date = latest_completed_open_date(
                     calendar,
@@ -357,18 +358,32 @@ async def run_scheduled_before_close_check(
                     exc,
                 )
                 confirmed_end_date = None
+                confirmed_date_error = str(exc)
 
             with (
                 _request_count_log_scope(market_data_provider, phase="before_close"),
                 open_connection(sqlite_path) as connection,
             ):
                 initialize_database(connection)
+                enabled_rules = list_enabled_rules(connection)
                 if confirmed_end_date is None:
+                    drawdown_rules = [
+                        row
+                        for row in enabled_rules
+                        if row["type"] == "drawdown_from_high"
+                    ]
                     current_drawdown_result = DrawdownCheckResult(
-                        checked_rules=0,
+                        checked_rules=len(drawdown_rules),
                         notifications=[],
                         skipped_duplicates=0,
-                        no_data_skips=[],
+                        no_data_skips=[
+                            RuleNoDataSkip(
+                                rule_id=int(row["id"]),
+                                symbol=str(row["symbol"]),
+                                message=confirmed_date_error,
+                            )
+                            for row in drawdown_rules
+                        ],
                         errors=[],
                         statuses=[],
                     )
@@ -382,14 +397,14 @@ async def run_scheduled_before_close_check(
                         confirmed_end_date=confirmed_end_date,
                     )
                 plan_rules = [
-                    row
-                    for row in list_enabled_rules(connection)
-                    if row["type"] == "drawdown_plan"
+                    row for row in enabled_rules if row["type"] == "drawdown_plan"
                 ]
                 try:
                     confirmed_plan_day = bool(plan_rules) and calendar.confirmed_status(
                         check_date
                     )
+                    if confirmed_plan_day and confirmed_end_date is None:
+                        raise MarketCalendarUnavailableError(confirmed_date_error)
                     confirmed_date = confirmed_end_date if confirmed_plan_day else None
                 except MarketCalendarUnavailableError as exc:
                     current_plan_result = DrawdownPlanCheckResult(
