@@ -55,6 +55,7 @@ from fund_alert_bot.market_data import (
 )
 from fund_alert_bot.notifications.dispatch import send_alert_notifications
 from fund_alert_bot.notifications.service import build_notification_service
+from fund_alert_bot.runtime_status import observe_job_result, track_job
 
 if TYPE_CHECKING:
     from telegram.ext import Application
@@ -308,6 +309,7 @@ def write_runtime_heartbeat(*, sqlite_path: str | Path) -> None:
         heartbeat_path.chmod(0o600)
 
 
+@track_job(MARKET_BEFORE_CLOSE_JOB_ID)
 async def run_scheduled_before_close_check(
     *,
     application: Application[Any, Any, Any, Any, Any, Any],
@@ -428,6 +430,7 @@ async def run_scheduled_before_close_check(
 
         evaluated = await run_serialized(work_lock, evaluate)
         if evaluated is None:
+            observe_job_result(skipped=True)
             LOGGER.info(
                 "Scheduled realtime drawdown check skipped date=%s "
                 "reason=market_closed",
@@ -435,6 +438,10 @@ async def run_scheduled_before_close_check(
             )
             return
         drawdown_result, plan_result, data_notice = evaluated
+        observe_job_result(
+            no_data=len(drawdown_result.no_data_skips) + len(plan_result.no_data_skips),
+            errors=len(drawdown_result.errors) + len(plan_result.errors),
+        )
 
         for status in drawdown_result.statuses:
             LOGGER.info(
@@ -497,6 +504,7 @@ async def run_scheduled_before_close_check(
             )
 
 
+@track_job(MARKET_AFTER_CLOSE_JOB_ID)
 async def run_scheduled_market_check(
     *,
     application: Application[Any, Any, Any, Any, Any, Any],
@@ -611,6 +619,7 @@ async def run_scheduled_market_check(
 
         evaluated = await run_serialized(work_lock, evaluate)
         if evaluated is None:
+            observe_job_result(skipped=True)
             LOGGER.info(
                 "Scheduled market reminder check skipped for date=%s: "
                 "CN market is not trading.",
@@ -618,6 +627,16 @@ async def run_scheduled_market_check(
             )
             return
         drawdown_result, plan_result, profit_result, data_notice = evaluated
+        observe_job_result(
+            no_data=sum(
+                len(result.no_data_skips)
+                for result in (drawdown_result, plan_result, profit_result)
+            ),
+            errors=sum(
+                len(result.errors)
+                for result in (drawdown_result, plan_result, profit_result)
+            ),
+        )
 
         for skip in [
             *drawdown_result.no_data_skips,
@@ -689,6 +708,7 @@ async def run_scheduled_drawdown_check(
     await run_scheduled_market_check(**kwargs)
 
 
+@track_job(FUND_NAV_PROCESS_JOB_ID)
 async def run_scheduled_fund_nav_process(
     *,
     application: Application[Any, Any, Any, Any, Any, Any],
@@ -746,6 +766,7 @@ async def run_scheduled_fund_nav_process(
                     processing_date=processing_date,
                     nav_cache=nav_cache,
                     nav_errors=nav_errors,
+                    timezone=timezone,
                 )
                 manual_result = process_manual_add_estimates(
                     connection,
@@ -807,6 +828,7 @@ async def run_scheduled_fund_nav_process(
             work_lock,
             evaluate,
         )
+        observe_job_result(no_data=len(result.no_data_skips), errors=len(result.errors))
         for skip in result.no_data_skips:
             LOGGER.info(
                 "Fund NAV unavailable rule_id=%s symbol=%s: %s",
@@ -899,9 +921,11 @@ async def run_scheduled_dca_check(
                     today=check_date,
                     market_calendar=market_calendar or CNMarketCalendar(),
                     rule_ids=rule_ids,
+                    timezone=timezone,
                 )
 
         result = await run_serialized(work_lock, evaluate)
+        observe_job_result(errors=len(result.errors))
 
         for error in result.errors:
             LOGGER.warning(
@@ -937,6 +961,7 @@ async def run_scheduled_dca_check(
             )
 
 
+@track_job(DCA_MORNING_JOB_ID)
 async def run_due_dca_checks(
     *,
     application: Application[Any, Any, Any, Any, Any, Any],
@@ -955,6 +980,8 @@ async def run_due_dca_checks(
     current = now or datetime.now(timezone_info)
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone_info)
+    else:
+        current = current.astimezone(timezone_info)
     parsed_reminder_time = parse_dca_reminder_time(reminder_time)
     latest_due_date = current.date()
     if current.timetz().replace(tzinfo=None) < parsed_reminder_time:
@@ -1020,6 +1047,7 @@ async def run_due_dca_checks(
             # Establish an upgrade-safe baseline without inventing reminders from
             # dates that predate cursor tracking.
             _write_dca_check_date(sqlite_path, latest_due_date)
+            observe_job_result(skipped=True)
             return 0
         first_pending_date = latest_due_date
     else:
@@ -1028,10 +1056,13 @@ async def run_due_dca_checks(
         except ValueError:
             LOGGER.warning("Ignoring invalid persisted DCA check date")
             _write_dca_check_date(sqlite_path, latest_due_date)
+            observe_job_result(errors=1)
             return 0
         first_pending_date = last_checked_date + timedelta(days=1)
 
     pending_count = max(0, (latest_due_date - first_pending_date).days + 1)
+    if pending_count == 0 and not failures:
+        observe_job_result(skipped=True)
     for offset in range(pending_count):
         check_date = first_pending_date + timedelta(days=offset)
         await run_scheduled_dca_check(
@@ -1086,6 +1117,7 @@ async def send_scheduled_notifications(
         notification_service=notification_service,
         notifications=notifications,
     )
+    observe_job_result(delivery_failures=dispatch_summary.failed)
     if dispatch_summary.failed:
         LOGGER.warning(
             "Scheduled notification delivery failures: %d",

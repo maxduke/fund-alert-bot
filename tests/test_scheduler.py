@@ -332,6 +332,7 @@ def test_scheduled_dca_check_persists_error_and_advances_date(
             name="Broken",
             asset_type="dca",
             params={"weekday": "THU"},
+            created_at="2024-01-01T00:00:00+00:00",
         )
 
     application = FakeApplication()
@@ -379,6 +380,7 @@ def test_due_dca_checks_process_later_dates_when_one_rule_keeps_failing(
             name="Broken",
             asset_type="dca",
             params={"weekday": "THU"},
+            created_at="2024-01-01T00:00:00+00:00",
         )
         connection.execute(
             "INSERT INTO app_metadata (key, value) VALUES (?, ?)",
@@ -427,6 +429,7 @@ def test_due_dca_checks_clears_repaired_and_disabled_failures(
             name="Repaired",
             asset_type="dca",
             params={"weekday": "THU"},
+            created_at="2024-01-01T00:00:00+00:00",
         )
         disabled_id = add_rule(
             connection,
@@ -436,6 +439,7 @@ def test_due_dca_checks_clears_repaired_and_disabled_failures(
             asset_type="dca",
             params={"weekday": "THU"},
             enabled=False,
+            created_at="2024-01-01T00:00:00+00:00",
         )
         upsert_dca_evaluation_failure(
             connection,
@@ -740,6 +744,76 @@ def test_runtime_heartbeat_is_owner_only(tmp_path: Path) -> None:
     assert heartbeat_path.exists()
     if os.name == "posix":
         assert heartbeat_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_dca_catchup_excludes_new_rules_from_earlier_dates(tmp_path: Path) -> None:
+    sqlite_path = tmp_path / "bot.sqlite3"
+    with open_connection(sqlite_path) as connection:
+        initialize_database(connection)
+        old_id = add_rule(
+            connection,
+            type=commands.DCA_RULE_TYPE,
+            symbol="old",
+            name="Old DCA",
+            asset_type="dca",
+            params={"weekday": "MON", "amount": 1000},
+            created_at="2026-09-01T00:00:00+00:00",
+        )
+        new_id = add_enhanced_dca_rule(
+            connection,
+            fund_symbol="110026",
+            name="New DCA",
+            weekday="MON",
+            amount=1000,
+            fee_mode="rate",
+            fee_value=0,
+            holiday_policy="next",
+            created_at="2026-09-09T01:00:00+00:00",
+        )
+        connection.execute(
+            "INSERT INTO app_metadata (key, value) VALUES (?, ?)",
+            (scheduler.DCA_LAST_CHECKED_DATE_KEY, "2026-09-06"),
+        )
+        connection.commit()
+
+    application = FakeApplication()
+    asyncio.run(
+        scheduler.run_due_dca_checks(
+            application=application,
+            sqlite_path=sqlite_path,
+            allowed_user_ids={123},
+            timezone="Asia/Shanghai",
+            market_calendar=FakeMarketCalendar(is_trading_day=True),
+            now=datetime(2026, 9, 9, 10, tzinfo=ZoneInfo("Asia/Shanghai")),
+        )
+    )
+    with open_connection(sqlite_path) as connection:
+        alerts = connection.execute("SELECT rule_id FROM alert_events").fetchall()
+        assert [row["rule_id"] for row in alerts] == [old_id]
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM scheduled_dca_occurrences WHERE rule_id = ?",
+                (new_id,),
+            ).fetchone()[0]
+            == 0
+        )
+
+    asyncio.run(
+        scheduler.run_due_dca_checks(
+            application=application,
+            sqlite_path=sqlite_path,
+            allowed_user_ids={123},
+            timezone="Asia/Shanghai",
+            market_calendar=FakeMarketCalendar(is_trading_day=True),
+            now=datetime(2026, 9, 14, 10, tzinfo=ZoneInfo("Asia/Shanghai")),
+        )
+    )
+    with open_connection(sqlite_path) as connection:
+        occurrences = connection.execute(
+            "SELECT due_date FROM scheduled_dca_occurrences WHERE rule_id = ?",
+            (new_id,),
+        ).fetchall()
+        assert [row["due_date"] for row in occurrences] == ["2026-09-14"]
 
 
 def test_due_dca_checks_replay_dates_missed_during_downtime(tmp_path: Path) -> None:
@@ -1983,6 +2057,7 @@ def _add_dca_rule(sqlite_path: Path) -> None:
                 "weekday": "THU",
                 "amount": 1000,
             },
+            created_at="2024-01-01T00:00:00+00:00",
         )
 
 
@@ -2005,6 +2080,7 @@ def _add_fixed_dca_rule(
             fee_mode="rate",
             fee_value=0,
             holiday_policy=holiday_policy,
+            created_at="2024-01-01T00:00:00+00:00",
         )
 
 

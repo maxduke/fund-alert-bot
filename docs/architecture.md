@@ -73,6 +73,18 @@ fund valuation date.
 
 The scheduler should coordinate modules without owning business rules.
 
+`runtime_status.py` keeps one bounded outcome record per scheduled task in
+SQLite app metadata, including startup executions. It distinguishes complete
+success, missing-data or delivery problems, skips, failures and interrupted
+runs; a partial run never overwrites the last complete success time. `/status`
+reads these records and local cache/delivery/estimate counts without fetching
+market data or evaluating rules. The runtime heartbeat remains a separate
+process-liveness check, not evidence that evaluations succeeded.
+
+DCA catch-up excludes dates before each rule's creation date in the configured
+timezone. Pre-creation pending occurrences left by older releases remain
+available for explicit reconciliation but cannot update a position estimate.
+
 ### Notifications
 
 Responsible for formatting and sending messages through configured notification channels.

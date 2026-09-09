@@ -1206,9 +1206,10 @@ def add_rule(
     asset_type: str,
     params: Any,
     enabled: bool = True,
+    created_at: str | datetime | None = None,
 ) -> int:
     """Insert an alert rule and return its database ID."""
-    now = _utc_now_text()
+    now = _timestamp_text(created_at)
     cursor = connection.execute(
         """
         INSERT INTO rules (
@@ -1248,6 +1249,7 @@ def add_enhanced_dca_rule(
     fee_mode: str,
     fee_value: float,
     holiday_policy: str,
+    created_at: str | datetime | None = None,
 ) -> int:
     """Atomically validate shared settings and add one fixed weekly DCA rule."""
 
@@ -1280,7 +1282,7 @@ def add_enhanced_dca_rule(
             raise sqlite3.IntegrityError(
                 "This fund has a different fee; use /set_fund_fee first."
             )
-        now = _utc_now_text()
+        now = _timestamp_text(created_at)
         connection.execute(
             """
             INSERT INTO fund_settings (

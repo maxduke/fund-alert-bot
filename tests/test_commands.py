@@ -778,10 +778,10 @@ def test_check_retries_alert_after_delivery_failure(tmp_path) -> None:
         ).fetchone()["notification_status"]
 
     assert failed_status == "failed"
-    assert "Notification delivery failures: 1." in failing_message.replies[0]
+    assert "Notification delivery failures: 1." in failing_message.replies[-1]
     assert sent_status == "sent"
     assert success_context.bot.messages == [
-        {"chat_id": 456, "text": EXPECTED_DRAWDOWN_10_MESSAGE}
+        {"chat_id": 123, "text": EXPECTED_DRAWDOWN_10_MESSAGE}
     ]
 
 
@@ -1146,8 +1146,8 @@ def test_add_enhanced_dca_persists_settings_and_plans_instructions(tmp_path) -> 
     assert settings["fee_value"] == pytest.approx(0.0012)
     assert "Position readiness: SETUP_REQUIRED" in message.replies[0]
     assert "Verified fund type: 指数型-股票" in message.replies[0]
-    assert "A500 feeder (fixed DCA 1)" in message.replies[1]
-    assert "remember /sync_position" in message.replies[1]
+    assert "A500 feeder (fixed DCA 1)" in message.replies[-1]
+    assert "remember /sync_position" in message.replies[-1]
 
 
 def test_add_enhanced_dca_reports_sync_required_snapshot_as_not_ready(tmp_path) -> None:
@@ -2596,17 +2596,17 @@ def test_plans_and_check_show_plan_state_without_mutation(tmp_path) -> None:
             for table in ("drawdown_cycles", "drawdown_tier_records", "alert_events")
         ]
 
-    assert "Drawdown: 0.0%" in message.replies[0]
-    assert "Template: /add_profit cn_open_fund 000001 A500 auto" in message.replies[0]
+    assert "Drawdown: 0.0%" in message.replies[1]
+    assert "Template: /add_profit cn_open_fund 000001 A500 auto" in message.replies[1]
     assert setup_data == "profit_setup:000001"
     assert "/add_profit cn_open_fund 000001 A500 auto" in setup_query.edits[0]
     assert "No rule was created by this button." in setup_query.edits[0]
-    assert "Next open tier: -15% / ¥5,000" in message.replies[0]
-    assert "awaiting official close confirmation" not in message.replies[0]
-    assert "Drawdown Add Plan status (read-only)" in message.replies[1]
-    assert "Read-only Drawdown Add Plans checked: 1." in message.replies[1]
-    assert "No enabled drawdown_from_high" not in message.replies[1]
-    assert "• -15% / ¥5,000: open" in message.replies[1]
+    assert "Next open tier: -15% / ¥5,000" in message.replies[1]
+    assert "awaiting official close confirmation" not in message.replies[1]
+    assert "Drawdown Add Plan status (read-only)" in message.replies[3]
+    assert "Read-only Drawdown Add Plans checked: 1." in message.replies[3]
+    assert "No enabled drawdown_from_high" not in message.replies[3]
+    assert "• -15% / ¥5,000: open" in message.replies[3]
     assert counts == [0, 0, 0]
 
 
@@ -2649,8 +2649,8 @@ def test_plans_refreshes_nav_older_than_latest_completed_open_day(tmp_path) -> N
         )
     )
 
-    assert f"plan {rule_id}" in message.replies[0]
-    assert "using NAV 1.5 on 2024-01-03" in message.replies[0]
+    assert f"plan {rule_id}" in message.replies[-1]
+    assert "using NAV 1.5 on 2024-01-03" in message.replies[-1]
     assert provider.nav_calls == ["000001"]
 
 
@@ -2702,7 +2702,7 @@ def test_plans_fail_closed_when_calendar_is_unavailable(tmp_path) -> None:
         )
     )
 
-    response = message.replies[0]
+    response = message.replies[-1]
     assert "confirmed feeder-fund NAV date unavailable" in response
     assert (
         "Position value: unavailable: confirmed feeder-fund NAV date unavailable"
@@ -2754,9 +2754,9 @@ def test_plans_keeps_position_linked_when_plan_market_data_fails(tmp_path) -> No
     )
 
     assert (
-        "Drawdown Add Plan configured; market status unavailable" in message.replies[0]
+        "Drawdown Add Plan configured; market status unavailable" in message.replies[-1]
     )
-    assert "no enabled Drawdown Add Plan" not in message.replies[0]
+    assert "no enabled Drawdown Add Plan" not in message.replies[-1]
 
 
 def test_add_profit_command_persists_rule(tmp_path) -> None:
@@ -2848,7 +2848,7 @@ def test_auto_profit_preview_defers_pending_position_sync(tmp_path) -> None:
         "Read-only preview unavailable: Position Sync is required."
         in message.replies[0]
     )
-    assert "Position Sync required — reminders paused" in message.replies[1]
+    assert "Position Sync required — reminders paused" in message.replies[-1]
     assert provider.nav_calls == []
 
 
@@ -2916,8 +2916,8 @@ def test_auto_profit_preview_and_position_actions(tmp_path) -> None:
             SimpleNamespace(bot=FakeBot(), args=[]),
         )
     )
-    assert "Position: exact; last sync" in active_plans_message.replies[0]
-    assert "Position value: ¥130.00" in active_plans_message.replies[0]
+    assert "Position: exact; last sync" in active_plans_message.replies[-1]
+    assert "Position value: ¥130.00" in active_plans_message.replies[-1]
 
     no_action_query = FakeCallbackQuery(f"profit_action:{event_id}:none")
     callback_update = SimpleNamespace(
@@ -2971,8 +2971,8 @@ def test_auto_profit_preview_and_position_actions(tmp_path) -> None:
             SimpleNamespace(bot=FakeBot(), args=[]),
         )
     )
-    assert "Position: closed (exact zero units)" in closed_plans_message.replies[0]
-    assert "remember /sync_position" not in closed_plans_message.replies[0]
+    assert "Position: closed (exact zero units)" in closed_plans_message.replies[-1]
+    assert "remember /sync_position" not in closed_plans_message.replies[-1]
 
 
 def test_auto_profit_rejects_qdii_before_saving(tmp_path) -> None:
@@ -3121,6 +3121,7 @@ def test_check_sends_due_dca_without_market_data_fetch(tmp_path) -> None:
         add_rule(
             connection,
             type=DCA_RULE_TYPE,
+            created_at="2024-01-01T00:00:00+00:00",
             symbol="创业板",
             name="创业板",
             asset_type="dca",
@@ -3147,11 +3148,161 @@ def test_check_sends_due_dca_without_market_data_fetch(tmp_path) -> None:
     assert provider.calls == []
     assert context.bot.messages == [
         {
-            "chat_id": 456,
+            "chat_id": 123,
             "text": EXPECTED_DCA_MESSAGE,
         }
     ]
-    assert "Checked 1 dca_reminder rule(s)." in message.replies[0]
+    assert "Checked 1 dca_reminder rule(s)." in message.replies[-1]
+
+
+def test_check_freezes_all_recipients_and_retries_only_failed_target(tmp_path) -> None:
+    from fund_alert_bot.scheduler import (
+        retry_pending_standard_notifications,
+        run_scheduled_dca_check,
+    )
+
+    sqlite_path = tmp_path / "bot.sqlite3"
+    with open_connection(sqlite_path) as connection:
+        init_db(connection)
+        add_rule(
+            connection,
+            type=DCA_RULE_TYPE,
+            symbol="test",
+            name="Test DCA",
+            asset_type="dca",
+            params={"weekday": "WED", "amount": 1000},
+            created_at="2026-09-09T00:00:00+00:00",
+        )
+
+    class PartiallyFailingBot:
+        def __init__(self) -> None:
+            self.attempts: list[int] = []
+            self.fail = True
+
+        async def send_message(self, *, chat_id: int, text: str) -> None:
+            self.attempts.append(chat_id)
+            if chat_id == 456 and self.fail:
+                raise RuntimeError("offline")
+
+    bot = PartiallyFailingBot()
+    calendar = FakeMarketCalendar()
+    handlers = build_command_handlers(
+        {123, 456},
+        sqlite_path=sqlite_path,
+        market_data_provider=FakeProvider(_history([], [])),
+        market_calendar=calendar,
+        now_factory=lambda: datetime(2026, 9, 9, 2, tzinfo=UTC),
+    )
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=123, type="private"),
+        effective_message=message,
+    )
+
+    async def scenario() -> None:
+        await _handler_by_command(handlers, "check").callback(
+            update, SimpleNamespace(bot=bot, args=[])
+        )
+        assert sorted(bot.attempts) == [123, 456]
+        bot.fail = False
+        await retry_pending_standard_notifications(
+            application=SimpleNamespace(bot=bot),
+            sqlite_path=sqlite_path,
+            allowed_user_ids={123, 456},
+        )
+        await run_scheduled_dca_check(
+            application=SimpleNamespace(bot=bot),
+            sqlite_path=sqlite_path,
+            allowed_user_ids={123, 456},
+            timezone="Asia/Shanghai",
+            run_date=date(2026, 9, 9),
+            market_calendar=calendar,
+        )
+
+    asyncio.run(scenario())
+    assert bot.attempts.count(123) == 1
+    assert bot.attempts.count(456) == 2
+    assert message.replies[0] == "Running checks. Please wait for the result."
+    assert "Notification delivery failures: 1." in message.replies[-1]
+    with open_connection(sqlite_path) as connection:
+        assert (
+            connection.execute("SELECT COUNT(*) FROM alert_events").fetchone()[0] == 1
+        )
+        rows = connection.execute(
+            "SELECT target_key, status FROM notification_deliveries ORDER BY target_key"
+        ).fetchall()
+        assert [tuple(row) for row in rows] == [
+            ("telegram:123", "sent"),
+            ("telegram:456", "sent"),
+        ]
+
+
+@pytest.mark.parametrize("command", ["plans", "check"])
+def test_slow_queries_acknowledge_before_market_work(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    from fund_alert_bot import commands
+    from fund_alert_bot.checks import DrawdownPlanStatusResult
+
+    message = FakeMessage()
+
+    def read_plans(*args, **kwargs):
+        # This runs in the market-data worker, before the final response exists.
+        assert len(message.replies) == 1
+        assert "Please wait for the result." in message.replies[0]
+        return DrawdownPlanStatusResult(0, [], [], [])
+
+    monkeypatch.setattr(commands, "read_drawdown_plan_statuses", read_plans)
+    handlers = build_command_handlers(
+        {123},
+        sqlite_path=tmp_path / "bot.sqlite3",
+        market_data_provider=FakeProvider(_history([], [])),
+        market_calendar=FakeMarketCalendar(),
+    )
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=123, type="private"),
+        effective_message=message,
+    )
+    asyncio.run(
+        _handler_by_command(handlers, command).callback(
+            update, SimpleNamespace(bot=FakeBot(), args=[])
+        )
+    )
+    assert len(message.replies) == 2
+    assert "Please wait for the result." not in message.replies[-1]
+
+
+@pytest.mark.parametrize("command", ["plans", "check"])
+def test_query_error_replaces_wait_with_a_clear_failure(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    from fund_alert_bot import commands
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("internal-error-detail")
+
+    monkeypatch.setattr(commands, "read_drawdown_plan_statuses", fail)
+    handlers = build_command_handlers(
+        {123},
+        sqlite_path=tmp_path / "bot.sqlite3",
+        market_data_provider=FakeProvider(_history([], [])),
+        market_calendar=FakeMarketCalendar(),
+    )
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=123, type="private"),
+        effective_message=message,
+    )
+    asyncio.run(
+        _handler_by_command(handlers, command).callback(
+            update, SimpleNamespace(bot=FakeBot(), args=[])
+        )
+    )
+    assert "Please wait for the result." in message.replies[0]
+    assert message.replies[-1] == "Query failed. Please try again or check /status."
 
 
 def test_check_evaluates_profit_rules_with_latest_data(tmp_path) -> None:
@@ -3191,12 +3342,12 @@ def test_check_evaluates_profit_rules_with_latest_data(tmp_path) -> None:
     assert [call.asset_type for call in provider.latest_calls] == [AssetType.CN_ETF]
     assert context.bot.messages == [
         {
-            "chat_id": 456,
+            "chat_id": 123,
             "text": EXPECTED_PROFIT_MESSAGE,
         }
     ]
-    assert "Checked 1 profit_reminder rule(s)." in message.replies[0]
-    assert "New alerts: 1." in message.replies[0]
+    assert "Checked 1 profit_reminder rule(s)." in message.replies[-1]
+    assert "New alerts: 1." in message.replies[-1]
 
 
 def test_check_reports_unavailable_latest_profit_data(tmp_path) -> None:
@@ -3229,10 +3380,10 @@ def test_check_reports_unavailable_latest_profit_data(tmp_path) -> None:
     asyncio.run(_handler_by_command(handlers, "check").callback(update, context))
 
     assert context.bot.messages == []
-    assert "No-data skips: 1." in message.replies[0]
+    assert "No-data skips: 1." in message.replies[-1]
     assert (
         "Rule 1 110026: Latest unit NAV is unavailable for 110026."
-        in (message.replies[0])
+        in (message.replies[-1])
     )
 
 
@@ -3694,5 +3845,5 @@ def test_plans_reports_confirmed_pending_tiers(tmp_path) -> None:
     )
 
     pending_summary = "Triggered, still pending: -15% / ¥5,000, -20% / ¥10,000"
-    assert pending_summary in message.replies[0]
-    assert "Next open tier: all tiers already reminded" in message.replies[0]
+    assert pending_summary in message.replies[-1]
+    assert "Next open tier: all tiers already reminded" in message.replies[-1]
