@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Callable, Mapping
-from datetime import date
+from datetime import UTC, date, datetime, tzinfo
 from typing import Any
+from zoneinfo import ZoneInfo
 
 AlertChecker = Callable[[str], bool]
 
@@ -159,6 +160,18 @@ def weekday_for_date(value: date) -> str:
     """Return the normalized weekday code for a date."""
 
     return WEEKDAY_CODES[value.weekday()]
+
+
+def rule_creation_date(rule: Any, timezone: str | tzinfo) -> date:
+    """Interpret legacy naive SQLite timestamps as UTC, then use the rule timezone."""
+
+    created_at = datetime.fromisoformat(
+        str(_read_required_rule_value(rule, "created_at"))
+    )
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=UTC)
+    zone = ZoneInfo(timezone) if isinstance(timezone, str) else timezone
+    return created_at.astimezone(zone).date()
 
 
 def _read_params(rule: Any) -> dict[str, Any]:

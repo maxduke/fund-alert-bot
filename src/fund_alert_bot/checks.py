@@ -7,8 +7,9 @@ import logging
 import sqlite3
 from collections.abc import Collection
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, tzinfo
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -33,6 +34,7 @@ from fund_alert_bot.db import (
     list_pending_manual_add_estimates,
     list_pending_scheduled_dca_occurrences,
     list_position_profit_threshold_keys,
+    list_rules,
     load_market_history,
     persist_drawdown_plan_evaluation,
     persist_position_profit_alert,
@@ -60,6 +62,7 @@ from fund_alert_bot.market_data.normalize import NORMALIZED_COLUMNS
 from fund_alert_bot.rules.dca import (
     build_dca_reminder_alert,
     normalize_weekday,
+    rule_creation_date,
     weekday_for_date,
 )
 from fund_alert_bot.rules.drawdown import (
@@ -901,10 +904,12 @@ def process_scheduled_dca_occurrences(
     processing_date: date,
     nav_cache: dict[tuple[str, date], Any] | None = None,
     nav_errors: dict[tuple[str, date], Exception] | None = None,
+    timezone: str | tzinfo = "Asia/Shanghai",
 ) -> ManualAddSettlementResult:
     """Resolve holidays and quietly apply pending fixed DCA estimates once."""
 
     occurrences = list_pending_scheduled_dca_occurrences(connection)
+    rules = {int(row["id"]): row for row in list_rules(connection)}
     no_data_skips: list[RuleNoDataSkip] = []
     errors: list[RuleCheckError] = []
     navs = {} if nav_cache is None else nav_cache
@@ -915,10 +920,15 @@ def process_scheduled_dca_occurrences(
         fund_symbol = str(occurrence["fund_symbol"])
         failure_date = processing_date
         try:
+            due_date = date.fromisoformat(str(occurrence["due_date"]))
+            failure_date = due_date
+            if due_date < rule_creation_date(rules[rule_id], timezone):
+                raise ValueError(
+                    "DCA occurrence predates its rule; verify it with "
+                    "/dca_skip or /sync_position."
+                )
             effective_text = occurrence["effective_date"]
             if effective_text is None:
-                due_date = date.fromisoformat(str(occurrence["due_date"]))
-                failure_date = due_date
                 if str(occurrence["holiday_policy"]) == "skip":
                     if not market_calendar.confirmed_status(due_date):
                         skip_scheduled_dca_occurrence(
@@ -2189,10 +2199,12 @@ def evaluate_dca_rules(
     today: date | None = None,
     market_calendar: MarketCalendar | None = None,
     rule_ids: Collection[int] | None = None,
+    timezone: str | tzinfo = "Asia/Shanghai",
 ) -> DcaCheckResult:
     """Evaluate enabled DCA reminder rules and store new alert events."""
 
-    check_date = today or date.today()
+    zone = ZoneInfo(timezone) if isinstance(timezone, str) else timezone
+    check_date = today or datetime.now(zone).date()
     selected_rule_ids = (
         None if rule_ids is None else {int(rule_id) for rule_id in rule_ids}
     )
@@ -2209,6 +2221,11 @@ def evaluate_dca_rules(
 
     for row in rules:
         try:
+            if check_date < rule_creation_date(row, zone):
+                clear_dca_evaluation_failure(
+                    connection, rule_id=int(row["id"]), check_date=check_date
+                )
+                continue
             occurrence = None
             if str(row["asset_type"]) == AssetType.CN_OPEN_FUND.value:
                 if market_calendar is None:

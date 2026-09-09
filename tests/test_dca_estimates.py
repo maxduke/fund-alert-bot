@@ -14,6 +14,7 @@ from fund_alert_bot.checks import (
 from fund_alert_bot.db import (
     add_enhanced_dca_rule,
     connect,
+    create_scheduled_dca_occurrence,
     delete_rule,
     get_position_snapshot,
     get_scheduled_dca_occurrence,
@@ -60,6 +61,7 @@ def _add_rule(
     policy: str = "next",
     fee_mode: str = "rate",
     fee_value: float = 0,
+    created_at: str = "2024-01-01T00:00:00+00:00",
 ) -> int:
     return add_enhanced_dca_rule(
         connection,
@@ -70,7 +72,51 @@ def _add_rule(
         fee_mode=fee_mode,
         fee_value=fee_value,
         holiday_policy=policy,
+        created_at=created_at,
     )
+
+
+def test_upgrade_does_not_apply_pre_creation_pending_occurrence() -> None:
+    connection = connect(":memory:")
+    try:
+        init_db(connection)
+        rule_id = _add_rule(connection, created_at="2024-01-05T00:00:00+00:00")
+        # Reproduce an occurrence left by the old catch-up implementation.
+        create_scheduled_dca_occurrence(
+            connection,
+            rule_id=rule_id,
+            fund_symbol="110026",
+            due_date="2024-01-04",
+            gross_amount=2000,
+            holiday_policy="next",
+            effective_date="2024-01-04",
+            skipped=False,
+        )
+        upsert_position_snapshot(
+            connection, fund_symbol="110026", units=1000, average_unit_cost=1.2
+        )
+        before = dict(get_position_snapshot(connection, "110026"))
+        provider = Provider(date(2024, 1, 4))
+        result = process_scheduled_dca_occurrences(
+            connection,
+            provider,
+            Calendar({date(2024, 1, 4), date(2024, 1, 5)}),
+            processing_date=date(2024, 1, 6),
+        )
+        assert len(result.errors) == 1
+        assert "predates its rule" in result.errors[0].message
+        assert provider.calls == []
+        assert dict(get_position_snapshot(connection, "110026")) == before
+        occurrence = get_scheduled_dca_occurrence(connection, rule_id, "2024-01-04")
+        assert occurrence["status"] == "pending"
+        assert (
+            skip_scheduled_dca_occurrence(
+                connection, rule_id=rule_id, due_date="2024-01-04"
+            )
+            == "skipped"
+        )
+    finally:
+        connection.close()
 
 
 def test_enhanced_dca_creates_occurrence_before_one_reminder() -> None:

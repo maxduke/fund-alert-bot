@@ -29,6 +29,7 @@ Implemented Telegram commands:
 
 - `/start`
 - `/help`
+- `/status`
 - `/add_drawdown <asset_type> <symbol> <name> <lookback_days> <thresholds>`
 - `/add_profit <asset_type> <symbol> <name> <cost|auto> <thresholds>`
 - `/add_dca <name> <weekday> <amount>`
@@ -246,6 +247,27 @@ global language. Set `BOT_LANGUAGE=zh-CN` (default) or `BOT_LANGUAGE=en`, then
 restart the service. Commands such as `/check` keep their English Telegram names.
 The bot publishes this command menu at startup, so typing `/` shows the available
 commands with localized descriptions.
+
+### Checks and operational status
+
+`/status` reads only local records: the latest outcome and last complete success
+of each of the four scheduled tasks, cached market-data dates, outstanding and
+failed deliveries, and pending position estimates. Tasks without records after
+an upgrade show "No record yet". Closed-market skips, missing data and failures
+are not reported as complete successes. Cached dates do not prove every rule
+was evaluated successfully.
+
+`/plans [refresh]` and `/check` acknowledge the query before returning results;
+queries still run sequentially. Formal alerts created by `/check` use the same
+full recipient configuration as scheduled checks. Its summary goes only to the
+chat that issued the command.
+
+DCA recovery uses the configured timezone and never creates an occurrence for
+a date before its rule was created. The creation date itself remains eligible.
+Existing occurrences retain their original amount and fee snapshots.
+Pre-creation pending occurrences left by older versions are retained but blocked
+from position estimation. Reconcile them with `/dca_skip` or `/sync_position`
+according to what actually happened. Already-applied estimates are not rolled back.
 
 Default scheduler configuration:
 

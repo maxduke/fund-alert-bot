@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 from datetime import date
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from fund_alert_bot.checks import DCA_RULE_TYPE, evaluate_dca_rules
-from fund_alert_bot.db import add_rule, connect, init_db
+from fund_alert_bot.db import (
+    add_enhanced_dca_rule,
+    add_rule,
+    connect,
+    init_db,
+    upsert_dca_evaluation_failure,
+)
 from fund_alert_bot.rules.dca import (
     build_dca_alert_key,
     build_dca_reminder_alert,
@@ -115,6 +122,7 @@ def test_evaluate_dca_rules_sends_once_per_day() -> None:
             name="创业板",
             asset_type="dca",
             params={"weekday": "THU", "amount": 1000},
+            created_at="2024-01-01T00:00:00+00:00",
         )
 
         first_result = evaluate_dca_rules(connection, today=date(2024, 1, 4))
@@ -143,6 +151,114 @@ def test_evaluate_dca_rules_sends_once_per_day() -> None:
             "提醒：这是纪律提醒，不会自动交易。",
         )
     )
+
+
+@pytest.mark.parametrize("enhanced", [False, True])
+def test_dca_never_backfills_before_rule_creation(enhanced: bool) -> None:
+    connection = connect(":memory:")
+    try:
+        init_db(connection)
+        if enhanced:
+            rule_id = add_enhanced_dca_rule(
+                connection,
+                fund_symbol="110026",
+                name="New DCA",
+                weekday="MON",
+                amount=1000,
+                fee_mode="rate",
+                fee_value=0,
+                holiday_policy="next",
+                created_at="2026-09-09T01:00:00+00:00",
+            )
+        else:
+            rule_id = add_rule(
+                connection,
+                type=DCA_RULE_TYPE,
+                symbol="new",
+                name="New DCA",
+                asset_type="dca",
+                params={"weekday": "MON", "amount": 1000},
+                created_at="2026-09-09T01:00:00+00:00",
+            )
+        upsert_dca_evaluation_failure(
+            connection,
+            rule_id=rule_id,
+            check_date=date(2026, 9, 7),
+            error_message="old retry",
+        )
+        calendar = SimpleNamespace(confirmed_status=lambda _: True)
+        earlier = evaluate_dca_rules(
+            connection, today=date(2026, 9, 7), market_calendar=calendar
+        )
+        assert earlier.notifications == []
+        assert earlier.errors == []
+        assert connection.execute("SELECT 1 FROM alert_events").fetchone() is None
+        assert (
+            connection.execute("SELECT 1 FROM scheduled_dca_occurrences").fetchone()
+            is None
+        )
+        assert (
+            connection.execute("SELECT 1 FROM dca_evaluation_failures").fetchone()
+            is None
+        )
+        eligible = evaluate_dca_rules(
+            connection, today=date(2026, 9, 14), market_calendar=calendar
+        )
+        assert len(eligible.notifications) == 1
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize(
+    "created_at", ["2026-09-06T17:00:00+00:00", "2026-09-06 17:00:00"]
+)
+@pytest.mark.parametrize(
+    ("timezone", "expected_alerts"),
+    [("Asia/Shanghai", 0), ("America/Los_Angeles", 1)],
+)
+def test_dca_creation_day_uses_configured_timezone(
+    created_at: str, timezone: str, expected_alerts: int
+) -> None:
+    connection = connect(":memory:")
+    try:
+        init_db(connection)
+        add_rule(
+            connection,
+            type=DCA_RULE_TYPE,
+            symbol="new",
+            name="New DCA",
+            asset_type="dca",
+            params={"weekday": "SUN", "amount": 1000},
+            created_at=created_at,
+        )
+        result = evaluate_dca_rules(
+            connection, today=date(2026, 9, 6), timezone=timezone
+        )
+        assert len(result.notifications) == expected_alerts
+        assert result.errors == []
+    finally:
+        connection.close()
+
+
+def test_invalid_dca_creation_timestamp_fails_closed() -> None:
+    connection = connect(":memory:")
+    try:
+        init_db(connection)
+        add_rule(
+            connection,
+            type=DCA_RULE_TYPE,
+            symbol="bad",
+            name="Invalid timestamp",
+            asset_type="dca",
+            params={"weekday": "MON", "amount": 1000},
+            created_at="invalid",
+        )
+        result = evaluate_dca_rules(connection, today=date(2026, 9, 7))
+        assert result.notifications == []
+        assert len(result.errors) == 1
+        assert connection.execute("SELECT 1 FROM alert_events").fetchone() is None
+    finally:
+        connection.close()
 
 
 def _rule(*, weekday: str, amount: int | float) -> dict[str, Any]:
