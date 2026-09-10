@@ -360,7 +360,7 @@ estimates or eligible `auto` Price-Gain evaluations.
 
 ## Technology Stack
 
-- Python 3.12
+- Python 3.14 in Docker; Python 3.12 remains supported for local runs
 - python-telegram-bot
 - SQLite
 - AKShare
@@ -468,7 +468,7 @@ especially on Windows workstations.
 
 ## GitHub Actions
 
-- `CI`: runs Ruff and pytest on Python 3.12, then builds and smoke-tests the
+- `CI`: runs Ruff and pytest on Python 3.12 and 3.14, then builds and smoke-tests the
   Docker image for pull requests.
 - After the checks pass on `main` or a version tag, the same workflow publishes
   `ghcr.io/maxduke/fund-alert-bot`.

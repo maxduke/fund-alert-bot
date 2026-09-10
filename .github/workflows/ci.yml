@@ -18,9 +18,13 @@ env:
 permissions: {}
 
 jobs:
-  checks:
-    name: checks
+  compatibility:
+    name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.14"]
     permissions:
       contents: read
 
@@ -31,7 +35,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
           cache: pip
           cache-dependency-path: |
             pyproject.toml
@@ -51,6 +55,18 @@ jobs:
 
       - name: Test
         run: python -m pytest
+
+  checks:
+    name: checks
+    if: always()
+    needs: compatibility
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Require both supported Python versions
+        env:
+          COMPATIBILITY_RESULT: ${{ needs.compatibility.result }}
+        run: test "$COMPATIBILITY_RESULT" = success
 
   build:
     name: build
@@ -79,8 +95,9 @@ jobs:
 
       - name: Smoke test image
         run: >-
-          docker run --rm --entrypoint python fund-alert-bot:ci -c
-          "import os; import fund_alert_bot.main; assert os.getuid() != 0"
+          docker run --rm --network none --entrypoint python
+          --mount type=bind,src=${{ github.workspace }}/tests/runtime_smoke.py,dst=/tmp/runtime_smoke.py,readonly
+          fund-alert-bot:ci /tmp/runtime_smoke.py --require-non-root
 
   publish:
     name: publish
