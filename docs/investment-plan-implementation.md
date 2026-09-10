@@ -50,6 +50,57 @@ this repository. A reproducible duplicate, omission, stale-data application, or
 unexplained backlog becomes a focused repair task; broader feature work needs
 its own scope decision.
 
+## Prioritized Maintenance Backlog
+
+Initial live acceptance does not mean there are no further improvements. The
+following items are grounded in the current implementation; they are planned
+improvements, not confirmed unresolved defects. Operational observation continues
+alongside this work. Any reproducible correctness issue takes priority.
+
+### 1. Make pending work diagnosable — next implementation task
+
+`runtime_status.py` currently reports counts of pending deliveries and estimates,
+with a generic explanation that NAV, settings, or Position Sync may be needed.
+Counts alone cannot identify which item needs attention.
+
+Extend the local read-only status path with bounded pending-item details: rule or
+fund identity, original due/effective date, oldest pending date, and a reason
+supported by locally stored facts. Distinguish missing settings, missing initial
+position, unavailable exact-date cached NAV, and pre-creation records requiring
+explicit reconciliation where that evidence exists. Say unknown when it does
+not; a missing local NAV does not prove the remote provider has not published it.
+Include an applicable existing command hint without choosing an action for the
+user. For delivery failures, show safe status/age information without exposing
+notification destinations, secrets, or raw exceptions.
+
+Acceptance: bounded, localized output works with many records; it performs no
+market requests, sends no reminders, and changes no business state. Tests cover
+each supported reason, unknown reasons, dates, output limits, and authorization.
+Derive details from existing state where possible; do not add an event-history
+service or infer that a pending estimate was actually executed on a platform.
+
+### 2. Measure slow checks before optimizing them
+
+`async_work.py` serializes provider/calendar work behind a shared lock. Keep that
+protection while measuring queue wait and execution duration in existing logs;
+task start/finish timestamps alone do not explain where time was spent.
+Use slow-provider tests to verify the measurements and that Telegram remains
+responsive. Avoid fund/account details and secrets in timing fields. Use the
+results to decide whether a specific request timeout or redundant fetch needs
+work; do not introduce parallel provider calls or a new worker service merely
+because serialization exists. Timing instrumentation must not change cancellation,
+locking, or state-commit behavior.
+
+### 3. Reduce the scope of future code changes incrementally
+
+`commands.py` and `db.py` each exceed 4,000 lines and combine several domain
+responsibilities. Extract one cohesive command or persistence responsibility per
+PR when working in that area, preserving public imports and transaction
+boundaries. Start with a bounded read-only status/query responsibility if the
+first item makes that useful. Run the relevant command, persistence, migration,
+and full regression checks before delivery. Do not combine a large module split
+with new alert semantics or schema redesign; file length alone is not a defect.
+
 ## Scope
 
 Add:
