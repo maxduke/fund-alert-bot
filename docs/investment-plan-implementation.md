@@ -57,16 +57,16 @@ following items are grounded in the current implementation; they are planned
 improvements, not confirmed unresolved defects. Operational observation continues
 alongside this work. Any reproducible correctness issue takes priority.
 
-### 1. Make pending work diagnosable — next implementation task
+### 1. Make pending work diagnosable — implemented in the current change
 
-`runtime_status.py` currently reports counts of pending deliveries and estimates,
-with a generic explanation that NAV, settings, or Position Sync may be needed.
-Counts alone cannot identify which item needs attention.
+The previous status output reported only counts of pending deliveries and
+estimates, with a generic explanation. The current change adds a bounded local
+diagnostic query in `pending_status.py`, keeping the existing counts.
 
 Extend the local read-only status path with bounded pending-item details: rule or
 fund identity, original due/effective date, oldest pending date, and a reason
-supported by locally stored facts. Distinguish missing settings, missing initial
-position, unavailable exact-date cached NAV, and pre-creation records requiring
+supported by locally stored facts. Distinguish missing initial position, explicit
+reconciliation flags, unavailable exact-date cached NAV, and pre-creation records requiring
 explicit reconciliation where that evidence exists. Say unknown when it does
 not; a missing local NAV does not prove the remote provider has not published it.
 Include an applicable existing command hint without choosing an action for the
@@ -78,6 +78,11 @@ market requests, sends no reminders, and changes no business state. Tests cover
 each supported reason, unknown reasons, dates, output limits, and authorization.
 Derive details from existing state where possible; do not add an event-history
 service or infer that a pending estimate was actually executed on a platform.
+Show at most three oldest entries per pending-work category and five entries per
+market-cache category, with omission notices. Saved estimates carry their own
+fees, so missing current fee settings alone are not a settlement blocker. Show
+unresolved/future effective dates separately from missing NAV, and leave the
+reason unknown when local prerequisites do not explain why an item is pending.
 
 ### 2. Measure slow checks before optimizing them
 
