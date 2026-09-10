@@ -23,6 +23,9 @@ outstanding development backlog. Subsequent maintenance includes:
 - PR #75: Python 3.14 Docker deployment with Python 3.12 compatibility coverage;
   both CI versions, 575 tests, and the non-root offline container lifecycle
   check passed. Post-merge image publication also passed.
+- PR #82: bounded pending-work diagnostics in `/status`; 592 tests passed.
+- PR #83: command parsing extracted with compatible imports; 594 tests,
+  dual-version CI, and Codex review passed for the implementation.
 
 The operator reports that actual runs look normal. Record this as initial live
 acceptance; it does not establish that every holiday, delayed NAV, or restart
@@ -100,7 +103,7 @@ work; do not introduce parallel provider calls or a new worker service merely
 because serialization exists. Timing instrumentation must not change cancellation,
 locking, or state-commit behavior.
 
-### 3. Reduce the scope of future code changes incrementally — active
+### 3. Reduce the scope of future code changes incrementally — first extraction complete
 
 `commands.py` and `db.py` each exceed 4,000 lines and combine several domain
 responsibilities. Extract one cohesive command or persistence responsibility per
@@ -109,13 +112,14 @@ boundaries. Run the relevant command, persistence, migration,
 and full regression checks before delivery. Do not combine a large module split
 with new alert semantics or schema redesign; file length alone is not a defect.
 
-The first extraction moves command argument types, usage strings, parsing, and
+PR #83 moves command argument types, usage strings, parsing, and
 rule-parameter construction into `command_args.py`. Existing imports from
 `commands.py` remain compatible; confirmation drafts, handlers, and all database
-transactions stay in place. Move the existing pure parsing tests alongside the
-new module and verify both import compatibility and independence from the
-Telegram shell/storage. Further command presentation or storage extraction is
-separate work, to be selected after this bounded change is reviewed.
+transactions stay in place. The existing pure parsing tests now sit alongside
+the new module; added tests verify import compatibility and independence from
+the Telegram shell/storage. All 594 tests pass. Further command presentation or
+storage extraction remains unimplemented and needs a separately selected scope;
+the first extraction does not mark the entire module cleanup complete.
 
 ## Scope
 
