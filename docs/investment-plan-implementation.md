@@ -1,12 +1,110 @@
 # Investment Plan Enhancement Implementation
 
-> Status: implemented; keep this document aligned with the running service.
+> Status (2026-09-10): implementation and automated validation complete;
+> initial live operation reported successful by the operator. Operational
+> observation is now the active phase.
 
 This document turns the decisions in the
 [Investment Plan Enhancement Guide](investment-plan-guide.md) into a minimal
 implementation plan for the existing service. Domain definitions live in
 [`CONTEXT.md`](../CONTEXT.md), and the non-obvious decisions are recorded in
 [`docs/adr`](adr/).
+
+## Delivery Status and Next Phase
+
+The PR 1–6 sequence below is the completed implementation breakdown, not an
+outstanding development backlog. Subsequent maintenance includes:
+
+- PR #79: confirmed audit findings corrected.
+- PR #81: DCA recovery bounded by rule creation date, full configured recipients
+  for formal `/check` reminders, query progress/failure replies, and local
+  `/status` task and backlog reporting.
+- PRs #77, #78, and #80: pinned dependency updates.
+- PR #75: Python 3.14 Docker deployment with Python 3.12 compatibility coverage;
+  both CI versions, 575 tests, and the non-root offline container lifecycle
+  check passed. Post-merge image publication also passed.
+
+The operator reports that actual runs look normal. Record this as initial live
+acceptance; it does not establish that every holiday, delayed NAV, or restart
+case has occurred in production.
+
+Next, follow the [operational observation checklist](deployment.zh-CN.md#运行观察)
+using the existing `/status` and `/plans` commands and dated reminders. Observe
+one complete sequence of before-close, after-close, and next-morning NAV work,
+then record boundary cases as they naturally occur. Existing regression tests
+cover DCA holiday policies, delayed settlement/restart recovery, stale NAV
+rejection, tier deduplication, and incomplete task outcomes. Live observations
+complement that coverage; repeating the full test suite is not a new milestone.
+
+- [x] Core implementation and subsequent fixes merged.
+- [x] Automated checks and container lifecycle validation passed.
+- [x] Initial live operation reported successful by the operator.
+- [ ] Record a complete scheduled daily sequence with source dates and outcomes.
+- [ ] Record holiday/date rollover and delayed-NAV behavior when encountered.
+- [ ] Record recovery at the next routine restart or upgrade.
+
+For each observation, keep the local time/timezone, deployed image identifier,
+task/data dates, outcome, and any follow-up. Leave unobserved cases pending.
+Keep account details and raw notifications in private operational notes, not
+this repository. A reproducible duplicate, omission, stale-data application, or
+unexplained backlog becomes a focused repair task; broader feature work needs
+its own scope decision.
+
+## Prioritized Maintenance Backlog
+
+Initial live acceptance does not mean there are no further improvements. The
+following items are grounded in the current implementation; they are planned
+improvements, not confirmed unresolved defects. Operational observation continues
+alongside this work. Any reproducible correctness issue takes priority.
+
+### 1. Make pending work diagnosable — implemented in the current change
+
+The previous status output reported only counts of pending deliveries and
+estimates, with a generic explanation. The current change adds a bounded local
+diagnostic query in `pending_status.py`, keeping the existing counts.
+
+Extend the local read-only status path with bounded pending-item details: rule or
+fund identity, original due/effective date, oldest pending date, and a reason
+supported by locally stored facts. Distinguish missing initial position, explicit
+reconciliation flags, unavailable exact-date cached NAV, and pre-creation records requiring
+explicit reconciliation where that evidence exists. Say unknown when it does
+not; a missing local NAV does not prove the remote provider has not published it.
+Include an applicable existing command hint without choosing an action for the
+user. For delivery failures, show safe status/age information without exposing
+notification destinations, secrets, or raw exceptions.
+
+Acceptance: bounded, localized output works with many records; it performs no
+market requests, sends no reminders, and changes no business state. Tests cover
+each supported reason, unknown reasons, dates, output limits, and authorization.
+Derive details from existing state where possible; do not add an event-history
+service or infer that a pending estimate was actually executed on a platform.
+Show at most three oldest entries per pending-work category and five entries per
+market-cache category, with omission notices. Saved estimates carry their own
+fees, so missing current fee settings alone are not a settlement blocker. Show
+unresolved/future effective dates separately from missing NAV, and leave the
+reason unknown when local prerequisites do not explain why an item is pending.
+
+### 2. Measure slow checks before optimizing them
+
+`async_work.py` serializes provider/calendar work behind a shared lock. Keep that
+protection while measuring queue wait and execution duration in existing logs;
+task start/finish timestamps alone do not explain where time was spent.
+Use slow-provider tests to verify the measurements and that Telegram remains
+responsive. Avoid fund/account details and secrets in timing fields. Use the
+results to decide whether a specific request timeout or redundant fetch needs
+work; do not introduce parallel provider calls or a new worker service merely
+because serialization exists. Timing instrumentation must not change cancellation,
+locking, or state-commit behavior.
+
+### 3. Reduce the scope of future code changes incrementally
+
+`commands.py` and `db.py` each exceed 4,000 lines and combine several domain
+responsibilities. Extract one cohesive command or persistence responsibility per
+PR when working in that area, preserving public imports and transaction
+boundaries. Start with a bounded read-only status/query responsibility if the
+first item makes that useful. Run the relevant command, persistence, migration,
+and full regression checks before delivery. Do not combine a large module split
+with new alert semantics or schema redesign; file length alone is not a defect.
 
 ## Scope
 
@@ -455,7 +553,14 @@ serve commands safely.
   never expands notification history. Position accuracy includes the last sync
   date and count of applied estimates since that sync.
 - `/check` calculates and displays detailed Drawdown Add Plan and position
-  status without reserving alerts or changing stored state.
+  status without consuming plan tiers or reserving plan alerts. It also evaluates
+  legacy drawdown, numeric-cost price-gain, and due DCA rules, which may reserve
+  and send formal reminders to all configured recipients. Only the query summary
+  goes to the requesting chat.
+- `/status` reads local task outcomes, last complete successes, cached data dates,
+  and notification/position-estimate backlog counts. Missing data, skipped dates,
+  and failed runs do not replace the last complete success. Cache freshness alone
+  does not prove that every rule was successfully evaluated.
 - Scheduled checks explicitly request state mutation and notification
   reservation.
 
@@ -522,6 +627,12 @@ non-domestic valuation calendar; do not apply CN holiday semantics to it.
 
 Reject a second enabled enhanced rule with the same feeder-fund symbol and
 weekday. Different weekdays remain independently configurable.
+
+Recovery uses the rule's creation date in the configured timezone as its earliest
+eligible due date. Never create a pre-creation occurrence or apply a legacy
+pending pre-creation estimate. Preserve such old pending records for explicit
+skip or Position Sync reconciliation; do not automatically reverse estimates
+already applied. Existing eligible occurrences retain their saved amount and fee.
 
 The enhanced rule stores an Investment Feeder Fund symbol and gross amount. Its
 fee argument initializes or validates the shared fee setting for that fund,
@@ -755,7 +866,7 @@ Position work logs fund symbol, occurrence identity and state transition,
 effective NAV date, NAV source, whether position application committed, and
 notification result. Never log tokens, webhook URLs, or notification secrets.
 
-## PR Plan
+## Completed Implementation PR Plan
 
 ### PR 1 — Trend calculations
 

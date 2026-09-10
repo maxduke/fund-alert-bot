@@ -331,7 +331,42 @@ def test_status_command_is_local_authorized_localized_and_does_not_consume_state
     assert "收盘后检查: 尚无记录" in text
     assert "待投递目标数： 1" in text
     assert "待处理定投估算数： 1" in text
+    assert "最早待处理的定投估算：" in text
+    assert "待处理起始时间：" in text
     assert "110026: 2026-09-08" in text
     assert "本次没有请求行情" in text
+    with open_connection(path) as connection:
+        assert list(connection.iterdump()) == before
+
+
+def test_status_bounds_cache_details_without_hiding_backlog_counts(tmp_path) -> None:
+    path = tmp_path / "bot.sqlite3"
+    with open_connection(path) as connection:
+        initialize_database(connection)
+        for index in range(100):
+            upsert_fund_nav(
+                connection,
+                fund_symbol=f"{index:06}",
+                nav_date=date(2000, 1, 1),
+                unit_nav=1.2,
+                source="akshare_eastmoney",
+            )
+        before = list(connection.iterdump())
+    language = get_language()
+    try:
+        for selected in ("en", "zh-CN"):
+            set_language(selected)
+            text = format_runtime_status(path, timezone="Asia/Shanghai")
+            assert "000004: 2000-01-01" in text
+            assert "000005: 2000-01-01" not in text
+            assert len(text) < 2000
+            if selected == "en":
+                assert "Additional cached symbols omitted." in text
+                assert "Pending DCA estimates: 0" in text
+            else:
+                assert "其余缓存标的已省略。" in text
+                assert "待处理定投估算数： 0" in text
+    finally:
+        set_language(language)
     with open_connection(path) as connection:
         assert list(connection.iterdump()) == before

@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 
 from fund_alert_bot.db import initialize_database, open_connection
 from fund_alert_bot.i18n import localize_text
+from fund_alert_bot.pending_status import format_pending_work
 
 LOGGER = logging.getLogger(__name__)
 _PROCESS_ID = uuid4().hex
@@ -233,34 +234,39 @@ def format_runtime_status(sqlite_path: str | Path, *, timezone: str) -> str:
                 f"Pending DCA estimates: {pending_dca}",
                 f"Pending manual-add estimates: {pending_manual}",
                 "Pending estimates may require NAV data, settings or position sync.",
-                "",
-                "Local market-data dates:",
             )
         )
+        lines.extend(
+            format_pending_work(connection, zone=zone, today=datetime.now(zone).date())
+        )
+        lines.extend(("", "Local market-data dates:"))
         histories = connection.execute(
             """
             SELECT symbol, asset_type, price_basis, MAX(date) AS date
             FROM market_daily_history GROUP BY symbol, asset_type, price_basis
             ORDER BY symbol, asset_type, price_basis
+            LIMIT 6
             """
         ).fetchall()
         navs = connection.execute(
             """
             SELECT fund_symbol, MAX(nav_date) AS date
-            FROM fund_nav_history GROUP BY fund_symbol ORDER BY fund_symbol
+            FROM fund_nav_history GROUP BY fund_symbol ORDER BY fund_symbol LIMIT 6
             """
         ).fetchall()
-        for row in histories:
+        for row in histories[:5]:
             lines.append(
                 f"• {row['symbol']} / {row['asset_type']} / "
                 f"{row['price_basis']}: {row['date']}"
             )
-        for row in navs:
+        for row in navs[:5]:
             lines.append(
                 f"• {localize_text('Fund NAV')} {row['fund_symbol']}: {row['date']}"
             )
         if not histories and not navs:
             lines.append("No cached market data")
+        if len(histories) > 5 or len(navs) > 5:
+            lines.append("Additional cached symbols omitted.")
     lines.extend(
         (
             "",

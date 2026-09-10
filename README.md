@@ -257,6 +257,20 @@ an upgrade show "No record yet". Closed-market skips, missing data and failures
 are not reported as complete successes. Cached dates do not prove every rule
 was evaluated successfully.
 
+The status also shows the three oldest pending DCA estimates, manual additions,
+and unfinished deliveries per category, including rule/fund identity, original
+and effective dates, and the pending start time. Reasons describe local
+prerequisites only: an unresolved or unfinished effective date, missing position,
+required reconciliation, or unavailable exact-date local NAV. Missing cached NAV
+does not establish whether the remote provider has published it. Pre-creation
+DCA records include conditional `/dca_skip` and `/sync_position` hints; use
+`/help` for complete arguments. Estimates retain their saved fee, so absent
+current fee settings alone do not block settlement. Unexplained pending work is
+labeled unknown. Counts include all records, while detail and cache lists are
+bounded with omission notices. Delivery details omit destinations and raw errors.
+This query makes no market requests, sends no reminders, and changes no position
+or pending-work state.
+
 `/plans [refresh]` and `/check` acknowledge the query before returning results;
 queries still run sequentially. Formal alerts created by `/check` use the same
 full recipient configuration as scheduled checks. Its summary goes only to the
