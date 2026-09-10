@@ -103,12 +103,12 @@ work; do not introduce parallel provider calls or a new worker service merely
 because serialization exists. Timing instrumentation must not change cancellation,
 locking, or state-commit behavior.
 
-### 3. Reduce the scope of future code changes incrementally — first extraction complete
+### 3. Reduce the scope of future code changes incrementally — two bounded extractions implemented
 
-`commands.py` and `db.py` each exceed 4,000 lines and combine several domain
-responsibilities. Extract one cohesive command or persistence responsibility per
-PR when working in that area, preserving public imports and transaction
-boundaries. Run the relevant command, persistence, migration,
+The original `commands.py` and `db.py` each exceeded 4,000 lines and combined
+several domain responsibilities. Extract one cohesive command or persistence
+responsibility per PR when working in that area, preserving public imports and
+transaction boundaries. Run the relevant command, persistence, migration,
 and full regression checks before delivery. Do not combine a large module split
 with new alert semantics or schema redesign; file length alone is not a defect.
 
@@ -117,9 +117,23 @@ rule-parameter construction into `command_args.py`. Existing imports from
 `commands.py` remain compatible; confirmation drafts, handlers, and all database
 transactions stay in place. The existing pure parsing tests now sit alongside
 the new module; added tests verify import compatibility and independence from
-the Telegram shell/storage. All 594 tests pass. Further command presentation or
-storage extraction remains unimplemented and needs a separately selected scope;
-the first extraction does not mark the entire module cleanup complete.
+the Telegram shell/storage. All 594 tests passed for that extraction.
+
+The second extraction moves the pure `/plans` and `/check` plan presentation
+functions and their helpers into `plan_views.py`. This separates changes to
+display text from handlers that fetch data or write state, and permits direct
+snapshot-based display tests without building a Bot or opening a database.
+Existing formatter imports, logger category, wording, and function bodies are
+preserved. Tests cover pending/added/skipped/unconfirmed tiers, dated NAV and
+position accuracy, missing data, localization, unchanged inputs, and independent
+module loading. The command shell is now about 3,650 lines.
+All 606 regression tests pass for this extraction.
+
+Further splitting is not scheduled just to reduce line counts. The remaining
+confirmation flows and storage operations share lifecycle or transaction state;
+revisit a specific boundary when a real change or repeated maintenance problem
+justifies it. These extractions do not imply that all command or storage
+responsibilities have been separated. Latency measurement remains deferred.
 
 ## Scope
 
