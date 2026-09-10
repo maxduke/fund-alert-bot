@@ -107,6 +107,16 @@ re-exported for compatibility. Integration and interaction tests remain in
 transaction boundaries. Further extraction should follow one responsibility
 at a time rather than replacing the command system with a new framework.
 
+`plan_views.py` renders the supplied plan and position snapshots for `/plans`
+and the plan section of `/check`. It owns their tier-state, date, trend, and
+position text, including the existing language-dependent labels. It does not
+fetch data, evaluate or persist alerts, or load the command shell or storage.
+Status-result types are imported only for type checking. Existing formatter
+imports from `commands.py` and the existing command logger category remain
+compatible. Provider-backed creation previews and Telegram callbacks stay in
+the command shell. Direct view tests verify presentation and unchanged inputs;
+the command integration tests continue to cover authorization and side effects.
+
 ### App Entry Point
 
 Responsible for startup, dependency wiring, graceful shutdown, and process-level logging.
