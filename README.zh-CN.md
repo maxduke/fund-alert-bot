@@ -16,7 +16,7 @@
 
 ## 当前状态
 
-项目已经实现 Python 3.12 单进程服务、SQLite 持久化、APScheduler 调度、
+项目已经实现 Python 单进程服务（Docker 使用 3.14，本地最低支持 3.12）、SQLite 持久化、APScheduler 调度、
 AKShare 行情归一化、Telegram 命令、通知投递状态与失败恢复、Docker 镜像、
 Ruff 和 pytest 测试。
 SQLite 会自动清理已终结历史（基准保留 400 天），但保留活跃/待处理状态和规则所需
@@ -325,7 +325,7 @@ Bot 使用直连数据源，并通过已启用的通知渠道发送启动提醒�
 
 ## 技术栈
 
-- Python 3.12
+- Python 3.14（Docker），本地最低支持 Python 3.12
 - python-telegram-bot
 - SQLite
 - AKShare 与 pandas
@@ -399,7 +399,7 @@ Compose 不会自动以 root 创建缺失的 `data`。已有部署切换 UID/GID
 
 ## GitHub Actions
 
-- `CI`：在 Python 3.12 上运行 Ruff 和 pytest，PR 通过后构建并冒烟测试镜像；
+- `CI`：在 Python 3.12 和 3.14 上运行 Ruff 和 pytest，PR 通过后构建并冒烟测试镜像；
   `main` 或版本标签的检查通过后发布到 `ghcr.io/maxduke/fund-alert-bot`。
 
 ## 项目文档

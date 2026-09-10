@@ -32,7 +32,8 @@ If a requested change pushes against these boundaries, pause and document the sm
 
 Use the planned stack unless a future decision document changes it:
 
-- Python 3.12
+- Python 3.14 for Docker deployment; Python 3.12 remains the minimum supported
+  version (see `docs/adr/0017-test-minimum-and-deployment-python-versions.md`).
 - python-telegram-bot
 - SQLite
 - AKShare
