@@ -10,7 +10,7 @@ hatchling==1.32.0
     # via build-system (pyproject.toml)
 akracer==0.0.14
     # via akshare
-akshare==1.18.92
+akshare==1.18.94
     # via fund-alert-bot (pyproject.toml)
 akshare-proxy-patch==0.5.0
     # via fund-alert-bot (pyproject.toml)
@@ -30,7 +30,7 @@ cffi==2.1.1
     # via curl-cffi
 charset-normalizer==3.5.1
     # via requests
-curl-cffi==0.16.1
+curl-cffi==0.16.3
     # via
     #   akshare
     #   akshare-proxy-patch
@@ -96,7 +96,7 @@ requests==2.34.2
     #   akshare
     #   akshare-proxy-patch
     #   fund-alert-bot (pyproject.toml)
-ruff==0.16.4
+ruff==0.16.6
     # via fund-alert-bot (pyproject.toml)
 setuptools==84.0.0
     # via build-system support for jsonpath

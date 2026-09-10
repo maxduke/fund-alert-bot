@@ -1,6 +1,6 @@
 # Investment Plan Enhancement Implementation
 
-> Status: accepted implementation plan; implementation has not started.
+> Status: implemented; keep this document aligned with the running service.
 
 This document turns the decisions in the
 [Investment Plan Enhancement Guide](investment-plan-guide.md) into a minimal

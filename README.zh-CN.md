@@ -26,6 +26,7 @@ SQLite 会自动清理已终结历史（基准保留 400 天），但保留活�
 
 - `/start`
 - `/help`
+- `/status`
 - `/add_drawdown <asset_type> <symbol> <name> <lookback_days> <thresholds>`
 - `/add_profit <asset_type> <symbol> <name> <cost|auto> <thresholds>`
 - `/add_dca <name> <weekday> <amount>`
@@ -251,6 +252,22 @@ Telegram 回复、按钮以及所有通知渠道共用一个全局语言。默�
 `/check` 等 Telegram 命令名称始终保持英文。
 Bot 启动时会注册命令菜单；在 Telegram 输入 `/` 即可看到可用命令及本地化说明。
 
+### 检查与运行状态
+
+`/status` 只读取本地运行记录，显示四类调度任务最近的运行结果、最近完整成功时间、
+缓存行情的日期以及待投递、失败投递和待处理持仓估算数量。升级前没有运行记录的
+任务会显示“尚无记录”；跳过交易日、缺少数据和检查失败不会显示为完整成功。
+行情缓存日期仅表示本地已有数据，不代表所有规则已成功检查。
+
+`/plans [refresh]` 和 `/check` 会先回复查询中的提示，再返回结果。查询仍按顺序
+执行。`/check` 产生的正式提醒与定时检查使用相同的完整接收者配置，检查摘要只
+回复发起命令的聊天。
+
+定投恢复按配置时区判断规则创建日期，只补跑规则创建当天及以后的日期。
+规则创建之前不会生成扣款或持仓估算记录；已存在的期次继续保留原金额和手续费。
+旧版本已生成的创建前待估算记录会保留，但停止应用；请按实际执行情况使用
+`/dca_skip` 跳过，或 `/sync_position` 对账。已应用的记录不会自动回滚。
+
 默认调度配置：
 
 - `TZ=Asia/Shanghai`
@@ -261,6 +278,7 @@ Bot 启动时会注册命令菜单；在 Telegram 输入 `/` 即可看到可用�
 - `FUND_NAV_PROCESS_TIME=08:30`
 - `AKSHARE_RETRIES=3`
 - `AKSHARE_RETRY_DELAY_SECONDS=0.5`
+- `AKSHARE_REQUEST_TIMEOUT_SECONDS=30`
 - `AKSHARE_LATEST_LOOKBACK_DAYS=45`
 
 可选通知配置：
@@ -295,7 +313,9 @@ Bot 使用直连数据源，并通过已启用的通知渠道发送启动提醒�
 为避免放大付费请求，补丁的并发 `fast` 分页始终关闭。请保持重试次数较低，绝不要把 Token
 提交到 Git 或写入日志。启用后，付费东方财富请求只由代理补丁负责重试；Bot 对每个
 东方财富 AKShare 操作只调用一次，避免两层重试相乘。
-新浪、雪球等其他数据源仍使用普通的 `AKSHARE_RETRIES`。历史数据、实时行情和联接基金净值都使用短时进程内
+代理补丁的每次尝试固定使用 5 秒超时；`AKSHARE_REQUEST_TIMEOUT_SECONDS`
+只限制本身未设置超时的请求。新浪、雪球等其他数据源仍使用普通的
+`AKSHARE_RETRIES`。历史数据、实时行情和联接基金净值都使用短时进程内
 缓存，相同或更窄的历史请求会复用结果，不建立可能长期过期的磁盘缓存。修改配置后要重启，
 并查看启动日志；代理或数据源失败时 Bot 会安全跳过，不会猜测行情。
 
@@ -344,8 +364,24 @@ python -m pip install --constraint constraints.txt `
   editables==0.6 hatchling==1.32.0 setuptools==84.0.0 wheel==0.48.0
 python -m pip install --no-build-isolation --constraint constraints.txt -e ".[dev]"
 Copy-Item .env.example .env
-ruff check .
-pytest
+# 编辑 .env，替换 Telegram Token 和允许的用户 ID。
+New-Item -ItemType Directory -Force data | Out-Null
+python -m fund_alert_bot.main
+```
+
+提交前运行与 CI 相同的检查：
+
+```powershell
+python -m ruff format --check .
+python -m ruff check .
+python -m pytest
+```
+
+修改 `pyproject.toml` 后，在已激活的虚拟环境中重新生成 Python 3.12 依赖约束：
+
+```powershell
+python -m pip install pip-tools
+python -m piptools compile --all-extras --output-file=constraints.txt --strip-extras pyproject.toml
 ```
 
 Linux 使用 Docker Compose 时，必须在 `.env` 中把 `BOT_UID`、`BOT_GID`
@@ -363,9 +399,8 @@ Compose 不会自动以 root 创建缺失的 `data`。已有部署切换 UID/GID
 
 ## GitHub Actions
 
-- `CI`：在 Python 3.12 上安装开发依赖，运行 Ruff 和 pytest。
-- `Docker`：PR 构建镜像；`main` 推送成功后发布到
-  `ghcr.io/maxduke/fund-alert-bot`。
+- `CI`：在 Python 3.12 上运行 Ruff 和 pytest，PR 通过后构建并冒烟测试镜像；
+  `main` 或版本标签的检查通过后发布到 `ghcr.io/maxduke/fund-alert-bot`。
 
 ## 项目文档
 

@@ -16,6 +16,7 @@ from fund_alert_bot.market_data import (
     AkshareMarketDataProvider,
     CNMarketCalendar,
     install_akshare_proxy,
+    install_default_requests_timeout,
 )
 from fund_alert_bot.notifications.service import build_notification_service
 from fund_alert_bot.scheduler import (
@@ -62,6 +63,7 @@ def run() -> None:
         auth_token=settings.akshare_proxy_auth_token,
         retry=settings.akshare_proxy_retry,
     )
+    install_default_requests_timeout(settings.akshare_request_timeout_seconds)
 
     startup_date = datetime.now(ZoneInfo(settings.timezone)).date()
     with open_connection(settings.sqlite_path) as connection:

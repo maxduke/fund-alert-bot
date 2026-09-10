@@ -92,6 +92,7 @@ from fund_alert_bot.market_data import (
     MarketDataProviderError,
     PriceBasis,
 )
+from fund_alert_bot.notifications.base import split_telegram_text
 from fund_alert_bot.notifications.dispatch import send_alert_notifications
 from fund_alert_bot.notifications.service import build_notification_service
 from fund_alert_bot.rules.dca import normalize_weekday
@@ -115,13 +116,13 @@ from fund_alert_bot.rules.profit import (
     format_profit_threshold_key,
     validate_position_profit_notification_size,
 )
+from fund_alert_bot.runtime_status import format_runtime_status
 
 if TYPE_CHECKING:
     from telegram import Update
     from telegram.ext import Application, ContextTypes
 
 LOGGER = logging.getLogger(__name__)
-_TELEGRAM_TEXT_LIMIT = 4096
 
 ADD_DRAWDOWN_USAGE = (
     "Usage: /add_drawdown <asset_type> <symbol> <name> <lookback_days> <thresholds>"
@@ -152,6 +153,7 @@ HELP_MESSAGE = "\n".join(
         "Available commands:",
         "/start - Start the bot",
         "/help - Show available commands",
+        "/status - Show local task and delivery status",
         "/add_drawdown <asset_type> <symbol> <name> <lookback_days> <thresholds>",
         "/add_profit <asset_type> <symbol> <name> <cost|auto> <thresholds>",
         "/add_dca <name> <weekday> <amount> - Reminder only",
@@ -193,6 +195,7 @@ UNAUTHORIZED_MESSAGE = "You are not allowed to use this bot."
 BOT_COMMAND_MENU = (
     ("start", "Start the bot"),
     ("help", "Show available commands"),
+    ("status", "Show local task and delivery status"),
     ("add_drawdown", "Add a drawdown reminder"),
     ("add_profit", "Add a price-gain reminder"),
     ("add_dca", "Add a recurring DCA reminder"),
@@ -201,7 +204,7 @@ BOT_COMMAND_MENU = (
     ("set_fund_fee", "Change a fund subscription fee"),
     ("set_fund_cutoff", "Change a fund subscription cutoff"),
     ("sync_position", "Sync a feeder-fund position"),
-    ("add_drawdown_plan", "Add a drawdown buy plan"),
+    ("add_drawdown_plan", "Add a Drawdown Add Plan"),
     ("set_plan_rearm", "Change a plan rearm margin"),
     ("mark_added", "Record a completed addition"),
     ("plans", "Show investment-plan status"),
@@ -2040,7 +2043,7 @@ async def _reply_text(
     text = localize_text(text)
     if reply_markup is not None:
         reply_markup = _localize_reply_markup(reply_markup)
-    chunks = _split_telegram_text(text)
+    chunks = split_telegram_text(text)
     for index, chunk in enumerate(chunks):
         if reply_markup is not None and index == len(chunks) - 1:
             await update.effective_message.reply_text(chunk, reply_markup=reply_markup)
@@ -2082,22 +2085,6 @@ async def _edit_message_text(
         localize_text(text),
         reply_markup=reply_markup,
     )
-
-
-def _split_telegram_text(text: str) -> tuple[str, ...]:
-    chunks: list[str] = []
-    while len(text) > _TELEGRAM_TEXT_LIMIT:
-        split_at = text.rfind("\n", 0, _TELEGRAM_TEXT_LIMIT + 1)
-        if split_at <= 0:
-            split_at = _TELEGRAM_TEXT_LIMIT
-            chunks.append(text[:split_at])
-            text = text[split_at:]
-        else:
-            chunks.append(text[:split_at])
-            text = text[split_at + 1 :]
-    if text or not chunks:
-        chunks.append(text)
-    return tuple(chunks)
 
 
 async def reject_if_unauthorized(
@@ -2172,6 +2159,16 @@ def build_command_handlers(
                 if draft.expires_at <= now:
                     drafts.pop(token, None)
 
+    async def run_query(update: Update, work: Callable[[], Any]) -> Any:
+        try:
+            return await run_serialized(work_lock, work)
+        except Exception:
+            LOGGER.exception("Manual query failed")
+            await _reply_text(
+                update, "Query failed. Please try again or check /status."
+            )
+            return None
+
     async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context
         if await reject_if_unauthorized(update, allowed_user_ids):
@@ -2183,6 +2180,22 @@ def build_command_handlers(
         if await reject_if_unauthorized(update, allowed_user_ids):
             return
         await _reply_text(update, HELP_MESSAGE)
+
+    async def runtime_status(
+        update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        del context
+        if await reject_if_unauthorized(update, allowed_user_ids):
+            return
+        try:
+            response = await run_serialized(
+                None, lambda: format_runtime_status(sqlite_path, timezone=timezone)
+            )
+        except Exception:
+            LOGGER.exception("Unable to read local task status")
+            await _reply_text(update, "Unable to read local status. Please try again.")
+            return
+        await _reply_text(update, response)
 
     async def add_drawdown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if await reject_if_unauthorized(update, allowed_user_ids):
@@ -2430,6 +2443,7 @@ def build_command_handlers(
                         fee_mode=str(command.fee_mode),
                         fee_value=float(command.fee_value),
                         holiday_policy=str(command.holiday_policy),
+                        created_at=_clock_now(clock),
                     )
                     current_settings = get_fund_settings(
                         connection,
@@ -2492,6 +2506,7 @@ def build_command_handlers(
                         name=command.name,
                         asset_type="dca",
                         params=dca_params(command),
+                        created_at=_clock_now(clock),
                     )
             except sqlite3.IntegrityError as exc:
                 await _reply_text(update, str(exc))
@@ -4032,6 +4047,7 @@ def build_command_handlers(
             await _reply_text(update, "Usage: /plans [refresh]")
             return
         force_refresh = args == ("refresh",)
+        await _reply_text(update, "Reading plan status. Please wait for the result.")
         user_id = int(update.effective_user.id)
         plan_date = _clock_now(clock).astimezone(timezone_info).date()
 
@@ -4155,13 +4171,16 @@ def build_command_handlers(
                 current_profit_setup_funds,
             )
 
+        query_result = await run_query(update, read_plans)
+        if query_result is None:
+            return
         (
             result,
             unmatched_positions,
             dca_statuses,
             profit_statuses,
             profit_setup_funds,
-        ) = await run_serialized(work_lock, read_plans)
+        ) = query_result
         for key in tuple(profit_setup_names):
             if key[0] == user_id:
                 profit_setup_names.pop(key)
@@ -4335,6 +4354,7 @@ def build_command_handlers(
         if await reject_if_unauthorized(update, allowed_user_ids):
             return
 
+        await _reply_text(update, "Running checks. Please wait for the result.")
         check_date = _clock_now(clock).astimezone(timezone_info).date()
 
         def run_check() -> tuple[Any, Any, Any, Any]:
@@ -4371,6 +4391,7 @@ def build_command_handlers(
                     current_result = evaluate_drawdown_rules(
                         connection,
                         market_data_provider,
+                        today=check_date,
                         include_latest=True,
                         confirmed_end_date=confirmed_end_date,
                     )
@@ -4384,6 +4405,7 @@ def build_command_handlers(
                     connection,
                     today=check_date,
                     market_calendar=calendar,
+                    timezone=timezone,
                 )
                 current_plan_status_result = read_drawdown_plan_statuses(
                     connection,
@@ -4399,10 +4421,10 @@ def build_command_handlers(
                 current_plan_status_result,
             )
 
-        result, profit_result, dca_result, plan_status_result = await run_serialized(
-            work_lock,
-            run_check,
-        )
+        query_result = await run_query(update, run_check)
+        if query_result is None:
+            return
+        result, profit_result, dca_result, plan_status_result = query_result
 
         notifications = [
             *result.notifications,
@@ -4413,7 +4435,7 @@ def build_command_handlers(
             notification_service = build_notification_service(
                 settings=notification_settings,
                 telegram_bot=context.bot,
-                telegram_chat_ids=_command_chat_ids(update),
+                telegram_chat_ids=allowed_user_ids,
             )
             dispatch_summary = await send_alert_notifications(
                 sqlite_path=sqlite_path,
@@ -4471,6 +4493,7 @@ def build_command_handlers(
     return [
         CommandHandler("start", start),
         CommandHandler("help", help_command),
+        CommandHandler("status", runtime_status),
         CommandHandler("add_drawdown", add_drawdown),
         CommandHandler("add_profit", add_profit),
         CommandHandler("add_dca", add_dca),

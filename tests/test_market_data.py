@@ -317,6 +317,22 @@ def test_open_fund_history_uses_unit_nav_as_close_and_filters_by_date() -> None:
     ]
 
 
+def test_history_filter_preserves_aware_input_calendar_dates() -> None:
+    fake_ak = FakeAkshare()
+    provider = AkshareMarketDataProvider(ak_module=fake_ak, retry_delay_seconds=0)
+    instrument = Instrument("510300", "CSI 300 ETF", AssetType.CN_ETF)
+
+    history = provider.get_history(
+        instrument,
+        datetime(2024, 1, 2, 23, 30, tzinfo=UTC),
+        datetime(2024, 1, 3, 23, 30, tzinfo=UTC),
+    )
+
+    assert history["date"].tolist() == [
+        pd.Timestamp("2024-01-02"),
+    ]
+
+
 @pytest.mark.parametrize(
     ("column", "value"),
     [

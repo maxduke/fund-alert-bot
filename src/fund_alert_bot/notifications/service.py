@@ -57,6 +57,8 @@ class NotificationService:
         title: str,
         body: str,
         telegram_actions: tuple[tuple[tuple[str, str], ...], ...] = (),
+        resume_sent_chunks: int | None = None,
+        resume_body_fingerprint: str | None = None,
     ) -> NotificationResult:
         """Send one message to one durable notification target."""
         target = next(
@@ -78,7 +80,14 @@ class NotificationService:
         _, _, channel = target
         try:
             send_to = getattr(channel, "send_to", None)
-            if callable(send_to):
+            if isinstance(channel, TelegramNotificationChannel):
+                result = await channel.send_to(
+                    target_key,
+                    message,
+                    resume_sent_chunks=resume_sent_chunks,
+                    resume_body_fingerprint=resume_body_fingerprint,
+                )
+            elif callable(send_to):
                 result = await send_to(target_key, message)
             else:
                 result = await channel.send(message)
