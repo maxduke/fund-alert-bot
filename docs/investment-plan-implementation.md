@@ -2,7 +2,7 @@
 
 > Status (2026-09-10): implementation and automated validation complete;
 > initial live operation reported successful by the operator. Operational
-> observation is now the active phase.
+> observation and incremental maintenance are now the active work.
 
 This document turns the decisions in the
 [Investment Plan Enhancement Guide](investment-plan-guide.md) into a minimal
@@ -23,6 +23,9 @@ outstanding development backlog. Subsequent maintenance includes:
 - PR #75: Python 3.14 Docker deployment with Python 3.12 compatibility coverage;
   both CI versions, 575 tests, and the non-root offline container lifecycle
   check passed. Post-merge image publication also passed.
+- PR #82: bounded pending-work diagnostics in `/status`; 592 tests passed.
+- PR #83: command parsing extracted with compatible imports; 594 tests,
+  dual-version CI, and Codex review passed for the implementation.
 
 The operator reports that actual runs look normal. Record this as initial live
 acceptance; it does not establish that every holiday, delayed NAV, or restart
@@ -57,10 +60,10 @@ following items are grounded in the current implementation; they are planned
 improvements, not confirmed unresolved defects. Operational observation continues
 alongside this work. Any reproducible correctness issue takes priority.
 
-### 1. Make pending work diagnosable — implemented in the current change
+### 1. Make pending work diagnosable — completed in PR #82
 
 The previous status output reported only counts of pending deliveries and
-estimates, with a generic explanation. The current change adds a bounded local
+estimates, with a generic explanation. PR #82 adds a bounded local
 diagnostic query in `pending_status.py`, keeping the existing counts.
 
 Extend the local read-only status path with bounded pending-item details: rule or
@@ -84,7 +87,11 @@ fees, so missing current fee settings alone are not a settlement blocker. Show
 unresolved/future effective dates separately from missing NAV, and leave the
 reason unknown when local prerequisites do not explain why an item is pending.
 
-### 2. Measure slow checks before optimizing them
+### 2. Measure slow checks before optimizing them — deferred
+
+The operator has not encountered a latency problem and has chosen to defer this
+item. Revisit it when slow queries or delayed scheduled work provide a reason
+to investigate; it is not a prerequisite for module extraction.
 
 `async_work.py` serializes provider/calendar work behind a shared lock. Keep that
 protection while measuring queue wait and execution duration in existing logs;
@@ -96,15 +103,23 @@ work; do not introduce parallel provider calls or a new worker service merely
 because serialization exists. Timing instrumentation must not change cancellation,
 locking, or state-commit behavior.
 
-### 3. Reduce the scope of future code changes incrementally
+### 3. Reduce the scope of future code changes incrementally — first extraction complete
 
 `commands.py` and `db.py` each exceed 4,000 lines and combine several domain
 responsibilities. Extract one cohesive command or persistence responsibility per
 PR when working in that area, preserving public imports and transaction
-boundaries. Start with a bounded read-only status/query responsibility if the
-first item makes that useful. Run the relevant command, persistence, migration,
+boundaries. Run the relevant command, persistence, migration,
 and full regression checks before delivery. Do not combine a large module split
 with new alert semantics or schema redesign; file length alone is not a defect.
+
+PR #83 moves command argument types, usage strings, parsing, and
+rule-parameter construction into `command_args.py`. Existing imports from
+`commands.py` remain compatible; confirmation drafts, handlers, and all database
+transactions stay in place. The existing pure parsing tests now sit alongside
+the new module; added tests verify import compatibility and independence from
+the Telegram shell/storage. All 594 tests pass. Further command presentation or
+storage extraction remains unimplemented and needs a separately selected scope;
+the first extraction does not mark the entire module cleanup complete.
 
 ## Scope
 

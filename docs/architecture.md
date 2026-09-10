@@ -93,6 +93,20 @@ Telegram should use `python-telegram-bot`. Other channels can use small adapters
 
 Notification modules should receive already-evaluated alert events. They should not fetch market data or decide whether an alert is due.
 
+### Telegram Commands
+
+`command_args.py` owns argument parsing, usage strings, immutable parsed command
+types, and conversion to rule parameters. It reuses pure rule validation helpers
+but does not load the Telegram command shell or storage, access a provider, or
+write state. Parser tests live in `tests/test_command_args.py`.
+
+`commands.py` owns Telegram registration, authorization, replies, confirmation
+drafts, and orchestration of existing services. Its original parsing imports are
+re-exported for compatibility. Integration and interaction tests remain in
+`tests/test_commands.py`; moving parsers does not change callback lifecycles or
+transaction boundaries. Further extraction should follow one responsibility
+at a time rather than replacing the command system with a new framework.
+
 ### App Entry Point
 
 Responsible for startup, dependency wiring, graceful shutdown, and process-level logging.
