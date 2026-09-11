@@ -14,7 +14,7 @@ akshare==1.18.94
     # via fund-alert-bot (pyproject.toml)
 akshare-proxy-patch==0.5.0
     # via fund-alert-bot (pyproject.toml)
-anyio==4.14.2
+anyio==4.15.1
     # via httpx
 apscheduler==3.11.3
     # via fund-alert-bot (pyproject.toml)
