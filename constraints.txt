@@ -59,7 +59,7 @@ jsonpath==0.82.2
     # via akshare
 lxml==6.1.2
     # via akshare
-numpy==2.5.2
+numpy==2.5.3
     # via pandas
 openpyxl==3.1.5
     # via akshare
