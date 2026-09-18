@@ -112,7 +112,7 @@ tomlkit==0.15.1
     # via hatchling
 trove-classifiers==2026.6.1.19
     # via hatchling
-tqdm==4.70.0
+tqdm==4.70.1
     # via akshare
 typing-extensions==4.16.0
     # via
