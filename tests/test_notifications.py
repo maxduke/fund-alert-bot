@@ -3,11 +3,14 @@ from __future__ import annotations
 import asyncio
 import logging
 from email.header import Header
+from types import SimpleNamespace
 
+import pytest
 import requests
 
 from fund_alert_bot.notifications.bark import BarkNotificationChannel
 from fund_alert_bot.notifications.base import NotificationMessage, NotificationResult
+from fund_alert_bot.notifications.http_delivery import post_notification
 from fund_alert_bot.notifications.ntfy import NtfyNotificationChannel
 from fund_alert_bot.notifications.service import NotificationService
 from fund_alert_bot.notifications.webhook import WebhookNotificationChannel
@@ -20,7 +23,9 @@ def test_bark_channel_posts_with_timeout(monkeypatch) -> None:
         calls.append({"url": url, **kwargs})
         return FakeResponse(status_code=200)
 
-    monkeypatch.setattr("fund_alert_bot.notifications.bark.requests.post", fake_post)
+    monkeypatch.setattr(
+        "fund_alert_bot.notifications.http_delivery.requests.post", fake_post
+    )
     channel = BarkNotificationChannel(
         server_url="https://bark.example.test",
         device_key="secret-device-key",
@@ -49,7 +54,9 @@ def test_ntfy_channel_posts_with_timeout(monkeypatch) -> None:
         calls.append({"url": url, **kwargs})
         return FakeResponse(status_code=200)
 
-    monkeypatch.setattr("fund_alert_bot.notifications.ntfy.requests.post", fake_post)
+    monkeypatch.setattr(
+        "fund_alert_bot.notifications.http_delivery.requests.post", fake_post
+    )
     channel = NtfyNotificationChannel(
         server_url="https://ntfy.example.test",
         topic="secret-topic",
@@ -75,7 +82,9 @@ def test_ntfy_channel_rfc2047_encodes_utf8_title(monkeypatch) -> None:
         calls.append({"url": url, **kwargs})
         return FakeResponse(status_code=200)
 
-    monkeypatch.setattr("fund_alert_bot.notifications.ntfy.requests.post", fake_post)
+    monkeypatch.setattr(
+        "fund_alert_bot.notifications.http_delivery.requests.post", fake_post
+    )
     title = "📉 " + "中证A500 " * 30
     channel = NtfyNotificationChannel(
         server_url="https://ntfy.example.test",
@@ -103,7 +112,7 @@ def test_webhook_channel_posts_with_timeout(monkeypatch) -> None:
         return FakeResponse(status_code=200)
 
     monkeypatch.setattr(
-        "fund_alert_bot.notifications.webhook.requests.post",
+        "fund_alert_bot.notifications.http_delivery.requests.post",
         fake_post,
     )
     channel = WebhookNotificationChannel(url="https://hooks.example.test/secret")
@@ -169,7 +178,7 @@ def test_request_failures_do_not_log_sensitive_webhook_url(
         raise requests.Timeout("timed out")
 
     monkeypatch.setattr(
-        "fund_alert_bot.notifications.webhook.requests.post",
+        "fund_alert_bot.notifications.http_delivery.requests.post",
         fake_post,
     )
     service = NotificationService([WebhookNotificationChannel(url=secret_url)])
@@ -237,3 +246,49 @@ def _message() -> NotificationMessage:
         title="Drawdown alert",
         body="399006 is down 10.0%.",
     )
+
+
+@pytest.mark.parametrize(
+    ("outcome", "success", "detail"),
+    [
+        (200, True, "sent"),
+        (503, False, "http_status=503"),
+        (
+            requests.ConnectionError("https://example.test/secret-key"),
+            False,
+            "request_error=ConnectionError",
+        ),
+    ],
+)
+def test_post_notification_reports_outcome_without_leaking_the_url(
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: object,
+    success: bool,
+    detail: str,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_post(url: str, **kwargs: object) -> SimpleNamespace:
+        calls.append({"url": url, **kwargs})
+        if isinstance(outcome, Exception):
+            raise outcome
+        return SimpleNamespace(status_code=outcome)
+
+    monkeypatch.setattr(
+        "fund_alert_bot.notifications.http_delivery.requests.post", fake_post
+    )
+
+    result = post_notification(
+        "test",
+        "https://example.test/secret-key",
+        timeout=3,
+        json={"title": "t"},
+    )
+
+    assert calls == [
+        {"url": "https://example.test/secret-key", "timeout": 3, "json": {"title": "t"}}
+    ]
+    assert result.channel == "test"
+    assert result.success is success
+    assert result.detail == detail
+    assert "secret-key" not in result.detail
