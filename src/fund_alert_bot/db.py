@@ -17,6 +17,7 @@ from typing import Any
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
+from fund_alert_bot.rules.drawdown import MAX_WINDOW_DAYS
 from fund_alert_bot.rules.drawdown_plan import (
     format_plan_amount,
     format_plan_percent,
@@ -1017,8 +1018,9 @@ def _positive_rule_int(
     if raw is None or isinstance(raw, bool) or not isinstance(raw, int):
         raise ValueError(f"{key} must be positive")
     value = raw
-    if value <= 0:
-        raise ValueError(f"{key} must be positive")
+    if value <= 0 or value > MAX_WINDOW_DAYS:
+        # Out-of-range windows would overflow date arithmetic during pruning.
+        raise ValueError(f"{key} must be between 1 and {MAX_WINDOW_DAYS}")
     return value
 
 

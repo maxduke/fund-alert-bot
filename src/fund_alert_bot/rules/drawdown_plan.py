@@ -15,6 +15,7 @@ import pandas as pd
 
 from fund_alert_bot.market_data.models import AssetType, RealtimeQuote
 from fund_alert_bot.notifications.base import TELEGRAM_TEXT_LIMIT
+from fund_alert_bot.rules.drawdown import MAX_WINDOW_DAYS
 
 _THRESHOLD_TOLERANCE = 1e-12
 _PRICE_RELATIVE_TOLERANCE = 1e-4
@@ -883,8 +884,15 @@ def _read_integer(
     minimum: int,
 ) -> int:
     value = params.get(key, default)
-    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
-        raise ValueError(f"{key} must be an integer of at least {minimum}.")
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < minimum
+        or value > MAX_WINDOW_DAYS
+    ):
+        raise ValueError(
+            f"{key} must be an integer between {minimum} and {MAX_WINDOW_DAYS}."
+        )
     return value
 
 
