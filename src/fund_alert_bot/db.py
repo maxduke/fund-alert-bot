@@ -3463,28 +3463,34 @@ def add_alert_event(
     triggered_at: str | datetime | None = None,
 ) -> int:
     """Insert an alert event and return its database ID."""
-    cursor = connection.execute(
-        """
-        INSERT INTO alert_events (
-            rule_id,
-            alert_key,
-            title,
-            message,
-            payload_json,
-            triggered_at
+    try:
+        cursor = connection.execute(
+            """
+            INSERT INTO alert_events (
+                rule_id,
+                alert_key,
+                title,
+                message,
+                payload_json,
+                triggered_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                rule_id,
+                alert_key,
+                title,
+                message,
+                None if payload is None else _json_text(payload),
+                _timestamp_text(triggered_at),
+            ),
         )
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        (
-            rule_id,
-            alert_key,
-            title,
-            message,
-            None if payload is None else _json_text(payload),
-            _timestamp_text(triggered_at),
-        ),
-    )
-    connection.commit()
+        connection.commit()
+    except Exception:
+        # A failed INSERT leaves the implicit transaction open; release it so
+        # later BEGIN IMMEDIATE writers on this connection do not fail.
+        connection.rollback()
+        raise
     return int(cursor.lastrowid)
 
 
@@ -3574,31 +3580,35 @@ def reserve_alert_event(
             raise
 
         event_id = int(row["id"])
-        connection.execute(
-            """
-            UPDATE alert_events
-            SET
-                rule_id = ?,
-                title = ?,
-                message = ?,
-                payload_json = ?,
-                triggered_at = ?,
-                notification_status = ?,
-                notification_sent_at = NULL,
-                notification_result_json = NULL
-            WHERE id = ?
-            """,
-            (
-                rule_id,
-                title,
-                message,
-                None if payload is None else _json_text(payload),
-                _timestamp_text(triggered_at),
-                ALERT_NOTIFICATION_PENDING,
-                event_id,
-            ),
-        )
-        connection.commit()
+        try:
+            connection.execute(
+                """
+                UPDATE alert_events
+                SET
+                    rule_id = ?,
+                    title = ?,
+                    message = ?,
+                    payload_json = ?,
+                    triggered_at = ?,
+                    notification_status = ?,
+                    notification_sent_at = NULL,
+                    notification_result_json = NULL
+                WHERE id = ?
+                """,
+                (
+                    rule_id,
+                    title,
+                    message,
+                    None if payload is None else _json_text(payload),
+                    _timestamp_text(triggered_at),
+                    ALERT_NOTIFICATION_PENDING,
+                    event_id,
+                ),
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
         return event_id
 
 

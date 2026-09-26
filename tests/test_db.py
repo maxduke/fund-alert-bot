@@ -1238,6 +1238,11 @@ def test_alert_key_is_unique(tmp_path: Path) -> None:
                 message="Duplicate alert key.",
             )
 
+        # The failed insert must not leave a transaction open on the connection.
+        assert not connection.in_transaction
+        connection.execute("BEGIN IMMEDIATE")
+        connection.rollback()
+
 
 def test_failed_alert_delivery_is_retryable(tmp_path: Path) -> None:
     sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
