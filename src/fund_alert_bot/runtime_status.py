@@ -170,9 +170,14 @@ def format_runtime_status(sqlite_path: str | Path, *, timezone: str) -> str:
     def timestamp(value: str | None) -> str:
         if not value:
             return localize_text("No record yet")
-        return (
-            datetime.fromisoformat(value).astimezone(zone).strftime("%Y-%m-%d %H:%M:%S")
-        )
+        try:
+            parsed = datetime.fromisoformat(value)
+        except (TypeError, ValueError):
+            return localize_text("Unknown date")
+        if parsed.tzinfo is None:
+            # Status timestamps are written in UTC.
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(zone).strftime("%Y-%m-%d %H:%M:%S")
 
     lines = ["Runtime status", f"Timezone: {timezone}", ""]
     with open_connection(sqlite_path) as connection:
@@ -186,7 +191,14 @@ def format_runtime_status(sqlite_path: str | Path, *, timezone: str) -> str:
             if row is None:
                 lines.append(f"• {label}: {localize_text('No record yet')}")
                 continue
-            state = json.loads(row["value"])
+            try:
+                state = json.loads(row["value"])
+            except (TypeError, ValueError):
+                state = None
+            if not isinstance(state, dict) or state.get("outcome") not in _OUTCOMES:
+                # One unreadable record must not hide every other job's status.
+                lines.append(f"• {label}: {localize_text('Unreadable status record')}")
+                continue
             outcome = state["outcome"]
             if outcome == "running" and state.get("process_id") != _PROCESS_ID:
                 outcome = "interrupted"
