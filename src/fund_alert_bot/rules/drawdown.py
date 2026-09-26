@@ -46,7 +46,9 @@ def calculate_drawdown_from_high(
     if latest_price <= 0:
         raise ValueError("latest price must be positive.")
     latest_date = pd.Timestamp(latest_row["date"])
-    window_start = latest_date - timedelta(days=int(lookback_days))
+    # The window spans exactly lookback_days calendar days including the latest
+    # date, matching the drawdown plan rule.
+    window_start = latest_date - timedelta(days=int(lookback_days) - 1)
     window = frame.loc[frame["date"].between(window_start, latest_date)].copy()
     window = window.dropna(subset=[price_field])
     if window.empty:
