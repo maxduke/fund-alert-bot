@@ -15,7 +15,11 @@ from typing import Any
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from fund_alert_bot.db import initialize_database, open_connection
+from fund_alert_bot.db import (
+    initialize_database,
+    open_connection,
+    write_transaction,
+)
 from fund_alert_bot.i18n import localize_text
 from fund_alert_bot.pending_status import format_pending_work
 
@@ -80,53 +84,52 @@ def _persist_run(
 
     with open_connection(sqlite_path) as connection:
         initialize_database(connection)
-        connection.execute("BEGIN IMMEDIATE")
-        key = _KEY_PREFIX + job_id
-        row = connection.execute(
-            "SELECT value FROM app_metadata WHERE key = ?", (key,)
-        ).fetchone()
-        state = None
-        if row is not None:
-            try:
-                state = json.loads(row["value"])
-            except (TypeError, ValueError):
-                pass
-        if not isinstance(state, dict):
-            # Replace an unreadable record rather than failing every later save.
-            state = {}
-        now = datetime.now(UTC).isoformat()
-        if result is None:
-            state.update(
-                run_id=run_id,
-                process_id=_PROCESS_ID,
-                started_at=now,
-                finished_at=None,
-                outcome="running",
-                no_data=0,
-                errors=0,
-                delivery_failures=0,
+        with write_transaction(connection):
+            key = _KEY_PREFIX + job_id
+            row = connection.execute(
+                "SELECT value FROM app_metadata WHERE key = ?", (key,)
+            ).fetchone()
+            state = None
+            if row is not None:
+                try:
+                    state = json.loads(row["value"])
+                except (TypeError, ValueError):
+                    pass
+            if not isinstance(state, dict):
+                # Replace an unreadable record rather than failing every later save.
+                state = {}
+            now = datetime.now(UTC).isoformat()
+            if result is None:
+                state.update(
+                    run_id=run_id,
+                    process_id=_PROCESS_ID,
+                    started_at=now,
+                    finished_at=None,
+                    outcome="running",
+                    no_data=0,
+                    errors=0,
+                    delivery_failures=0,
+                )
+            elif state.get("run_id") != run_id:
+                return
+            else:
+                state.update(
+                    finished_at=now,
+                    outcome=result.outcome,
+                    no_data=result.no_data,
+                    errors=result.errors,
+                    delivery_failures=result.delivery_failures,
+                )
+                if result.outcome == "ok":
+                    state["last_success_at"] = now
+            connection.execute(
+                """
+                INSERT INTO app_metadata (key, value, updated_at) VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value, updated_at = excluded.updated_at
+                """,
+                (key, json.dumps(state), now),
             )
-        elif state.get("run_id") != run_id:
-            return
-        else:
-            state.update(
-                finished_at=now,
-                outcome=result.outcome,
-                no_data=result.no_data,
-                errors=result.errors,
-                delivery_failures=result.delivery_failures,
-            )
-            if result.outcome == "ok":
-                state["last_success_at"] = now
-        connection.execute(
-            """
-            INSERT INTO app_metadata (key, value, updated_at) VALUES (?, ?, ?)
-            ON CONFLICT(key) DO UPDATE SET
-                value = excluded.value, updated_at = excluded.updated_at
-            """,
-            (key, json.dumps(state), now),
-        )
-        connection.commit()
 
 
 def _readable_state(state: object) -> bool:

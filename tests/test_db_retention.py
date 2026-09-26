@@ -96,6 +96,7 @@ def test_prune_plan_history_keeps_active_peak_as_a_bounded_exception() -> None:
             today - timedelta(days=24),
             today,
         ):
+            connection.commit()
             upsert_market_history(
                 connection,
                 symbol="510300",
@@ -155,6 +156,7 @@ def test_prune_fund_nav_preserves_latest_and_pending_effective_dates() -> None:
         cycle_id = int(
             connection.execute("SELECT id FROM drawdown_cycles").fetchone()[0]
         )
+        connection.commit()
         source_event_id = add_alert_event(
             connection,
             rule_id=rule_id,
@@ -187,6 +189,7 @@ def test_prune_fund_nav_preserves_latest_and_pending_effective_dates() -> None:
             today - timedelta(days=399),
             today - timedelta(days=200),
         ):
+            connection.commit()
             upsert_fund_nav(
                 connection,
                 fund_symbol="000001",
@@ -323,6 +326,7 @@ def test_prune_expires_known_dated_events_but_keeps_unknown_dedupe_keys() -> Non
             "UPDATE alert_events SET notification_status = 'sent' WHERE id = ?",
             (expired_event_id,),
         )
+        connection.commit()
         add_alert_event(
             connection,
             rule_id=rule_id,
@@ -363,6 +367,7 @@ def test_prune_preserves_every_undelivered_alert_and_target() -> None:
             ("sent", "sending"),
         )
         for index, (event_status, delivery_status) in enumerate(delivery_states):
+            connection.commit()
             event_id = add_alert_event(
                 connection,
                 rule_id=rule_id,
