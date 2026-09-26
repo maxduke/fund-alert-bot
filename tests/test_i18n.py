@@ -403,3 +403,16 @@ def test_chinese_translates_every_dca_skip_outcome() -> None:
         )
     finally:
         set_language("en")
+
+
+def test_chinese_localizes_bounded_lookback_errors() -> None:
+    set_language("zh-CN")
+    try:
+        assert localize_text("lookback_days must be between 1 and 3650") == (
+            "lookback_days 必须介于 1 到 3650 之间"
+        )
+        assert localize_text("lookback must be between 1 and 3650") == (
+            "lookback 必须介于 1 到 3650 之间"
+        )
+    finally:
+        set_language("en")
