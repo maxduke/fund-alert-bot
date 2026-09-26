@@ -197,7 +197,7 @@ def test_scheduled_check_prevents_duplicate_alerts_by_alert_key(
         return FakeResponse(status_code=200)
 
     monkeypatch.setattr(
-        "fund_alert_bot.notifications.http.requests.post",
+        "fund_alert_bot.notifications.http_delivery.requests.post",
         fake_post,
     )
 
@@ -268,7 +268,7 @@ def test_scheduled_dca_check_merges_same_day_fixed_reminders(
         return FakeResponse(status_code=200)
 
     monkeypatch.setattr(
-        "fund_alert_bot.notifications.http.requests.post",
+        "fund_alert_bot.notifications.http_delivery.requests.post",
         fake_post,
     )
     asyncio.run(
@@ -1791,7 +1791,7 @@ def test_scheduled_dca_check_prevents_duplicate_alerts_by_alert_key(
         return FakeResponse(status_code=200)
 
     monkeypatch.setattr(
-        "fund_alert_bot.notifications.http.requests.post",
+        "fund_alert_bot.notifications.http_delivery.requests.post",
         fake_post,
     )
 

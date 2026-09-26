@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 
 from fund_alert_bot.notifications.base import NotificationMessage, NotificationResult
-from fund_alert_bot.notifications.http import (
+from fund_alert_bot.notifications.http_delivery import (
     DEFAULT_HTTP_TIMEOUT_SECONDS,
     post_notification,
 )
