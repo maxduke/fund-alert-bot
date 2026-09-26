@@ -61,28 +61,28 @@ async def send_alert_notifications(
                 targets=delivery_targets,
             )
         claimed_target_keys: list[str] = []
-        claimed_deliveries = []
-        # ponytail: personal-scale target lists fit the 120-second delivery lease;
-        # claim in chunks if deployments grow beyond dozens of recipients.
-        for target_key, _channel in delivery_targets:
-            with open_connection(sqlite_path) as connection:
-                initialize_database(connection)
-                target_claims = claim_notification_deliveries(
-                    connection,
-                    event_ids=batch_ids,
-                    target_keys=(target_key,),
-                )
-            if not target_claims:
-                continue
-            claimed_target_keys.append(target_key)
-            notification = _merge_dca_batch(
-                [notification_by_event[claim.event_id] for claim in target_claims]
-            )
-            claimed_deliveries.append((target_key, target_claims, notification))
 
-        async def deliver(claimed_delivery: tuple) -> None:
-            target_key, target_claims, notification = claimed_delivery
+        async def deliver(
+            target_key: str,
+            batch_ids: tuple[int, ...],
+            claimed_target_keys: list[str],
+        ) -> None:
             async with semaphore:
+                # Claim only once a delivery slot is held so queued targets do
+                # not burn their lease while waiting behind slower sends.
+                with open_connection(sqlite_path) as connection:
+                    initialize_database(connection)
+                    target_claims = claim_notification_deliveries(
+                        connection,
+                        event_ids=batch_ids,
+                        target_keys=(target_key,),
+                    )
+                if not target_claims:
+                    return
+                claimed_target_keys.append(target_key)
+                notification = _merge_dca_batch(
+                    [notification_by_event[claim.event_id] for claim in target_claims]
+                )
                 resume = _common_delivery_progress(target_claims)
                 result = await notification_service.send_target(
                     target_key,
@@ -95,15 +95,28 @@ async def send_alert_notifications(
             with open_connection(sqlite_path) as connection:
                 initialize_database(connection)
                 for claim in target_claims:
-                    complete_notification_delivery(
+                    completed = complete_notification_delivery(
                         connection,
                         event_id=claim.event_id,
                         target_key=claim.target_key,
                         claim_token=claim.claim_token,
                         result=result,
                     )
+                    if not completed:
+                        LOGGER.warning(
+                            "Discarded stale notification result event_id=%s "
+                            "target=%s success=%s; the delivery lease expired",
+                            claim.event_id,
+                            claim.target_key,
+                            result.success,
+                        )
 
-        await asyncio.gather(*(deliver(item) for item in claimed_deliveries))
+        await asyncio.gather(
+            *(
+                deliver(target_key, batch_ids, claimed_target_keys)
+                for target_key, _channel in delivery_targets
+            )
+        )
         with open_connection(sqlite_path) as connection:
             initialize_database(connection)
             refresh_alert_notification_status(connection, event_ids=batch_ids)
