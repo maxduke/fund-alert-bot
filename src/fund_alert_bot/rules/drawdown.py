@@ -40,15 +40,19 @@ def calculate_drawdown_from_high(
 
     frame[price_field] = pd.to_numeric(frame[price_field], errors="coerce")
     frame = frame.sort_values("date", ascending=True).reset_index(drop=True)
+    frame = frame.dropna(subset=[price_field]).reset_index(drop=True)
+    if frame.empty:
+        raise ValueError("Market data has no prices.")
 
     latest_row = frame.iloc[-1]
     latest_price = _to_float(latest_row[price_field], "latest price")
     if latest_price <= 0:
         raise ValueError("latest price must be positive.")
     latest_date = pd.Timestamp(latest_row["date"])
-    window_start = latest_date - timedelta(days=int(lookback_days))
+    # The window spans exactly lookback_days calendar days including the latest
+    # date, matching the drawdown plan rule.
+    window_start = latest_date - timedelta(days=int(lookback_days) - 1)
     window = frame.loc[frame["date"].between(window_start, latest_date)].copy()
-    window = window.dropna(subset=[price_field])
     if window.empty:
         raise ValueError("Market data has no prices in the lookback window.")
 
