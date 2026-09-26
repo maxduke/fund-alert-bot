@@ -370,3 +370,46 @@ def test_status_bounds_cache_details_without_hiding_backlog_counts(tmp_path) -> 
         set_language(language)
     with open_connection(path) as connection:
         assert list(connection.iterdump()) == before
+
+
+@pytest.mark.parametrize(
+    "corrupt",
+    ["not json", "[]", '"x"', "null", json.dumps({"outcome": ["x"]}), '{"outcome": 1}'],
+)
+def test_status_survives_unreadable_records_and_reads_naive_times_as_utc(
+    tmp_path,
+    corrupt,
+) -> None:
+    path = tmp_path / "bot.sqlite3"
+    records = {
+        scheduler.MARKET_AFTER_CLOSE_JOB_ID: corrupt,
+        scheduler.FUND_NAV_PROCESS_JOB_ID: json.dumps(
+            {"outcome": "ok", "started_at": "garbage"}
+        ),
+        scheduler.DCA_MORNING_JOB_ID: json.dumps(
+            {"outcome": "ok", "started_at": "2026-01-01T00:00:00"}
+        ),
+    }
+    with open_connection(path) as connection:
+        initialize_database(connection)
+        for job_id, value in records.items():
+            connection.execute(
+                "INSERT INTO app_metadata (key, value, updated_at) VALUES (?, ?, ?)",
+                (f"job_status:{job_id}", value, "2026-01-01T00:00:00+00:00"),
+            )
+        connection.commit()
+
+    text = format_runtime_status(path, timezone="Asia/Shanghai")
+
+    assert text.count("Unreadable status record") == 1
+    assert text.count("Completed successfully") == 2
+    assert "Last started: Unknown date" in text
+    assert "Last started: 2026-01-01 08:00:00" in text
+
+    @runtime_status.track_job(scheduler.MARKET_AFTER_CLOSE_JOB_ID)
+    async def work(*, sqlite_path):
+        return None
+
+    asyncio.run(work(sqlite_path=path))
+
+    assert _task_state(path)["outcome"] == "ok"

@@ -28,6 +28,7 @@ _EN_TO_ZH = {
     "Effective date:": "生效日期：",
     "Pending since:": "待处理起始时间：",
     "Unknown date": "日期未确定",
+    "Unreadable status record": "状态记录无法读取",
     "Predates rule creation; reconcile explicitly.": "记录早于规则创建日期，需要明确对账处理。",
     "Reason unknown from local records.": "无法从本地记录确定待处理原因。",
     "Effective trading date not yet recorded.": "尚未记录生效交易日。",
