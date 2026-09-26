@@ -3,7 +3,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 from pathlib import Path
+
+import pytest
 
 from fund_alert_bot.checks import AlertNotification, DcaNotificationSummary
 from fund_alert_bot.db import (
@@ -16,6 +19,7 @@ from fund_alert_bot.db import (
     initialize_database,
     open_connection,
 )
+from fund_alert_bot.notifications import dispatch
 from fund_alert_bot.notifications.base import NotificationMessage, NotificationResult
 from fund_alert_bot.notifications.dispatch import (
     _common_delivery_progress,
@@ -375,6 +379,78 @@ class TargetRecordingChannel:
         self.calls.append(target_key)
         self.bodies.append(message.body)
         return NotificationResult(channel=self.name, success=True, detail="sent")
+
+
+def test_targets_are_claimed_only_when_a_delivery_slot_is_free(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sqlite_path = tmp_path / "alerts.sqlite3"
+    with open_connection(sqlite_path) as connection:
+        initialize_database(connection)
+        event_id = _add_event(connection, "slots")
+
+    events: list[str] = []
+    real_claim = dispatch.claim_notification_deliveries
+
+    def recording_claim(connection, *, event_ids, target_keys):
+        events.append(f"claim:{target_keys[0]}")
+        return real_claim(connection, event_ids=event_ids, target_keys=target_keys)
+
+    channel = PartialFailureChannel()
+    real_send_to = channel.send_to
+
+    async def recording_send_to(target_key, message):
+        events.append(f"send:{target_key}")
+        return await real_send_to(target_key, message)
+
+    channel.send_to = recording_send_to
+    monkeypatch.setattr(dispatch, "MAX_CONCURRENT_DELIVERIES", 1)
+    monkeypatch.setattr(dispatch, "claim_notification_deliveries", recording_claim)
+
+    asyncio.run(
+        send_alert_notifications(
+            sqlite_path=sqlite_path,
+            notification_service=NotificationService([channel]),
+            notifications=[_notification(event_id, "slots")],
+        )
+    )
+
+    assert events == [
+        "claim:target:a",
+        "send:target:a",
+        "claim:target:b",
+        "send:target:b",
+    ]
+
+
+def test_stale_delivery_result_is_logged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sqlite_path = tmp_path / "alerts.sqlite3"
+    with open_connection(sqlite_path) as connection:
+        initialize_database(connection)
+        event_id = _add_event(connection, "stale")
+
+    monkeypatch.setattr(
+        dispatch,
+        "complete_notification_delivery",
+        lambda connection, **kwargs: False,
+    )
+
+    with caplog.at_level(logging.WARNING, logger=dispatch.__name__):
+        asyncio.run(
+            send_alert_notifications(
+                sqlite_path=sqlite_path,
+                notification_service=NotificationService([PartialFailureChannel()]),
+                notifications=[_notification(event_id, "stale")],
+            )
+        )
+
+    assert "Discarded stale notification result" in caplog.text
+    assert f"event_id={event_id}" in caplog.text
 
 
 class PartialFailureBot:
