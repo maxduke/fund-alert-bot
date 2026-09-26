@@ -400,3 +400,33 @@ def test_prune_preserves_every_undelivered_alert_and_target() -> None:
         )
     finally:
         connection.close()
+
+
+def test_prune_skips_stored_rules_with_overflowing_windows() -> None:
+    connection = connect(":memory:")
+    try:
+        init_db(connection)
+        for rule_type, params in (
+            ("drawdown_from_high", '{"lookback_days": 1000000, "thresholds": [0.1]}'),
+            ("drawdown_plan", '{"lookback_days": 1000000}'),
+        ):
+            connection.execute(
+                """
+                INSERT INTO rules (
+                    type, symbol, name, asset_type, params_json,
+                    created_at, updated_at
+                )
+                VALUES (?, '510300', 'ETF', 'cn_etf', ?, ?, ?)
+                """,
+                (
+                    rule_type,
+                    params,
+                    "2026-01-01T00:00:00+00:00",
+                    "2026-01-01T00:00:00+00:00",
+                ),
+            )
+        connection.commit()
+
+        prune_database(connection, today=date(2026, 1, 1))
+    finally:
+        connection.close()

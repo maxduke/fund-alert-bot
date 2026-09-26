@@ -168,7 +168,7 @@ occurrence 和手动加仓估算；历史快照不会重算。因为它是基金
 ```
 
 可选的 `lookback:<days>` 和 `rearm:<percent>` 各最多出现一次，顺序任意；未知或重复
-选项会被拒绝。`lookback` 默认 365 个日历日，`rearm` 默认 2%；`rearm:4` 和
+选项会被拒绝。`lookback` 默认 365 个日历日（最大 3650，与 `/add_drawdown` 的 lookback_days 上限相同），`rearm` 默认 2%；`rearm:4` 和
 `rearm:4%` 都表示 4%。MA250 和 20 个交易日的 MA250 斜率只提供趋势背景，绝不会
 独立触发、取消或修改加仓金额。
 

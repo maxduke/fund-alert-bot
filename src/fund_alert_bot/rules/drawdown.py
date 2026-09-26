@@ -13,6 +13,8 @@ import pandas as pd
 AlertChecker = Callable[[str], bool]
 
 _THRESHOLD_TOLERANCE = 1e-12
+# Upper bound for calendar-day windows; larger values overflow date arithmetic.
+MAX_WINDOW_DAYS = 3650
 
 
 def calculate_drawdown_from_high(
@@ -24,8 +26,8 @@ def calculate_drawdown_from_high(
 
     if df.empty:
         raise ValueError("Market data is empty.")
-    if lookback_days <= 0:
-        raise ValueError("lookback_days must be positive.")
+    if lookback_days <= 0 or lookback_days > MAX_WINDOW_DAYS:
+        raise ValueError(f"lookback_days must be between 1 and {MAX_WINDOW_DAYS}.")
     if price_field not in df.columns:
         raise ValueError(f"Market data is missing price field: {price_field}")
     if "date" not in df.columns:
