@@ -15,9 +15,9 @@ import pandas as pd
 
 from fund_alert_bot.market_data.models import AssetType, RealtimeQuote
 from fund_alert_bot.notifications.base import TELEGRAM_TEXT_LIMIT
+from fund_alert_bot.rules._params import THRESHOLD_TOLERANCE, meets_threshold
 from fund_alert_bot.rules.drawdown import MAX_WINDOW_DAYS
 
-_THRESHOLD_TOLERANCE = 1e-12
 _PRICE_RELATIVE_TOLERANCE = 1e-4
 _PRICE_ABSOLUTE_TOLERANCE = 1e-6
 DEFAULT_REARM_MARGIN = 0.02
@@ -132,7 +132,7 @@ def select_actionable_tiers(
     return tuple(
         tier
         for tier in config.tiers
-        if drawdown + _THRESHOLD_TOLERANCE >= tier.drawdown
+        if meets_threshold(drawdown, tier.drawdown)
         and tier.key not in added
         and tier.key not in skipped
         and tier.key not in snoozed
@@ -266,8 +266,7 @@ def evaluate_drawdown_plan(
     crossed = tuple(
         tier
         for tier in config.tiers
-        if drawdown + _THRESHOLD_TOLERANCE >= tier.drawdown
-        and tier.key not in already_recorded
+        if meets_threshold(drawdown, tier.drawdown) and tier.key not in already_recorded
     )
     total_amount = sum((tier.amount for tier in crossed), start=0)
 
@@ -382,8 +381,7 @@ def evaluate_drawdown_plan_realtime(
     crossed = tuple(
         tier
         for tier in config.tiers
-        if drawdown + _THRESHOLD_TOLERANCE >= tier.drawdown
-        and tier.key not in already_recorded
+        if meets_threshold(drawdown, tier.drawdown) and tier.key not in already_recorded
     )
     return replace(
         confirmed,
@@ -1060,8 +1058,8 @@ def _recover_cycle(
             peak_date = current_date
             peak_price = current_price
             saw_below = False
-            changed = changed or (
-                peak_price / initial_peak_price - 1 + _THRESHOLD_TOLERANCE >= margin
+            changed = changed or meets_threshold(
+                peak_price / initial_peak_price - 1, margin
             )
         elif current_price < peak_price and not equal_peak:
             saw_below = True
@@ -1147,7 +1145,7 @@ def _format_trend(
     if evaluation.sma_slope is None:
         return (*lines, f"{label} trend: unavailable (insufficient history)")
     direction = "rising" if evaluation.sma_slope > 0 else "falling"
-    if math.isclose(evaluation.sma_slope, 0, abs_tol=_THRESHOLD_TOLERANCE):
+    if math.isclose(evaluation.sma_slope, 0, abs_tol=THRESHOLD_TOLERANCE):
         direction = "flat"
     return (
         *lines,

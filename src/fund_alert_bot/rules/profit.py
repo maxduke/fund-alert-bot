@@ -2,21 +2,31 @@
 
 from __future__ import annotations
 
-import json
 import math
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from datetime import date
+from functools import partial
 from types import SimpleNamespace
 from typing import Any
 
 import pandas as pd
 
 from fund_alert_bot.market_data import AssetType
+from fund_alert_bot.rules._params import (
+    meets_threshold,
+    read_params,
+    read_required_param,
+    read_required_rule_value,
+    read_rule_value,
+)
+
+_read_params = partial(read_params, subject="profit rule")
+_read_required_param = partial(read_required_param, subject="profit rule")
+_read_required_rule_value = partial(read_required_rule_value, subject="profit rule")
 
 AlertChecker = Callable[[str], bool]
 
-_THRESHOLD_TOLERANCE = 1e-12
 _TELEGRAM_TEXT_LIMIT = 4096
 
 
@@ -43,8 +53,8 @@ def build_profit_alerts(
     cost = _read_cost(params)
     thresholds = _read_thresholds(params)
     symbol = str(_read_required_rule_value(rule, "symbol"))
-    name = str(_read_rule_value(rule, "name", ""))
-    asset_type = str(_read_rule_value(rule, "asset_type", ""))
+    name = str(read_rule_value(rule, "name", ""))
+    asset_type = str(read_rule_value(rule, "asset_type", ""))
     current_price = _read_latest_close(
         latest,
         symbol=symbol,
@@ -58,7 +68,7 @@ def build_profit_alerts(
     alerts: list[dict[str, object]] = []
     seen_keys: set[str] = set()
     for threshold in thresholds:
-        if not _meets_threshold(profit_rate, threshold):
+        if not meets_threshold(profit_rate, threshold):
             continue
 
         alert_key = build_profit_alert_key(
@@ -164,9 +174,9 @@ def build_position_profit_alert(
     if params.get("cost") != "auto":
         raise ValueError("Position-linked Price-Gain rule must use auto cost.")
     thresholds = _read_thresholds(params)
-    units = _to_positive_float(_read_rule_value(position, "units", None), "units")
+    units = _to_positive_float(read_rule_value(position, "units", None), "units")
     cost = _to_positive_float(
-        _read_rule_value(position, "average_unit_cost", None),
+        read_rule_value(position, "average_unit_cost", None),
         "average_unit_cost",
     )
     nav_value = _to_positive_float(getattr(nav, "value", None), "unit_nav")
@@ -177,15 +187,15 @@ def build_position_profit_alert(
     crossed = tuple(
         (format_profit_threshold_key(threshold), threshold)
         for threshold in thresholds
-        if _meets_threshold(profit_rate, threshold)
+        if meets_threshold(profit_rate, threshold)
         and format_profit_threshold_key(threshold) not in recorded_threshold_keys
     )
     if not crossed:
         return None
-    name = str(_read_rule_value(rule, "name", ""))
+    name = str(read_rule_value(rule, "name", ""))
     accuracy = (
         "estimated"
-        if bool(_read_rule_value(position, "is_estimated", False))
+        if bool(read_rule_value(position, "is_estimated", False))
         else "exact"
     )
     threshold_lines = tuple(f"• {value:.1%}" for _key, value in crossed)
@@ -248,22 +258,6 @@ def latest_unavailable_message(*, symbol: str, asset_type: str) -> str:
     return f"Latest {_price_name(asset_type)} is unavailable for {symbol}."
 
 
-def _read_params(rule: Any) -> dict[str, Any]:
-    params = _read_rule_value(rule, "params", None)
-    if params is None:
-        params = _read_rule_value(rule, "params_json", None)
-    if params is None:
-        return {}
-    if isinstance(params, str):
-        loaded = json.loads(params)
-        if not isinstance(loaded, dict):
-            raise ValueError("profit rule params_json must contain a JSON object.")
-        return loaded
-    if isinstance(params, Mapping):
-        return dict(params)
-    raise ValueError("profit rule params must be a mapping or JSON object string.")
-
-
 def _read_cost(params: Mapping[str, Any]) -> float:
     raw_cost = _read_required_param(params, "cost")
     return _to_positive_float(raw_cost, "cost")
@@ -283,36 +277,6 @@ def _read_thresholds(params: Mapping[str, Any]) -> list[float]:
     ):
         raise ValueError("profit thresholds must be between 0 and 1.")
     return thresholds
-
-
-def _read_required_param(params: Mapping[str, Any], key: str) -> Any:
-    if key not in params:
-        raise ValueError(f"profit rule missing required param: {key}")
-    return params[key]
-
-
-def _read_required_rule_value(rule: Any, key: str) -> Any:
-    value = _read_rule_value(rule, key, None)
-    if value is None:
-        raise ValueError(f"profit rule missing required field: {key}")
-    return value
-
-
-def _read_rule_value(rule: Any, key: str, default: Any) -> Any:
-    if isinstance(rule, Mapping):
-        return rule.get(key, default)
-
-    keys = getattr(rule, "keys", None)
-    if callable(keys) and key in keys():
-        return rule[key]
-
-    if hasattr(rule, key):
-        return getattr(rule, key)
-
-    try:
-        return rule[key]
-    except (KeyError, IndexError, TypeError):
-        return default
 
 
 def _read_latest_close(
@@ -381,10 +345,6 @@ def _build_message(
             "No trade has been placed.",
         )
     )
-
-
-def _meets_threshold(profit_rate: float, threshold: float) -> bool:
-    return profit_rate + _THRESHOLD_TOLERANCE >= threshold
 
 
 def _to_positive_float(value: object, label: str) -> float:
