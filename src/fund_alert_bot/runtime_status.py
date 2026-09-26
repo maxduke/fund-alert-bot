@@ -85,7 +85,15 @@ def _persist_run(
         row = connection.execute(
             "SELECT value FROM app_metadata WHERE key = ?", (key,)
         ).fetchone()
-        state = {} if row is None else json.loads(row["value"])
+        state = None
+        if row is not None:
+            try:
+                state = json.loads(row["value"])
+            except (TypeError, ValueError):
+                pass
+        if not isinstance(state, dict):
+            # Replace an unreadable record rather than failing every later save.
+            state = {}
         now = datetime.now(UTC).isoformat()
         if result is None:
             state.update(
@@ -119,6 +127,13 @@ def _persist_run(
             (key, json.dumps(state), now),
         )
         connection.commit()
+
+
+def _readable_state(state: object) -> bool:
+    if not isinstance(state, dict):
+        return False
+    outcome = state.get("outcome")
+    return isinstance(outcome, str) and outcome in _OUTCOMES
 
 
 async def _save_run(*args: Any) -> None:
@@ -195,7 +210,7 @@ def format_runtime_status(sqlite_path: str | Path, *, timezone: str) -> str:
                 state = json.loads(row["value"])
             except (TypeError, ValueError):
                 state = None
-            if not isinstance(state, dict) or state.get("outcome") not in _OUTCOMES:
+            if not _readable_state(state):
                 # One unreadable record must not hide every other job's status.
                 lines.append(f"• {label}: {localize_text('Unreadable status record')}")
                 continue
