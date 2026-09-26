@@ -16,6 +16,7 @@ from fund_alert_bot.rules._params import (
     read_rule_value,
 )
 
+# Params errors historically say "rule", not the rule-specific subject.
 _read_params = partial(read_params, subject="rule")
 _read_required_param = partial(read_required_param, subject="DCA rule")
 _read_required_rule_value = partial(read_required_rule_value, subject="DCA rule")
