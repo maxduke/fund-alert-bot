@@ -2,12 +2,23 @@
 
 from __future__ import annotations
 
-import json
 import math
 from collections.abc import Callable, Mapping
 from datetime import UTC, date, datetime, tzinfo
+from functools import partial
 from typing import Any
 from zoneinfo import ZoneInfo
+
+from fund_alert_bot.rules._params import (
+    read_params,
+    read_required_param,
+    read_required_rule_value,
+    read_rule_value,
+)
+
+_read_params = partial(read_params, subject="rule")
+_read_required_param = partial(read_required_param, subject="DCA rule")
+_read_required_rule_value = partial(read_required_rule_value, subject="DCA rule")
 
 AlertChecker = Callable[[str], bool]
 
@@ -76,13 +87,13 @@ def build_dca_reminder_alert(
         return None
 
     amount = _read_amount(params)
-    name = str(_read_rule_value(rule, "name", ""))
+    name = str(read_rule_value(rule, "name", ""))
     due_date = today.isoformat()
-    enhanced = str(_read_rule_value(rule, "asset_type", "")) == "cn_open_fund"
+    enhanced = str(read_rule_value(rule, "asset_type", "")) == "cn_open_fund"
     if enhanced:
         if occurrence_amount is not None:
             amount = _read_amount({"amount": occurrence_amount})
-        fund_symbol = str(_read_rule_value(rule, "symbol", ""))
+        fund_symbol = str(read_rule_value(rule, "symbol", ""))
         holiday_policy = str(params.get("holiday_policy", "next"))
         status_line = (
             "Holiday policy skipped this occurrence; no position estimate will apply."
@@ -174,28 +185,6 @@ def rule_creation_date(rule: Any, timezone: str | tzinfo) -> date:
     return created_at.astimezone(zone).date()
 
 
-def _read_params(rule: Any) -> dict[str, Any]:
-    params = _read_rule_value(rule, "params", None)
-    if params is None:
-        params = _read_rule_value(rule, "params_json", None)
-    if params is None:
-        return {}
-    if isinstance(params, str):
-        loaded = json.loads(params)
-        if not isinstance(loaded, dict):
-            raise ValueError("rule params_json must contain a JSON object.")
-        return loaded
-    if isinstance(params, Mapping):
-        return dict(params)
-    raise ValueError("rule params must be a mapping or JSON object string.")
-
-
-def _read_required_param(params: Mapping[str, Any], key: str) -> Any:
-    if key not in params:
-        raise ValueError(f"DCA rule missing required param: {key}")
-    return params[key]
-
-
 def _read_amount(params: Mapping[str, Any]) -> int | float:
     raw_amount = _read_required_param(params, "amount")
     if isinstance(raw_amount, bool):
@@ -212,30 +201,6 @@ def _read_amount(params: Mapping[str, Any]) -> int | float:
     if amount.is_integer():
         return int(amount)
     return amount
-
-
-def _read_required_rule_value(rule: Any, key: str) -> Any:
-    value = _read_rule_value(rule, key, None)
-    if value is None:
-        raise ValueError(f"DCA rule missing required field: {key}")
-    return value
-
-
-def _read_rule_value(rule: Any, key: str, default: Any) -> Any:
-    if isinstance(rule, Mapping):
-        return rule.get(key, default)
-
-    keys = getattr(rule, "keys", None)
-    if callable(keys) and key in keys():
-        return rule[key]
-
-    if hasattr(rule, key):
-        return getattr(rule, key)
-
-    try:
-        return rule[key]
-    except (KeyError, IndexError, TypeError):
-        return default
 
 
 def format_dca_amount(amount: int | float) -> str:

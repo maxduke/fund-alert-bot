@@ -2,17 +2,28 @@
 
 from __future__ import annotations
 
-import json
 import math
 from collections.abc import Callable, Mapping, Sequence
 from datetime import timedelta
+from functools import partial
 from typing import Any
 
 import pandas as pd
 
+from fund_alert_bot.rules._params import (
+    meets_threshold,
+    read_params,
+    read_required_param,
+    read_required_rule_value,
+    read_rule_value,
+)
+
+_read_params = partial(read_params, subject="rule")
+_read_required_param = partial(read_required_param, subject="drawdown rule")
+_read_required_rule_value = partial(read_required_rule_value, subject="drawdown rule")
+
 AlertChecker = Callable[[str], bool]
 
-_THRESHOLD_TOLERANCE = 1e-12
 # Upper bound for calendar-day windows; larger values overflow date arithmetic.
 MAX_WINDOW_DAYS = 3650
 
@@ -90,13 +101,13 @@ def build_drawdown_alerts(
     )
     drawdown = float(result["drawdown"])
     symbol = str(_read_required_rule_value(rule, "symbol"))
-    name = str(_read_rule_value(rule, "name", ""))
-    asset_type = str(_read_rule_value(rule, "asset_type", ""))
+    name = str(read_rule_value(rule, "name", ""))
+    asset_type = str(read_rule_value(rule, "asset_type", ""))
 
     alerts: list[dict[str, object]] = []
     seen_keys: set[str] = set()
     for threshold in thresholds:
-        if not _meets_threshold(drawdown, threshold):
+        if not meets_threshold(drawdown, threshold):
             continue
 
         alert_key = _build_alert_key(
@@ -178,28 +189,6 @@ def _format_price(value: float) -> str:
     return f"{value:.12g}"
 
 
-def _read_params(rule: Any) -> dict[str, Any]:
-    params = _read_rule_value(rule, "params", None)
-    if params is None:
-        params = _read_rule_value(rule, "params_json", None)
-    if params is None:
-        return {}
-    if isinstance(params, str):
-        loaded = json.loads(params)
-        if not isinstance(loaded, dict):
-            raise ValueError("rule params_json must contain a JSON object.")
-        return loaded
-    if isinstance(params, Mapping):
-        return dict(params)
-    raise ValueError("rule params must be a mapping or JSON object string.")
-
-
-def _read_required_param(params: Mapping[str, Any], key: str) -> Any:
-    if key not in params:
-        raise ValueError(f"drawdown rule missing required param: {key}")
-    return params[key]
-
-
 def _read_thresholds(params: Mapping[str, Any]) -> list[float]:
     raw_thresholds = _read_required_param(params, "thresholds")
     if isinstance(raw_thresholds, str) or not isinstance(raw_thresholds, Sequence):
@@ -214,30 +203,6 @@ def _read_thresholds(params: Mapping[str, Any]) -> list[float]:
     ):
         raise ValueError("thresholds must be between 0 and 1.")
     return thresholds
-
-
-def _read_required_rule_value(rule: Any, key: str) -> Any:
-    value = _read_rule_value(rule, key, None)
-    if value is None:
-        raise ValueError(f"drawdown rule missing required field: {key}")
-    return value
-
-
-def _read_rule_value(rule: Any, key: str, default: Any) -> Any:
-    if isinstance(rule, Mapping):
-        return rule.get(key, default)
-
-    keys = getattr(rule, "keys", None)
-    if callable(keys) and key in keys():
-        return rule[key]
-
-    if hasattr(rule, key):
-        return getattr(rule, key)
-
-    try:
-        return rule[key]
-    except (KeyError, IndexError, TypeError):
-        return default
 
 
 def _read_optional_row_value(row: pd.Series, key: str) -> object | None:
@@ -260,10 +225,6 @@ def _build_alert_key(
         f"{symbol}:drawdown:{lookback_days}:peak:{peak_date}:"
         f"threshold:{_format_threshold(threshold)}"
     )
-
-
-def _meets_threshold(drawdown: float, threshold: float) -> bool:
-    return drawdown + _THRESHOLD_TOLERANCE >= threshold
 
 
 def _to_float(value: object, label: str) -> float:
