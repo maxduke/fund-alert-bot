@@ -1238,6 +1238,7 @@ def test_standard_notification_retry_survives_restart_and_keeps_current_dca_acti
             """,
             (dca_rule_id,),
         )
+        connection.commit()
         assert delete_rule(connection, legacy_dca_rule_id)
         replacement_rule_id = add_rule(
             connection,
@@ -1258,6 +1259,7 @@ def test_standard_notification_retry_survives_restart_and_keeps_current_dca_acti
             """,
             (replacement_rule_id,),
         )
+        connection.commit()
         assert delete_rule(connection, profit_rule_id)
         connection.commit()
 
