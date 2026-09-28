@@ -84,6 +84,8 @@ process-liveness check, not evidence that evaluations succeeded.
 DCA catch-up excludes dates before each rule's creation date in the configured
 timezone. Pre-creation pending occurrences left by older releases remain
 available for explicit reconciliation but cannot update a position estimate.
+Startup replays missed DCA dates before NAV settlement and position-profit
+evaluation, so recovered contributions are reflected in the later check.
 
 ### Notifications
 
@@ -92,6 +94,18 @@ Responsible for formatting and sending messages through configured notification 
 Telegram should use `python-telegram-bot`. Other channels can use small adapters backed by `requests` when needed.
 
 Notification modules should receive already-evaluated alert events. They should not fetch market data or decide whether an alert is due.
+
+The first dispatch freezes an event's configured delivery targets in SQLite.
+Retries use those rows, so later channel or recipient additions do not expand an
+older event. At startup, the service compares unfinished frozen targets with the
+full current notification configuration. It marks removed targets `cancelled`,
+revokes their claims, and retains prior failure details and a cancellation reason
+and timestamp in `result_json`. Re-adding a target does not revive a cancelled
+row. An event is `sent` only when every target was sent; an event whose targets
+are all sent or cancelled, with at least one cancellation, is `cancelled`.
+Remaining active failed targets continue to retry. `/status` counts cancelled
+targets separately from failed and pending targets. Terminal cancelled history
+follows the same retention and deduplication safeguards as sent history.
 
 ### Telegram Commands
 

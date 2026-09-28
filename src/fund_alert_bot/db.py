@@ -27,10 +27,12 @@ from fund_alert_bot.rules.drawdown_plan import (
 ALERT_NOTIFICATION_PENDING = "pending"
 ALERT_NOTIFICATION_SENT = "sent"
 ALERT_NOTIFICATION_FAILED = "failed"
+ALERT_NOTIFICATION_CANCELLED = "cancelled"
 RETRYABLE_ALERT_NOTIFICATION_STATUSES = frozenset({ALERT_NOTIFICATION_FAILED})
 SUPPRESSING_ALERT_NOTIFICATION_STATUSES = (
     ALERT_NOTIFICATION_PENDING,
     ALERT_NOTIFICATION_SENT,
+    ALERT_NOTIFICATION_CANCELLED,
 )
 STANDARD_NOTIFICATION_RECOVERY_MIGRATION_KEY = "standard_notification_recovery_v1"
 STANDARD_NOTIFICATION_RECOVERY_NOTICE_TITLE = "Reminder recovery notice"
@@ -39,6 +41,7 @@ NOTIFICATION_DELIVERY_PENDING = "pending"
 NOTIFICATION_DELIVERY_SENDING = "sending"
 NOTIFICATION_DELIVERY_SENT = "sent"
 NOTIFICATION_DELIVERY_FAILED = "failed"
+NOTIFICATION_DELIVERY_CANCELLED = "cancelled"
 NOTIFICATION_DELIVERY_CLAIM_LEASE_SECONDS = 120
 _CN_TIMEZONE = ZoneInfo("Asia/Shanghai")
 
@@ -129,7 +132,7 @@ def init_db(connection: sqlite3.Connection) -> None:
             target_key TEXT NOT NULL,
             channel TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'pending' CHECK (
-                status IN ('pending', 'sending', 'sent', 'failed')
+                status IN ('pending', 'sending', 'sent', 'failed', 'cancelled')
             ),
             claim_token TEXT,
             claim_until TEXT,
@@ -374,6 +377,7 @@ def init_db(connection: sqlite3.Connection) -> None:
         ON fund_nav_history(fund_symbol, nav_date);
         """
     )
+    _ensure_notification_delivery_cancelled_status(connection)
     delivery_columns_added = _ensure_alert_event_delivery_columns(connection)
     _migrate_monotonic_ids(connection)
     _ensure_manual_add_action_source_event_nullable(connection)
@@ -406,6 +410,67 @@ def init_db(connection: sqlite3.Connection) -> None:
 def initialize_database(connection: sqlite3.Connection) -> None:
     """Backward-compatible alias for database initialization."""
     init_db(connection)
+
+
+def _ensure_notification_delivery_cancelled_status(
+    connection: sqlite3.Connection,
+) -> None:
+    """Upgrade the old delivery CHECK constraint without discarding delivery state."""
+
+    schema = _table_schema_sql(connection, "notification_deliveries")
+    if schema is None:
+        raise RuntimeError("Missing notification_deliveries table.")
+    if "'cancelled'" in schema:
+        return
+
+    objects = [
+        str(row[0])
+        for row in connection.execute(
+            """
+            SELECT sql FROM sqlite_master
+            WHERE tbl_name = 'notification_deliveries'
+                AND type IN ('index', 'trigger') AND sql IS NOT NULL
+            ORDER BY type, name
+            """
+        )
+    ]
+    with write_transaction(connection):
+        connection.execute(
+            """
+            CREATE TABLE notification_deliveries__cancelled_migration (
+                event_id INTEGER NOT NULL REFERENCES alert_events(id) ON DELETE CASCADE,
+                target_key TEXT NOT NULL,
+                channel TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending' CHECK (
+                    status IN ('pending', 'sending', 'sent', 'failed', 'cancelled')
+                ),
+                claim_token TEXT,
+                claim_until TEXT,
+                attempted_at TEXT,
+                sent_at TEXT,
+                result_json TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (event_id, target_key)
+            )
+            """
+        )
+        columns = (
+            "event_id, target_key, channel, status, claim_token, claim_until, "
+            "attempted_at, sent_at, result_json, created_at, updated_at"
+        )
+        connection.execute(
+            f"INSERT INTO notification_deliveries__cancelled_migration ({columns}) "
+            f"SELECT {columns} FROM notification_deliveries"
+        )
+        connection.execute("DROP TABLE notification_deliveries")
+        connection.execute(
+            "ALTER TABLE notification_deliveries__cancelled_migration "
+            "RENAME TO notification_deliveries"
+        )
+        for statement in objects:
+            connection.execute(statement)
+        _assert_foreign_keys_clean(connection)
 
 
 _PRUNE_TABLES = (
@@ -860,19 +925,21 @@ def _prune_alert_events(
         SELECT id, rule_id, alert_key, title, payload_json
         FROM alert_events AS event
         WHERE substr(event.triggered_at, 1, 10) < ?
-            AND event.notification_status = ?
+            AND event.notification_status IN (?, ?)
             AND NOT EXISTS (
                 SELECT 1
                 FROM notification_deliveries AS delivery
                 WHERE delivery.event_id = event.id
-                    AND delivery.status != ?
+                    AND delivery.status NOT IN (?, ?)
             )
         ORDER BY event.id
         """,
         (
             cutoff.isoformat(),
             ALERT_NOTIFICATION_SENT,
+            ALERT_NOTIFICATION_CANCELLED,
             NOTIFICATION_DELIVERY_SENT,
+            NOTIFICATION_DELIVERY_CANCELLED,
         ),
     ).fetchall()
     for row in rows:
@@ -3384,7 +3451,7 @@ def alert_exists(connection: sqlite3.Connection, alert_key: str) -> bool:
         SELECT 1
         FROM alert_events
         WHERE alert_key = ?
-            AND notification_status IN (?, ?)
+            AND notification_status IN (?, ?, ?)
         LIMIT 1
         """,
         (
@@ -3634,10 +3701,10 @@ def ensure_notification_delivery_targets(
                 "SELECT notification_status FROM alert_events WHERE id = ?",
                 (event_id,),
             ).fetchone()
-            if (
-                event is None
-                or str(event["notification_status"]) == ALERT_NOTIFICATION_SENT
-            ):
+            if event is None or str(event["notification_status"]) in {
+                ALERT_NOTIFICATION_SENT,
+                ALERT_NOTIFICATION_CANCELLED,
+            }:
                 continue
             if (
                 connection.execute(
@@ -3663,6 +3730,75 @@ def ensure_notification_delivery_targets(
                     for target_key, channel in normalized_targets
                 ],
             )
+
+
+def cancel_removed_notification_targets(
+    connection: sqlite3.Connection,
+    *,
+    active_target_keys: Sequence[str],
+) -> int:
+    """Cancel unfinished frozen targets absent from the full startup configuration.
+
+    A cancellation retains the prior result and revokes any delivery claim. It
+    cannot be revived by a later configuration change.
+    """
+
+    active_keys = {str(key) for key in active_target_keys}
+    if any(not key for key in active_keys):
+        raise ValueError("Notification target keys must be non-empty.")
+    with write_transaction(connection):
+        rows = connection.execute(
+            """
+            SELECT event_id, target_key, result_json
+            FROM notification_deliveries
+            WHERE status IN (?, ?, ?)
+            ORDER BY event_id, target_key
+            """,
+            (
+                NOTIFICATION_DELIVERY_PENDING,
+                NOTIFICATION_DELIVERY_SENDING,
+                NOTIFICATION_DELIVERY_FAILED,
+            ),
+        ).fetchall()
+        now = _utc_now_text()
+        affected_event_ids: set[int] = set()
+        cancelled = 0
+        for row in rows:
+            if str(row["target_key"]) in active_keys:
+                continue
+            previous = row["result_json"]
+            try:
+                payload = json.loads(str(previous)) if previous is not None else {}
+            except json.JSONDecodeError:
+                payload = {"previous_result_json": str(previous)}
+            if not isinstance(payload, dict):
+                payload = {"previous_result": payload}
+            payload = dict(payload)
+            payload["cancellation"] = {
+                "reason": "target_removed_from_configuration",
+                "at": now,
+            }
+            connection.execute(
+                """
+                UPDATE notification_deliveries
+                SET status = ?, claim_token = NULL, claim_until = NULL,
+                    result_json = ?, updated_at = ?
+                WHERE event_id = ? AND target_key = ?
+                """,
+                (
+                    NOTIFICATION_DELIVERY_CANCELLED,
+                    _json_text(payload),
+                    now,
+                    int(row["event_id"]),
+                    str(row["target_key"]),
+                ),
+            )
+            affected_event_ids.add(int(row["event_id"]))
+            cancelled += 1
+        for event_id in sorted(affected_event_ids):
+            _refresh_alert_notification_status(connection, event_id=event_id)
+
+    return cancelled
 
 
 def claim_notification_deliveries(
@@ -3859,6 +3995,11 @@ def _refresh_alert_notification_status(
             NOTIFICATION_DELIVERY_SENDING,
         }:
             status = ALERT_NOTIFICATION_PENDING
+        elif statuses <= {
+            NOTIFICATION_DELIVERY_SENT,
+            NOTIFICATION_DELIVERY_CANCELLED,
+        }:
+            status = ALERT_NOTIFICATION_CANCELLED
         else:
             status = ALERT_NOTIFICATION_FAILED
         attempted_values = [

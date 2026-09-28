@@ -10,7 +10,12 @@ from zoneinfo import ZoneInfo
 
 from fund_alert_bot.commands import create_application, publish_bot_command_menu
 from fund_alert_bot.config import load_settings
-from fund_alert_bot.db import initialize_database, open_connection, prune_database
+from fund_alert_bot.db import (
+    cancel_removed_notification_targets,
+    initialize_database,
+    open_connection,
+    prune_database,
+)
 from fund_alert_bot.i18n import set_language
 from fund_alert_bot.market_data import (
     AkshareMarketDataProvider,
@@ -89,13 +94,25 @@ def run() -> None:
     scheduler = create_scheduler(timezone=settings.timezone)
 
     async def start_scheduler(application) -> None:
+        notification_service = build_notification_service(
+            settings=settings.notifications,
+            telegram_bot=application.bot,
+            telegram_chat_ids=settings.telegram_allowed_user_ids,
+        )
+        # Reconcile only against the full startup configuration. Commands may
+        # build services scoped to one chat and must not retire other targets.
+        with open_connection(settings.sqlite_path) as connection:
+            cancelled = cancel_removed_notification_targets(
+                connection,
+                active_target_keys=tuple(
+                    key for key, _channel in notification_service.delivery_targets
+                ),
+            )
+        LOGGER.info(
+            "Cancelled deliveries to removed notification targets: %d", cancelled
+        )
         await publish_bot_command_menu(application)
         if settings.akshare_proxy_enabled and not proxy_active:
-            notification_service = build_notification_service(
-                settings=settings.notifications,
-                telegram_bot=application.bot,
-                telegram_chat_ids=settings.telegram_allowed_user_ids,
-            )
             await notification_service.send_alert(
                 title="Paid proxy not enabled",
                 body=(
@@ -124,6 +141,22 @@ def run() -> None:
         LOGGER.info("APScheduler started")
 
         async def startup_catchup() -> None:
+            # Materialize missed deductions before settling NAVs and evaluating
+            # position-linked gains, so both use the recovered position cost.
+            try:
+                await run_due_dca_checks(
+                    application=application,
+                    sqlite_path=settings.sqlite_path,
+                    allowed_user_ids=settings.telegram_allowed_user_ids,
+                    timezone=settings.timezone,
+                    reminder_time=settings.dca_reminder_time,
+                    market_calendar=market_calendar,
+                    notification_settings=settings.notifications,
+                    work_lock=work_lock,
+                )
+            except Exception:
+                LOGGER.exception("Startup DCA reminder catch-up failed")
+                return
             try:
                 await run_scheduled_fund_nav_process(
                     application=application,
@@ -138,19 +171,6 @@ def run() -> None:
                 )
             except Exception:
                 LOGGER.exception("Startup feeder-fund NAV catch-up failed")
-            try:
-                await run_due_dca_checks(
-                    application=application,
-                    sqlite_path=settings.sqlite_path,
-                    allowed_user_ids=settings.telegram_allowed_user_ids,
-                    timezone=settings.timezone,
-                    reminder_time=settings.dca_reminder_time,
-                    market_calendar=market_calendar,
-                    notification_settings=settings.notifications,
-                    work_lock=work_lock,
-                )
-            except Exception:
-                LOGGER.exception("Startup DCA reminder catch-up failed")
 
         application.create_task(startup_catchup())
 

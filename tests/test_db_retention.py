@@ -6,7 +6,9 @@ from fund_alert_bot.db import (
     DEFAULT_RETENTION_DAYS,
     add_alert_event,
     add_rule,
+    cancel_removed_notification_targets,
     connect,
+    ensure_notification_delivery_targets,
     init_db,
     prune_database,
     upsert_fund_nav,
@@ -403,6 +405,60 @@ def test_prune_preserves_every_undelivered_alert_and_target() -> None:
             ).fetchone()[0]
             == 4
         )
+    finally:
+        connection.close()
+
+
+def test_prune_can_expire_cancelled_history_under_existing_dedupe_rules() -> None:
+    connection = connect(":memory:")
+    try:
+        init_db(connection)
+        rule_id = add_rule(
+            connection,
+            type="drawdown_plan",
+            symbol="510300",
+            name="Plan",
+            asset_type="cn_etf",
+            params={"investment_fund_symbol": "000001", "tiers": []},
+        )
+        old_event = add_alert_event(
+            connection,
+            rule_id=rule_id,
+            alert_key="1:drawdown_plan:after_close:2020-01-01",
+            title="Drawdown plan reminder",
+            message="old",
+            payload={"phase": "after_close"},
+            triggered_at="2020-01-01",
+        )
+        unknown_event = add_alert_event(
+            connection,
+            rule_id=rule_id,
+            alert_key="future-alert-type:dedupe-key-cancelled",
+            title="Future reminder",
+            message="unknown",
+            triggered_at="2020-01-01",
+        )
+        for event_id in (old_event, unknown_event):
+            ensure_notification_delivery_targets(
+                connection,
+                event_ids=[event_id],
+                targets=[("removed", "test")],
+            )
+        assert (
+            cancel_removed_notification_targets(connection, active_target_keys=[]) == 2
+        )
+        counts = prune_database(connection, today=date(2026, 1, 1))
+        assert counts["alert_events"] == 1
+        assert [
+            row[0]
+            for row in connection.execute("SELECT id FROM alert_events ORDER BY id")
+        ] == [unknown_event]
+        assert [
+            row[0]
+            for row in connection.execute(
+                "SELECT event_id FROM notification_deliveries"
+            )
+        ] == [unknown_event]
     finally:
         connection.close()
 

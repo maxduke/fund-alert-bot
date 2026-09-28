@@ -4,20 +4,25 @@ import asyncio
 import hashlib
 import json
 import logging
+import sqlite3
 from pathlib import Path
 
 import pytest
 
 from fund_alert_bot.checks import AlertNotification, DcaNotificationSummary
 from fund_alert_bot.db import (
+    ALERT_NOTIFICATION_CANCELLED,
     ALERT_NOTIFICATION_SENT,
     NotificationDeliveryClaim,
     add_alert_event,
+    cancel_removed_notification_targets,
     claim_notification_deliveries,
     complete_notification_delivery,
     ensure_notification_delivery_targets,
     initialize_database,
     open_connection,
+    refresh_alert_notification_status,
+    reserve_alert_event,
 )
 from fund_alert_bot.notifications import dispatch
 from fund_alert_bot.notifications.base import NotificationMessage, NotificationResult
@@ -511,3 +516,215 @@ def _status(sqlite_path: Path, event_id: int) -> str:
                 (event_id,),
             ).fetchone()[0]
         )
+
+
+def test_removed_target_cancellation_keeps_success_and_prior_failure(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "alerts.sqlite3"
+    with open_connection(path) as connection:
+        initialize_database(connection)
+        event_id = _add_event(connection, "removed-partial")
+        ensure_notification_delivery_targets(
+            connection,
+            event_ids=[event_id],
+            targets=[("active", "test"), ("removed", "test")],
+        )
+        claims = claim_notification_deliveries(connection, event_ids=[event_id])
+        for claim in claims:
+            complete_notification_delivery(
+                connection,
+                event_id=event_id,
+                target_key=claim.target_key,
+                claim_token=claim.claim_token,
+                result=NotificationResult(
+                    channel="test",
+                    success=claim.target_key == "active",
+                    detail="network_error" if claim.target_key == "removed" else "",
+                ),
+            )
+        assert (
+            cancel_removed_notification_targets(
+                connection, active_target_keys=["active"]
+            )
+            == 1
+        )
+        assert (
+            cancel_removed_notification_targets(
+                connection, active_target_keys=["active"]
+            )
+            == 0
+        )
+        rows = connection.execute(
+            "SELECT target_key, status, result_json FROM notification_deliveries "
+            "WHERE event_id = ? ORDER BY target_key",
+            (event_id,),
+        ).fetchall()
+        assert [(row["target_key"], row["status"]) for row in rows] == [
+            ("active", "sent"),
+            ("removed", "cancelled"),
+        ]
+        removed_result = json.loads(rows[1]["result_json"])
+        assert removed_result["detail"] == "network_error"
+        assert (
+            removed_result["cancellation"]["reason"]
+            == "target_removed_from_configuration"
+        )
+        assert removed_result["cancellation"]["at"]
+        assert not claim_notification_deliveries(connection, event_ids=[event_id])
+        ensure_notification_delivery_targets(
+            connection,
+            event_ids=[event_id],
+            targets=[("active", "test"), ("removed", "test"), ("new", "test")],
+        )
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM notification_deliveries WHERE event_id = ?",
+                (event_id,),
+            ).fetchone()[0]
+            == 2
+        )
+    assert _status(path, event_id) == ALERT_NOTIFICATION_CANCELLED
+
+
+def test_all_removed_targets_cancel_and_do_not_reopen_event(tmp_path: Path) -> None:
+    path = tmp_path / "alerts.sqlite3"
+    with open_connection(path) as connection:
+        initialize_database(connection)
+        event_id = _add_event(connection, "all-removed")
+        ensure_notification_delivery_targets(
+            connection, event_ids=[event_id], targets=[("removed", "test")]
+        )
+        assert (
+            cancel_removed_notification_targets(connection, active_target_keys=[]) == 1
+        )
+        refresh_alert_notification_status(connection, event_ids=[event_id])
+        assert (
+            connection.execute(
+                "SELECT notification_sent_at FROM alert_events WHERE id = ?",
+                (event_id,),
+            ).fetchone()[0]
+            is None
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            reserve_alert_event(
+                connection,
+                rule_id=1,
+                alert_key="all-removed",
+                title="Reminder",
+                message="again",
+            )
+    assert _status(path, event_id) == ALERT_NOTIFICATION_CANCELLED
+
+    summary = asyncio.run(
+        send_alert_notifications(
+            sqlite_path=path,
+            notification_service=NotificationService([]),
+            notifications=[_notification(event_id, "all removed")],
+        )
+    )
+    assert (summary.delivered, summary.failed, summary.cancelled) == (0, 0, 1)
+
+
+def test_cancellation_keeps_active_failed_target_retryable_and_revokes_claim(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "alerts.sqlite3"
+    with open_connection(path) as connection:
+        initialize_database(connection)
+        event_id = _add_event(connection, "mixed-removal")
+        ensure_notification_delivery_targets(
+            connection,
+            event_ids=[event_id],
+            targets=[("active", "test"), ("removed", "test")],
+        )
+        claims = claim_notification_deliveries(connection, event_ids=[event_id])
+        removed_claim = next(c for c in claims if c.target_key == "removed")
+        active_claim = next(c for c in claims if c.target_key == "active")
+        complete_notification_delivery(
+            connection,
+            event_id=event_id,
+            target_key="active",
+            claim_token=active_claim.claim_token,
+            result=NotificationResult(channel="test", success=False, detail="offline"),
+        )
+        assert (
+            cancel_removed_notification_targets(
+                connection, active_target_keys=["active"]
+            )
+            == 1
+        )
+        assert not complete_notification_delivery(
+            connection,
+            event_id=event_id,
+            target_key="removed",
+            claim_token=removed_claim.claim_token,
+            result=NotificationResult(channel="test", success=True),
+        )
+        retry = claim_notification_deliveries(connection, event_ids=[event_id])
+        assert [claim.target_key for claim in retry] == ["active"]
+        complete_notification_delivery(
+            connection,
+            event_id=event_id,
+            target_key="active",
+            claim_token=retry[0].claim_token,
+            result=NotificationResult(channel="test", success=True),
+        )
+    assert _status(path, event_id) == ALERT_NOTIFICATION_CANCELLED
+
+
+def test_old_delivery_constraint_migrates_without_losing_state_or_indexes(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "alerts.sqlite3"
+    with open_connection(path) as connection:
+        initialize_database(connection)
+        event_id = _add_event(connection, "legacy-check")
+        connection.execute("DROP TABLE notification_deliveries")
+        connection.execute(
+            """
+            CREATE TABLE notification_deliveries (
+                event_id INTEGER NOT NULL REFERENCES alert_events(id) ON DELETE CASCADE,
+                target_key TEXT NOT NULL, channel TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending' CHECK (
+                    status IN ('pending', 'sending', 'sent', 'failed')
+                ),
+                claim_token TEXT, claim_until TEXT, attempted_at TEXT, sent_at TEXT,
+                result_json TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                PRIMARY KEY (event_id, target_key)
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX notification_deliveries_claim_lookup "
+            "ON notification_deliveries(status, claim_until, event_id)"
+        )
+        connection.execute(
+            "CREATE INDEX legacy_delivery_test_index "
+            "ON notification_deliveries(channel)"
+        )
+        connection.execute(
+            "INSERT INTO notification_deliveries VALUES "
+            "(?, 'removed', 'test', 'sending', 'token', '2026-01-01', "
+            "'2026-01-01', NULL, ?, '2026-01-01', '2026-01-01')",
+            (event_id, '{"detail":"prior failure"}'),
+        )
+        connection.commit()
+        initialize_database(connection)
+        initialize_database(connection)
+        row = connection.execute(
+            "SELECT * FROM notification_deliveries WHERE event_id = ?", (event_id,)
+        ).fetchone()
+        assert row["claim_token"] == "token"
+        assert json.loads(row["result_json"])["detail"] == "prior failure"
+        assert {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index' "
+                "AND tbl_name = 'notification_deliveries'"
+            )
+        } >= {"notification_deliveries_claim_lookup", "legacy_delivery_test_index"}
+        assert (
+            cancel_removed_notification_targets(connection, active_target_keys=[]) == 1
+        )
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
