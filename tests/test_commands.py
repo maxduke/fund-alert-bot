@@ -3099,7 +3099,7 @@ def test_test_notify_sends_to_enabled_channels(monkeypatch) -> None:
         return FakeResponse(status_code=200)
 
     monkeypatch.setattr(
-        "fund_alert_bot.notifications.webhook.requests.post",
+        "fund_alert_bot.notifications.http_delivery.requests.post",
         fake_post,
     )
     handlers = build_command_handlers(

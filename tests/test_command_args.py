@@ -348,3 +348,12 @@ def test_reject_invalid_asset_type() -> None:
 
 def test_parse_thresholds_correctly() -> None:
     assert parse_thresholds("10,15,20") == [0.10, 0.15, 0.20]
+
+
+def test_drawdown_lookback_is_bounded() -> None:
+    with pytest.raises(CommandParseError, match="between 1 and 3650"):
+        parse_add_drawdown_args(["cn_etf", "510300", "ETF", "1000000", "10"])
+    with pytest.raises(CommandParseError, match="between 1 and 3650"):
+        parse_add_drawdown_plan_args(
+            ["510300", "000001", "Plan", "15:5000", "lookback:1000000"]
+        )

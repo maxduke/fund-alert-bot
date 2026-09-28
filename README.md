@@ -164,7 +164,8 @@ the ETF feeder fund you actually own as a separate position identity:
 ```
 
 Optional `lookback:<days>` and `rearm:<percent>` tokens may appear once each, in
-either order. `lookback` defaults to 365 calendar days and `rearm` defaults to
+either order. `lookback` defaults to 365 calendar days (maximum 3650, the same cap as
+`/add_drawdown` lookback_days) and `rearm` defaults to
 2%; `rearm:4` and `rearm:4%` both mean 4%. Unknown or duplicate options are
 rejected. MA250 and its 20-session slope are always informational.
 Every tier amount is incremental, so the example's maximum one-cycle total is

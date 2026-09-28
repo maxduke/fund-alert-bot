@@ -17,6 +17,7 @@ from typing import Any
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
+from fund_alert_bot.rules.drawdown import MAX_WINDOW_DAYS
 from fund_alert_bot.rules.drawdown_plan import (
     format_plan_amount,
     format_plan_percent,
@@ -70,6 +71,24 @@ def open_connection(sqlite_path: str | Path) -> Iterator[sqlite3.Connection]:
         yield connection
     finally:
         connection.close()
+
+
+@contextmanager
+def write_transaction(connection: sqlite3.Connection) -> Iterator[None]:
+    """Run a block of writes atomically under ``BEGIN IMMEDIATE``.
+
+    The transaction commits when the block exits normally, including early
+    returns, and rolls back on any exception so a failed write never leaves the
+    connection inside an open transaction.
+    """
+
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        yield
+    except BaseException:
+        connection.rollback()
+        raise
+    connection.commit()
 
 
 def init_db(connection: sqlite3.Connection) -> None:
@@ -415,8 +434,7 @@ def _ensure_notification_delivery_cancelled_status(
             """
         )
     ]
-    connection.execute("BEGIN IMMEDIATE")
-    try:
+    with write_transaction(connection):
         connection.execute(
             """
             CREATE TABLE notification_deliveries__cancelled_migration (
@@ -453,10 +471,6 @@ def _ensure_notification_delivery_cancelled_status(
         for statement in objects:
             connection.execute(statement)
         _assert_foreign_keys_clean(connection)
-        connection.commit()
-    except Exception:
-        connection.rollback()
-        raise
 
 
 _PRUNE_TABLES = (
@@ -1089,8 +1103,9 @@ def _positive_rule_int(
     if raw is None or isinstance(raw, bool) or not isinstance(raw, int):
         raise ValueError(f"{key} must be positive")
     value = raw
-    if value <= 0:
-        raise ValueError(f"{key} must be positive")
+    if value <= 0 or value > MAX_WINDOW_DAYS:
+        # Out-of-range windows would overflow date arithmetic during pruning.
+        raise ValueError(f"{key} must be between 1 and {MAX_WINDOW_DAYS}")
     return value
 
 
@@ -1157,25 +1172,25 @@ def upsert_market_history(
         )
     if not prepared:
         return 0
-    connection.executemany(
-        """
-        INSERT INTO market_daily_history (
-            symbol, asset_type, price_basis, date,
-            open, high, low, close, volume, amount, source, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(symbol, asset_type, price_basis, date) DO UPDATE SET
-            open = excluded.open,
-            high = excluded.high,
-            low = excluded.low,
-            close = excluded.close,
-            volume = excluded.volume,
-            amount = excluded.amount,
-            source = excluded.source,
-            updated_at = excluded.updated_at
-        """,
-        prepared,
-    )
-    connection.commit()
+    with write_transaction(connection):
+        connection.executemany(
+            """
+            INSERT INTO market_daily_history (
+                symbol, asset_type, price_basis, date,
+                open, high, low, close, volume, amount, source, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(symbol, asset_type, price_basis, date) DO UPDATE SET
+                open = excluded.open,
+                high = excluded.high,
+                low = excluded.low,
+                close = excluded.close,
+                volume = excluded.volume,
+                amount = excluded.amount,
+                source = excluded.source,
+                updated_at = excluded.updated_at
+            """,
+            prepared,
+        )
     return len(prepared)
 
 
@@ -1226,19 +1241,19 @@ def upsert_fund_nav(
     source_text = str(source).strip()
     if not source_text:
         raise ValueError("NAV source must not be empty.")
-    connection.execute(
-        """
-        INSERT INTO fund_nav_history (
-            fund_symbol, nav_date, unit_nav, source, updated_at
-        ) VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(fund_symbol, nav_date) DO UPDATE SET
-            unit_nav = excluded.unit_nav,
-            source = excluded.source,
-            updated_at = excluded.updated_at
-        """,
-        (fund_symbol, nav_date.isoformat(), value, source_text, _utc_now_text()),
-    )
-    connection.commit()
+    with write_transaction(connection):
+        connection.execute(
+            """
+            INSERT INTO fund_nav_history (
+                fund_symbol, nav_date, unit_nav, source, updated_at
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(fund_symbol, nav_date) DO UPDATE SET
+                unit_nav = excluded.unit_nav,
+                source = excluded.source,
+                updated_at = excluded.updated_at
+            """,
+            (fund_symbol, nav_date.isoformat(), value, source_text, _utc_now_text()),
+        )
 
 
 def get_cached_fund_nav(
@@ -1282,32 +1297,32 @@ def add_rule(
 ) -> int:
     """Insert an alert rule and return its database ID."""
     now = _timestamp_text(created_at)
-    cursor = connection.execute(
-        """
-        INSERT INTO rules (
-            type,
-            symbol,
-            name,
-            asset_type,
-            params_json,
-            enabled,
-            created_at,
-            updated_at
+    with write_transaction(connection):
+        cursor = connection.execute(
+            """
+            INSERT INTO rules (
+                type,
+                symbol,
+                name,
+                asset_type,
+                params_json,
+                enabled,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                type,
+                symbol,
+                name,
+                asset_type,
+                _json_text(params),
+                int(enabled),
+                now,
+                now,
+            ),
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            type,
-            symbol,
-            name,
-            asset_type,
-            _json_text(params),
-            int(enabled),
-            now,
-            now,
-        ),
-    )
-    connection.commit()
     return int(cursor.lastrowid)
 
 
@@ -1325,8 +1340,7 @@ def add_enhanced_dca_rule(
 ) -> int:
     """Atomically validate shared settings and add one fixed weekly DCA rule."""
 
-    connection.execute("BEGIN IMMEDIATE")
-    try:
+    with write_transaction(connection):
         duplicate = connection.execute(
             """
             SELECT id
@@ -1388,11 +1402,7 @@ def add_enhanced_dca_rule(
                 now,
             ),
         )
-        connection.commit()
         return int(cursor.lastrowid)
-    except Exception:
-        connection.rollback()
-        raise
 
 
 def update_dca_rule_amount(
@@ -1405,8 +1415,7 @@ def update_dca_rule_amount(
 
     if isinstance(amount, bool) or not math.isfinite(float(amount)) or amount <= 0:
         raise ValueError("DCA amount must be a positive finite number.")
-    connection.execute("BEGIN IMMEDIATE")
-    try:
+    with write_transaction(connection):
         row = connection.execute(
             "SELECT * FROM rules WHERE id = ? AND type = 'dca_reminder'",
             (rule_id,),
@@ -1432,10 +1441,6 @@ def update_dca_rule_amount(
         updated = connection.execute(
             "SELECT * FROM rules WHERE id = ?", (rule_id,)
         ).fetchone()
-        connection.commit()
-    except Exception:
-        connection.rollback()
-        raise
     if updated is None:
         raise RuntimeError("Updated DCA rule was not found.")
     return updated
@@ -1459,8 +1464,7 @@ def update_drawdown_plan_rearm_margin(
         ) from exc
     if not math.isfinite(margin) or not 0 < margin < 1:
         raise ValueError("Rearm margin must be a finite number between 0 and 1.")
-    connection.execute("BEGIN IMMEDIATE")
-    try:
+    with write_transaction(connection):
         row = connection.execute(
             "SELECT * FROM rules WHERE id = ? AND type = 'drawdown_plan'",
             (rule_id,),
@@ -1504,10 +1508,6 @@ def update_drawdown_plan_rearm_margin(
         updated = connection.execute(
             "SELECT * FROM rules WHERE id = ?", (rule_id,)
         ).fetchone()
-        connection.commit()
-    except Exception:
-        connection.rollback()
-        raise
     if updated is None:
         raise RuntimeError("Updated drawdown plan was not found.")
     return updated, old_margin
@@ -1522,8 +1522,7 @@ def add_position_profit_rule(
 ) -> int:
     """Add the only enabled auto-cost Price-Gain rule for one feeder fund."""
 
-    connection.execute("BEGIN IMMEDIATE")
-    try:
+    with write_transaction(connection):
         duplicate = connection.execute(
             """
             SELECT id FROM rules
@@ -1555,11 +1554,7 @@ def add_position_profit_rule(
                 now,
             ),
         )
-        connection.commit()
         return int(cursor.lastrowid)
-    except Exception:
-        connection.rollback()
-        raise
 
 
 def add_drawdown_plan_rule(
@@ -1572,8 +1567,7 @@ def add_drawdown_plan_rule(
 ) -> int:
     """Insert one enabled one-to-one ETF/feeder-fund plan atomically."""
 
-    connection.execute("BEGIN IMMEDIATE")
-    try:
+    with write_transaction(connection):
         conflict = find_enabled_drawdown_plan_conflict(
             connection,
             reference_symbol=reference_symbol,
@@ -1594,11 +1588,7 @@ def add_drawdown_plan_rule(
             """,
             (reference_symbol, name, _json_text(params), now, now),
         )
-        connection.commit()
         return int(cursor.lastrowid)
-    except Exception:
-        connection.rollback()
-        raise
 
 
 def find_enabled_drawdown_plan_conflict(
@@ -1721,20 +1711,20 @@ def upsert_dca_evaluation_failure(
         check_date.isoformat() if isinstance(check_date, date) else str(check_date)
     )
     now = _utc_now_text()
-    connection.execute(
-        """
-        INSERT INTO dca_evaluation_failures (
-            rule_id, check_date, error_message,
-            first_failed_at, last_failed_at, attempt_count
-        ) VALUES (?, ?, ?, ?, ?, 1)
-        ON CONFLICT(rule_id, check_date) DO UPDATE SET
-            error_message = excluded.error_message,
-            last_failed_at = excluded.last_failed_at,
-            attempt_count = dca_evaluation_failures.attempt_count + 1
-        """,
-        (rule_id, date_text, error_message, now, now),
-    )
-    connection.commit()
+    with write_transaction(connection):
+        connection.execute(
+            """
+            INSERT INTO dca_evaluation_failures (
+                rule_id, check_date, error_message,
+                first_failed_at, last_failed_at, attempt_count
+            ) VALUES (?, ?, ?, ?, ?, 1)
+            ON CONFLICT(rule_id, check_date) DO UPDATE SET
+                error_message = excluded.error_message,
+                last_failed_at = excluded.last_failed_at,
+                attempt_count = dca_evaluation_failures.attempt_count + 1
+            """,
+            (rule_id, date_text, error_message, now, now),
+        )
 
 
 def clear_dca_evaluation_failure(
@@ -1748,14 +1738,14 @@ def clear_dca_evaluation_failure(
     date_text = (
         check_date.isoformat() if isinstance(check_date, date) else str(check_date)
     )
-    connection.execute(
-        """
-        DELETE FROM dca_evaluation_failures
-        WHERE rule_id = ? AND check_date = ?
-        """,
-        (rule_id, date_text),
-    )
-    connection.commit()
+    with write_transaction(connection):
+        connection.execute(
+            """
+            DELETE FROM dca_evaluation_failures
+            WHERE rule_id = ? AND check_date = ?
+            """,
+            (rule_id, date_text),
+        )
 
 
 def is_auto_cost_profit_rule(rule: Any) -> bool:
@@ -1785,21 +1775,21 @@ def rule_removal_action(rule: Any) -> str:
 def delete_rule(connection: sqlite3.Connection, rule_id: int) -> bool:
     """Delete a legacy rule or disable a stateful rule."""
 
-    row = connection.execute(
-        "SELECT type, asset_type, params_json FROM rules WHERE id = ?",
-        (rule_id,),
-    ).fetchone()
-    if row is None:
-        return False
+    with write_transaction(connection):
+        row = connection.execute(
+            "SELECT type, asset_type, params_json FROM rules WHERE id = ?",
+            (rule_id,),
+        ).fetchone()
+        if row is None:
+            return False
 
-    if rule_removal_action(row) == "disable":
-        connection.execute(
-            "UPDATE rules SET enabled = 0, updated_at = ? WHERE id = ?",
-            (_utc_now_text(), rule_id),
-        )
-    else:
-        connection.execute("DELETE FROM rules WHERE id = ?", (rule_id,))
-    connection.commit()
+        if rule_removal_action(row) == "disable":
+            connection.execute(
+                "UPDATE rules SET enabled = 0, updated_at = ? WHERE id = ?",
+                (_utc_now_text(), rule_id),
+            )
+        else:
+            connection.execute("DELETE FROM rules WHERE id = ?", (rule_id,))
     return True
 
 
@@ -1813,20 +1803,20 @@ def upsert_fund_fee(
     """Set the shared future-contribution fee for one feeder fund."""
 
     now = _utc_now_text()
-    connection.execute(
-        """
-        INSERT INTO fund_settings (
-            fund_symbol, fee_mode, fee_value, created_at, updated_at
+    with write_transaction(connection):
+        connection.execute(
+            """
+            INSERT INTO fund_settings (
+                fund_symbol, fee_mode, fee_value, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(fund_symbol) DO UPDATE SET
+                fee_mode = excluded.fee_mode,
+                fee_value = excluded.fee_value,
+                updated_at = excluded.updated_at
+            """,
+            (fund_symbol, fee_mode, fee_value, now, now),
         )
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(fund_symbol) DO UPDATE SET
-            fee_mode = excluded.fee_mode,
-            fee_value = excluded.fee_value,
-            updated_at = excluded.updated_at
-        """,
-        (fund_symbol, fee_mode, fee_value, now, now),
-    )
-    connection.commit()
     row = get_fund_settings(connection, fund_symbol)
     if row is None:
         raise RuntimeError("Fund settings upsert did not persist a row.")
@@ -1842,19 +1832,19 @@ def upsert_fund_cutoff(
     """Set the future manual-subscription cutoff for one feeder fund."""
 
     now = _utc_now_text()
-    connection.execute(
-        """
-        INSERT INTO fund_settings (
-            fund_symbol, subscription_cutoff, created_at, updated_at
+    with write_transaction(connection):
+        connection.execute(
+            """
+            INSERT INTO fund_settings (
+                fund_symbol, subscription_cutoff, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(fund_symbol) DO UPDATE SET
+                subscription_cutoff = excluded.subscription_cutoff,
+                updated_at = excluded.updated_at
+            """,
+            (fund_symbol, subscription_cutoff, now, now),
         )
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(fund_symbol) DO UPDATE SET
-            subscription_cutoff = excluded.subscription_cutoff,
-            updated_at = excluded.updated_at
-        """,
-        (fund_symbol, subscription_cutoff, now, now),
-    )
-    connection.commit()
     row = get_fund_settings(connection, fund_symbol)
     if row is None:
         raise RuntimeError("Fund settings upsert did not persist a row.")
@@ -1981,8 +1971,7 @@ def record_position_profit_evaluation(
 ) -> None:
     """Remember one successful no-alert evaluation."""
 
-    connection.execute("BEGIN IMMEDIATE")
-    try:
+    with write_transaction(connection):
         if not _position_profit_state_matches(
             connection,
             rule_id=rule_id,
@@ -2000,10 +1989,6 @@ def record_position_profit_evaluation(
             """,
             (rule_id, position_cycle_id, nav_date, _utc_now_text()),
         )
-        connection.commit()
-    except Exception:
-        connection.rollback()
-        raise
 
 
 def list_position_profit_statuses(
@@ -2058,8 +2043,7 @@ def persist_position_profit_alert(
 ) -> int:
     """Atomically reserve one aggregate alert and its individual thresholds."""
 
-    connection.execute("BEGIN IMMEDIATE")
-    try:
+    with write_transaction(connection):
         payload = alert["payload"]
         if not _position_profit_state_matches(
             connection,
@@ -2114,11 +2098,7 @@ def persist_position_profit_alert(
                 for key, value in thresholds
             ],
         )
-        connection.commit()
         return event_id
-    except Exception:
-        connection.rollback()
-        raise
 
 
 def _maintain_position_cycle(
@@ -2169,8 +2149,7 @@ def upsert_position_snapshot(
 
     sync_time = _timestamp_text(synced_at)
     now = _utc_now_text()
-    connection.execute("BEGIN IMMEDIATE")
-    try:
+    with write_transaction(connection):
         _maintain_position_cycle(
             connection,
             fund_symbol=fund_symbol,
@@ -2210,10 +2189,6 @@ def upsert_position_snapshot(
             """,
             (now, fund_symbol),
         )
-        connection.commit()
-    except Exception:
-        connection.rollback()
-        raise
     row = get_position_snapshot(connection, fund_symbol)
     if row is None:
         raise RuntimeError("Position snapshot upsert did not persist a row.")
@@ -2421,8 +2396,7 @@ def record_manual_addition(
         for key, value in (source_alert_event_ids or {}).items()
     }
     now = _utc_now_text()
-    connection.execute("BEGIN IMMEDIATE")
-    try:
+    with write_transaction(connection):
         rule = connection.execute(
             """
             SELECT enabled, symbol, asset_type, params_json
@@ -2612,7 +2586,6 @@ def record_manual_addition(
         }
         new_tiers = tuple(tier for tier in tiers if str(tier.key) not in existing_keys)
         if not new_tiers:
-            connection.commit()
             return None, ()
 
         reconciled_at = None
@@ -2797,10 +2770,6 @@ def record_manual_addition(
                 for tier in new_tiers
             ],
         )
-        connection.commit()
-    except Exception:
-        connection.rollback()
-        raise
     return estimate_id, tuple(str(tier.key) for tier in new_tiers)
 
 
@@ -2842,11 +2811,9 @@ def create_scheduled_dca_occurrence(
 ) -> sqlite3.Row:
     """Create one durable assumed DCA occurrence, preserving its first settings."""
 
-    connection.execute("BEGIN IMMEDIATE")
-    try:
+    with write_transaction(connection):
         existing = get_scheduled_dca_occurrence(connection, rule_id, due_date)
         if existing is not None:
-            connection.commit()
             return existing
         rule = connection.execute(
             """
@@ -2893,10 +2860,6 @@ def create_scheduled_dca_occurrence(
             ),
         )
         row = get_scheduled_dca_occurrence(connection, rule_id, due_date)
-        connection.commit()
-    except Exception:
-        connection.rollback()
-        raise
     if row is None:
         raise RuntimeError("Scheduled DCA occurrence was not persisted.")
     return row
@@ -2988,15 +2951,15 @@ def set_scheduled_dca_effective_date(
 ) -> None:
     """Persist the first confirmed open date for a pending occurrence."""
 
-    connection.execute(
-        """
-        UPDATE scheduled_dca_occurrences
-        SET effective_date = COALESCE(effective_date, ?), updated_at = ?
-        WHERE id = ? AND status = 'pending'
-        """,
-        (effective_date, _utc_now_text(), occurrence_id),
-    )
-    connection.commit()
+    with write_transaction(connection):
+        connection.execute(
+            """
+            UPDATE scheduled_dca_occurrences
+            SET effective_date = COALESCE(effective_date, ?), updated_at = ?
+            WHERE id = ? AND status = 'pending'
+            """,
+            (effective_date, _utc_now_text(), occurrence_id),
+        )
 
 
 def skip_scheduled_dca_occurrence(
@@ -3007,11 +2970,9 @@ def skip_scheduled_dca_occurrence(
 ) -> str:
     """Skip only a still-pending occurrence and return its resulting state."""
 
-    connection.execute("BEGIN IMMEDIATE")
-    try:
+    with write_transaction(connection):
         row = get_scheduled_dca_occurrence(connection, rule_id, due_date)
         if row is None:
-            connection.commit()
             return "missing"
         status = str(row["status"])
         if status == "pending":
@@ -3024,11 +2985,7 @@ def skip_scheduled_dca_occurrence(
                 (_utc_now_text(), int(row["id"])),
             )
             status = "skipped"
-        connection.commit()
         return status
-    except Exception:
-        connection.rollback()
-        raise
 
 
 def apply_scheduled_dca_occurrence(
@@ -3039,14 +2996,12 @@ def apply_scheduled_dca_occurrence(
 ) -> bool:
     """Apply one exact-date fixed DCA estimate to its position at most once."""
 
-    connection.execute("BEGIN IMMEDIATE")
-    try:
+    with write_transaction(connection):
         occurrence = connection.execute(
             "SELECT * FROM scheduled_dca_occurrences WHERE id = ?",
             (occurrence_id,),
         ).fetchone()
         if occurrence is None or str(occurrence["status"]) != "pending":
-            connection.commit()
             return False
         nav_value = float(nav.value)
         if (
@@ -3119,11 +3074,7 @@ def apply_scheduled_dca_occurrence(
                 occurrence_id,
             ),
         )
-        connection.commit()
         return True
-    except Exception:
-        connection.rollback()
-        raise
 
 
 def list_pending_position_items(
@@ -3199,8 +3150,7 @@ def reconcile_position_snapshot(
 ) -> sqlite3.Row:
     """Apply an exact snapshot after verifying the displayed pending set."""
 
-    connection.execute("BEGIN IMMEDIATE")
-    try:
+    with write_transaction(connection):
         current_keys = tuple(
             str(item["key"])
             for item in list_pending_position_items(connection, fund_symbol)
@@ -3310,10 +3260,6 @@ def reconcile_position_snapshot(
             """,
             (None if unresolved is None else sync_time, now, fund_symbol),
         )
-        connection.commit()
-    except Exception:
-        connection.rollback()
-        raise
     row = get_position_snapshot(connection, fund_symbol)
     if row is None:
         raise RuntimeError("Position snapshot reconciliation did not persist.")
@@ -3328,14 +3274,12 @@ def apply_manual_add_estimate(
 ) -> dict[str, object] | None:
     """Atomically apply one exact-date NAV estimate and reserve its notice."""
 
-    connection.execute("BEGIN IMMEDIATE")
-    try:
+    with write_transaction(connection):
         occurrence = connection.execute(
             "SELECT * FROM manual_add_estimates WHERE id = ?",
             (estimate_id,),
         ).fetchone()
         if occurrence is None or str(occurrence["status"]) != "pending":
-            connection.commit()
             return None
         nav_value = float(nav.value)
         if (
@@ -3493,10 +3437,6 @@ def apply_manual_add_estimate(
                 estimate_id,
             ),
         )
-        connection.commit()
-    except Exception:
-        connection.rollback()
-        raise
     return {
         "event_id": event_id,
         "title": "Manual addition estimate updated",
@@ -3533,6 +3473,29 @@ def add_alert_event(
     triggered_at: str | datetime | None = None,
 ) -> int:
     """Insert an alert event and return its database ID."""
+
+    with write_transaction(connection):
+        return _insert_alert_event(
+            connection,
+            rule_id=rule_id,
+            alert_key=alert_key,
+            title=title,
+            message=message,
+            payload=payload,
+            triggered_at=triggered_at,
+        )
+
+
+def _insert_alert_event(
+    connection: sqlite3.Connection,
+    *,
+    rule_id: int,
+    alert_key: str,
+    title: str,
+    message: str,
+    payload: Any | None,
+    triggered_at: str | datetime | None,
+) -> int:
     cursor = connection.execute(
         """
         INSERT INTO alert_events (
@@ -3554,7 +3517,6 @@ def add_alert_event(
             _timestamp_text(triggered_at),
         ),
     )
-    connection.commit()
     return int(cursor.lastrowid)
 
 
@@ -3566,8 +3528,7 @@ def add_drawdown_plan_pre_alert_event(
 ) -> int:
     """Reserve one expiring pre-alert only while its plan remains enabled."""
 
-    connection.execute("BEGIN IMMEDIATE")
-    try:
+    with write_transaction(connection):
         rule = connection.execute(
             "SELECT type, enabled FROM rules WHERE id = ?",
             (rule_id,),
@@ -3599,10 +3560,6 @@ def add_drawdown_plan_pre_alert_event(
                 _utc_now_text(),
             ),
         )
-        connection.commit()
-    except Exception:
-        connection.rollback()
-        raise
     return int(cursor.lastrowid)
 
 
@@ -3616,19 +3573,13 @@ def reserve_alert_event(
     payload: Any | None = None,
     triggered_at: str | datetime | None = None,
 ) -> int:
-    """Create or re-reserve a retryable alert event for notification delivery."""
+    """Create or re-reserve a retryable alert event for notification delivery.
 
-    try:
-        return add_alert_event(
-            connection,
-            rule_id=rule_id,
-            alert_key=alert_key,
-            title=title,
-            message=message,
-            payload=payload,
-            triggered_at=triggered_at,
-        )
-    except sqlite3.IntegrityError:
+    Raises ``sqlite3.IntegrityError`` when the key already belongs to an event
+    that is not retryable.
+    """
+
+    with write_transaction(connection):
         row = connection.execute(
             """
             SELECT id, notification_status
@@ -3637,11 +3588,18 @@ def reserve_alert_event(
             """,
             (alert_key,),
         ).fetchone()
-        if (
-            row is None
-            or row["notification_status"] not in RETRYABLE_ALERT_NOTIFICATION_STATUSES
-        ):
-            raise
+        if row is None:
+            return _insert_alert_event(
+                connection,
+                rule_id=rule_id,
+                alert_key=alert_key,
+                title=title,
+                message=message,
+                payload=payload,
+                triggered_at=triggered_at,
+            )
+        if row["notification_status"] not in RETRYABLE_ALERT_NOTIFICATION_STATUSES:
+            raise sqlite3.IntegrityError(f"Alert event already exists: {alert_key}")
 
         event_id = int(row["id"])
         connection.execute(
@@ -3668,7 +3626,6 @@ def reserve_alert_event(
                 event_id,
             ),
         )
-        connection.commit()
         return event_id
 
 
@@ -3683,25 +3640,25 @@ def record_alert_notification_result(
     result_payload = [_notification_result_payload(result) for result in results]
     delivered = any(bool(result["success"]) for result in result_payload)
     now = _utc_now_text()
-    connection.execute(
-        """
-        UPDATE alert_events
-        SET
-            notification_status = ?,
-            notification_attempted_at = ?,
-            notification_sent_at = ?,
-            notification_result_json = ?
-        WHERE id = ?
-        """,
-        (
-            ALERT_NOTIFICATION_SENT if delivered else ALERT_NOTIFICATION_FAILED,
-            now,
-            now if delivered else None,
-            _json_text(result_payload),
-            event_id,
-        ),
-    )
-    connection.commit()
+    with write_transaction(connection):
+        connection.execute(
+            """
+            UPDATE alert_events
+            SET
+                notification_status = ?,
+                notification_attempted_at = ?,
+                notification_sent_at = ?,
+                notification_result_json = ?
+            WHERE id = ?
+            """,
+            (
+                ALERT_NOTIFICATION_SENT if delivered else ALERT_NOTIFICATION_FAILED,
+                now,
+                now if delivered else None,
+                _json_text(result_payload),
+                event_id,
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -3737,8 +3694,7 @@ def ensure_notification_delivery_targets(
     ):
         raise ValueError("Notification target keys must be unique.")
 
-    connection.execute("BEGIN IMMEDIATE")
-    try:
+    with write_transaction(connection):
         now = _utc_now_text()
         for event_id in normalized_event_ids:
             event = connection.execute(
@@ -3774,10 +3730,6 @@ def ensure_notification_delivery_targets(
                     for target_key, channel in normalized_targets
                 ],
             )
-        connection.commit()
-    except Exception:
-        connection.rollback()
-        raise
 
 
 def cancel_removed_notification_targets(
@@ -3794,8 +3746,7 @@ def cancel_removed_notification_targets(
     active_keys = {str(key) for key in active_target_keys}
     if any(not key for key in active_keys):
         raise ValueError("Notification target keys must be non-empty.")
-    connection.execute("BEGIN IMMEDIATE")
-    try:
+    with write_transaction(connection):
         rows = connection.execute(
             """
             SELECT event_id, target_key, result_json
@@ -3846,10 +3797,7 @@ def cancel_removed_notification_targets(
             cancelled += 1
         for event_id in sorted(affected_event_ids):
             _refresh_alert_notification_status(connection, event_id=event_id)
-        connection.commit()
-    except Exception:
-        connection.rollback()
-        raise
+
     return cancelled
 
 
@@ -3873,8 +3821,7 @@ def claim_notification_deliveries(
         else tuple(dict.fromkeys(str(target_key) for target_key in target_keys))
     )
 
-    connection.execute("BEGIN IMMEDIATE")
-    try:
+    with write_transaction(connection):
         now = _utc_now_text()
         claim_until = (
             (datetime.now(UTC) + timedelta(seconds=lease_seconds))
@@ -3941,10 +3888,6 @@ def claim_notification_deliveries(
                     body_fingerprint=body_fingerprint,
                 )
             )
-        connection.commit()
-    except Exception:
-        connection.rollback()
-        raise
     return claims
 
 
@@ -3961,8 +3904,7 @@ def complete_notification_delivery(
     result_payload = _notification_result_payload(result)
     success = bool(result_payload["success"])
     now = _utc_now_text()
-    connection.execute("BEGIN IMMEDIATE")
-    try:
+    with write_transaction(connection):
         cursor = connection.execute(
             """
             UPDATE notification_deliveries
@@ -3993,13 +3935,8 @@ def complete_notification_delivery(
             ),
         )
         if cursor.rowcount == 0:
-            connection.rollback()
             return False
         _refresh_alert_notification_status(connection, event_id=int(event_id))
-        connection.commit()
-    except Exception:
-        connection.rollback()
-        raise
     return True
 
 
@@ -4013,14 +3950,9 @@ def refresh_alert_notification_status(
     normalized_event_ids = tuple(dict.fromkeys(int(event_id) for event_id in event_ids))
     if not normalized_event_ids:
         return
-    connection.execute("BEGIN IMMEDIATE")
-    try:
+    with write_transaction(connection):
         for event_id in normalized_event_ids:
             _refresh_alert_notification_status(connection, event_id=event_id)
-        connection.commit()
-    except Exception:
-        connection.rollback()
-        raise
 
 
 def _refresh_alert_notification_status(
@@ -4227,8 +4159,7 @@ def snooze_drawdown_tiers_for_date(
         return ()
     if not market_date:
         raise ValueError("A market date is required to snooze drawdown tiers.")
-    connection.execute("BEGIN IMMEDIATE")
-    try:
+    with write_transaction(connection):
         _require_drawdown_cycle(connection, cycle_id)
         now = _utc_now_text()
         connection.executemany(
@@ -4247,10 +4178,6 @@ def snooze_drawdown_tiers_for_date(
             """,
             [(cycle_id, key, market_date, now, now) for key in keys],
         )
-        connection.commit()
-    except Exception:
-        connection.rollback()
-        raise
     return keys
 
 
@@ -4265,8 +4192,7 @@ def skip_drawdown_tiers_for_cycle(
     keys = _normalize_drawdown_tier_keys(tier_keys)
     if not keys:
         return ()
-    connection.execute("BEGIN IMMEDIATE")
-    try:
+    with write_transaction(connection):
         _require_drawdown_cycle(connection, cycle_id)
         now = _utc_now_text()
         connection.executemany(
@@ -4286,10 +4212,6 @@ def skip_drawdown_tiers_for_cycle(
             """,
             [(cycle_id, key, now, now) for key in keys],
         )
-        connection.commit()
-    except Exception:
-        connection.rollback()
-        raise
     return keys
 
 
@@ -4325,8 +4247,7 @@ def persist_drawdown_plan_evaluation(
     if len(set(record_keys)) != len(record_keys):
         raise sqlite3.IntegrityError("Duplicate drawdown tier records.")
 
-    connection.execute("BEGIN IMMEDIATE")
-    try:
+    with write_transaction(connection):
         rule = connection.execute(
             "SELECT enabled FROM rules WHERE id = ?",
             (rule_id,),
@@ -4495,10 +4416,6 @@ def persist_drawdown_plan_evaluation(
                     for tier in records
                 ],
             )
-        connection.commit()
-    except Exception:
-        connection.rollback()
-        raise
     return cycle_id, event_id
 
 
@@ -4654,15 +4571,13 @@ def close_position_from_profit_event(
 
     sync_time = _timestamp_text(synced_at)
     now = _utc_now_text()
-    connection.execute("BEGIN IMMEDIATE")
-    try:
+    with write_transaction(connection):
         event = get_position_profit_event(connection, event_id)
         if event is None:
             raise sqlite3.IntegrityError("Price-Gain reminder was not found.")
         payload = json.loads(str(event["payload_json"]))
         expected_cycle_id = int(payload["position_cycle_id"])
         if event["active_cycle_id"] is None:
-            connection.rollback()
             return False
         if (
             int(event["active_cycle_id"]) != expected_cycle_id
@@ -4706,11 +4621,7 @@ def close_position_from_profit_event(
             """,
             (now, str(event["symbol"])),
         )
-        connection.commit()
         return True
-    except Exception:
-        connection.rollback()
-        raise
 
 
 def _ensure_alert_event_delivery_columns(connection: sqlite3.Connection) -> bool:

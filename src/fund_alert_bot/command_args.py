@@ -12,6 +12,7 @@ from decimal import Decimal, InvalidOperation
 
 from fund_alert_bot.market_data.models import AssetType
 from fund_alert_bot.rules.dca import normalize_weekday
+from fund_alert_bot.rules.drawdown import MAX_WINDOW_DAYS
 from fund_alert_bot.rules.drawdown_plan import (
     DEFAULT_REARM_MARGIN,
     DrawdownPlanConfig,
@@ -215,8 +216,10 @@ def parse_add_drawdown_args(args: Sequence[str]) -> DrawdownCommand:
         lookback_days = int(raw_lookback_days)
     except ValueError as exc:
         raise CommandParseError("lookback_days must be a positive integer") from exc
-    if lookback_days <= 0:
-        raise CommandParseError("lookback_days must be a positive integer")
+    if not 1 <= lookback_days <= MAX_WINDOW_DAYS:
+        raise CommandParseError(
+            f"lookback_days must be between 1 and {MAX_WINDOW_DAYS}"
+        )
 
     return DrawdownCommand(
         asset_type=asset_type,
@@ -464,8 +467,10 @@ def parse_add_drawdown_plan_args(args: Sequence[str]) -> DrawdownPlanCommand:
                 lookback_days = int(option.removeprefix("lookback:"))
             except ValueError as exc:
                 raise CommandParseError("lookback must be a positive integer") from exc
-            if lookback_days <= 0:
-                raise CommandParseError("lookback must be a positive integer")
+            if not 1 <= lookback_days <= MAX_WINDOW_DAYS:
+                raise CommandParseError(
+                    f"lookback must be between 1 and {MAX_WINDOW_DAYS}"
+                )
         elif option.startswith("rearm:"):
             option_name = "rearm"
             if option_name in seen_options:

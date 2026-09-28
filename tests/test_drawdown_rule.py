@@ -126,6 +126,28 @@ def test_calculate_drawdown_uses_calendar_lookback_window() -> None:
     assert result["drawdown"] == pytest.approx(0.10)
 
 
+def test_calculate_drawdown_window_spans_exactly_lookback_days() -> None:
+    df = _history(
+        ["2023-01-02", "2023-01-03", "2024-01-02"],
+        [300.0, 200.0, 100.0],
+    )
+
+    result = calculate_drawdown_from_high(df, lookback_days=365)
+
+    assert result["peak_date"] == "2023-01-03"
+
+
+def test_calculate_drawdown_rejects_missing_latest_price() -> None:
+    # Falling back to an older price would let stale data pass freshness checks.
+    df = _history(
+        ["2024-01-01", "2024-01-02", "2024-01-03"],
+        [100.0, 90.0, float("nan")],
+    )
+
+    with pytest.raises(ValueError, match="latest price must be finite"):
+        calculate_drawdown_from_high(df, lookback_days=365)
+
+
 @pytest.mark.parametrize("latest_price", [0.0, -1.0])
 def test_calculate_drawdown_rejects_non_positive_latest_price(
     latest_price: float,

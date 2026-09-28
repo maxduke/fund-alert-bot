@@ -15,7 +15,11 @@ from typing import Any
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from fund_alert_bot.db import initialize_database, open_connection
+from fund_alert_bot.db import (
+    initialize_database,
+    open_connection,
+    write_transaction,
+)
 from fund_alert_bot.i18n import localize_text
 from fund_alert_bot.pending_status import format_pending_work
 
@@ -80,45 +84,59 @@ def _persist_run(
 
     with open_connection(sqlite_path) as connection:
         initialize_database(connection)
-        connection.execute("BEGIN IMMEDIATE")
-        key = _KEY_PREFIX + job_id
-        row = connection.execute(
-            "SELECT value FROM app_metadata WHERE key = ?", (key,)
-        ).fetchone()
-        state = {} if row is None else json.loads(row["value"])
-        now = datetime.now(UTC).isoformat()
-        if result is None:
-            state.update(
-                run_id=run_id,
-                process_id=_PROCESS_ID,
-                started_at=now,
-                finished_at=None,
-                outcome="running",
-                no_data=0,
-                errors=0,
-                delivery_failures=0,
+        with write_transaction(connection):
+            key = _KEY_PREFIX + job_id
+            row = connection.execute(
+                "SELECT value FROM app_metadata WHERE key = ?", (key,)
+            ).fetchone()
+            state = None
+            if row is not None:
+                try:
+                    state = json.loads(row["value"])
+                except (TypeError, ValueError):
+                    pass
+            if not isinstance(state, dict):
+                # Replace an unreadable record rather than failing every later save.
+                state = {}
+            now = datetime.now(UTC).isoformat()
+            if result is None:
+                state.update(
+                    run_id=run_id,
+                    process_id=_PROCESS_ID,
+                    started_at=now,
+                    finished_at=None,
+                    outcome="running",
+                    no_data=0,
+                    errors=0,
+                    delivery_failures=0,
+                )
+            elif state.get("run_id") != run_id:
+                return
+            else:
+                state.update(
+                    finished_at=now,
+                    outcome=result.outcome,
+                    no_data=result.no_data,
+                    errors=result.errors,
+                    delivery_failures=result.delivery_failures,
+                )
+                if result.outcome == "ok":
+                    state["last_success_at"] = now
+            connection.execute(
+                """
+                INSERT INTO app_metadata (key, value, updated_at) VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value, updated_at = excluded.updated_at
+                """,
+                (key, json.dumps(state), now),
             )
-        elif state.get("run_id") != run_id:
-            return
-        else:
-            state.update(
-                finished_at=now,
-                outcome=result.outcome,
-                no_data=result.no_data,
-                errors=result.errors,
-                delivery_failures=result.delivery_failures,
-            )
-            if result.outcome == "ok":
-                state["last_success_at"] = now
-        connection.execute(
-            """
-            INSERT INTO app_metadata (key, value, updated_at) VALUES (?, ?, ?)
-            ON CONFLICT(key) DO UPDATE SET
-                value = excluded.value, updated_at = excluded.updated_at
-            """,
-            (key, json.dumps(state), now),
-        )
-        connection.commit()
+
+
+def _readable_state(state: object) -> bool:
+    if not isinstance(state, dict):
+        return False
+    outcome = state.get("outcome")
+    return isinstance(outcome, str) and outcome in _OUTCOMES
 
 
 async def _save_run(*args: Any) -> None:
@@ -170,9 +188,14 @@ def format_runtime_status(sqlite_path: str | Path, *, timezone: str) -> str:
     def timestamp(value: str | None) -> str:
         if not value:
             return localize_text("No record yet")
-        return (
-            datetime.fromisoformat(value).astimezone(zone).strftime("%Y-%m-%d %H:%M:%S")
-        )
+        try:
+            parsed = datetime.fromisoformat(value)
+        except (TypeError, ValueError):
+            return localize_text("Unknown date")
+        if parsed.tzinfo is None:
+            # Status timestamps are written in UTC.
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(zone).strftime("%Y-%m-%d %H:%M:%S")
 
     lines = ["Runtime status", f"Timezone: {timezone}", ""]
     with open_connection(sqlite_path) as connection:
@@ -186,7 +209,14 @@ def format_runtime_status(sqlite_path: str | Path, *, timezone: str) -> str:
             if row is None:
                 lines.append(f"• {label}: {localize_text('No record yet')}")
                 continue
-            state = json.loads(row["value"])
+            try:
+                state = json.loads(row["value"])
+            except (TypeError, ValueError):
+                state = None
+            if not _readable_state(state):
+                # One unreadable record must not hide every other job's status.
+                lines.append(f"• {label}: {localize_text('Unreadable status record')}")
+                continue
             outcome = state["outcome"]
             if outcome == "running" and state.get("process_id") != _PROCESS_ID:
                 outcome = "interrupted"

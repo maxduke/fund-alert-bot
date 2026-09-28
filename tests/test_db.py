@@ -35,6 +35,7 @@ from fund_alert_bot.db import (
     upsert_fund_nav,
     upsert_market_history,
     upsert_position_snapshot,
+    write_transaction,
 )
 
 
@@ -580,6 +581,7 @@ def test_init_migrates_manual_add_action_event_to_nullable_and_preserves_row(
             (rule_id, "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
         )
         cycle_id = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
+        connection.commit()
         event_id = add_alert_event(
             connection,
             rule_id=rule_id,
@@ -1238,6 +1240,11 @@ def test_alert_key_is_unique(tmp_path: Path) -> None:
                 message="Duplicate alert key.",
             )
 
+        # The failed insert must not leave a transaction open on the connection.
+        assert not connection.in_transaction
+        connection.execute("BEGIN IMMEDIATE")
+        connection.rollback()
+
 
 def test_failed_alert_delivery_is_retryable(tmp_path: Path) -> None:
     sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
@@ -1304,3 +1311,69 @@ def test_failed_alert_delivery_is_retryable(tmp_path: Path) -> None:
     assert json.loads(sent_row["notification_result_json"]) == [
         {"channel": "telegram", "detail": "sent", "success": True}
     ]
+
+
+def test_write_transaction_commits_on_exit_and_rolls_back_on_any_error() -> None:
+    connection = connect(":memory:")
+    try:
+        connection.execute("CREATE TABLE t (v INTEGER)")
+        connection.commit()
+
+        def insert_and_return_early() -> int:
+            with write_transaction(connection):
+                connection.execute("INSERT INTO t VALUES (1)")
+                return 1
+
+        insert_and_return_early()
+        for error in (ValueError("boom"), KeyboardInterrupt()):
+            with pytest.raises(type(error)):
+                with write_transaction(connection):
+                    connection.execute("INSERT INTO t VALUES (2)")
+                    raise error
+            assert not connection.in_transaction
+
+        assert [row[0] for row in connection.execute("SELECT v FROM t")] == [1]
+    finally:
+        connection.close()
+
+
+def test_reserve_rejects_non_retryable_duplicate_without_open_transaction(
+    tmp_path: Path,
+) -> None:
+    with open_connection(tmp_path / "bot.sqlite3") as connection:
+        init_db(connection)
+        rule_id = add_rule(
+            connection,
+            type="drawdown",
+            symbol="510300",
+            name="ETF",
+            asset_type="fund",
+            params={"drawdown_pct": 10},
+        )
+        event_id = reserve_alert_event(
+            connection,
+            rule_id=rule_id,
+            alert_key="dup",
+            title="Reminder",
+            message="first",
+        )
+        connection.execute(
+            "UPDATE alert_events SET notification_status = ? WHERE id = ?",
+            (ALERT_NOTIFICATION_SENT, event_id),
+        )
+        connection.commit()
+
+        with pytest.raises(sqlite3.IntegrityError):
+            reserve_alert_event(
+                connection,
+                rule_id=rule_id,
+                alert_key="dup",
+                title="Reminder",
+                message="second",
+            )
+
+        assert not connection.in_transaction
+        row = connection.execute(
+            "SELECT message FROM alert_events WHERE id = ?", (event_id,)
+        ).fetchone()
+        assert row["message"] == "first"

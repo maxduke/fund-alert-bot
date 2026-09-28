@@ -197,7 +197,7 @@ def test_scheduled_check_prevents_duplicate_alerts_by_alert_key(
         return FakeResponse(status_code=200)
 
     monkeypatch.setattr(
-        "fund_alert_bot.notifications.webhook.requests.post",
+        "fund_alert_bot.notifications.http_delivery.requests.post",
         fake_post,
     )
 
@@ -268,7 +268,7 @@ def test_scheduled_dca_check_merges_same_day_fixed_reminders(
         return FakeResponse(status_code=200)
 
     monkeypatch.setattr(
-        "fund_alert_bot.notifications.webhook.requests.post",
+        "fund_alert_bot.notifications.http_delivery.requests.post",
         fake_post,
     )
     asyncio.run(
@@ -1238,6 +1238,7 @@ def test_standard_notification_retry_survives_restart_and_keeps_current_dca_acti
             """,
             (dca_rule_id,),
         )
+        connection.commit()
         assert delete_rule(connection, legacy_dca_rule_id)
         replacement_rule_id = add_rule(
             connection,
@@ -1258,6 +1259,7 @@ def test_standard_notification_retry_survives_restart_and_keeps_current_dca_acti
             """,
             (replacement_rule_id,),
         )
+        connection.commit()
         assert delete_rule(connection, profit_rule_id)
         connection.commit()
 
@@ -1789,7 +1791,7 @@ def test_scheduled_dca_check_prevents_duplicate_alerts_by_alert_key(
         return FakeResponse(status_code=200)
 
     monkeypatch.setattr(
-        "fund_alert_bot.notifications.webhook.requests.post",
+        "fund_alert_bot.notifications.http_delivery.requests.post",
         fake_post,
     )
 
