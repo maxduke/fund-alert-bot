@@ -230,6 +230,7 @@ def format_runtime_status(sqlite_path: str | Path, *, timezone: str) -> str:
                 f"Pending deliveries: {deliveries.get('pending', 0)}",
                 f"In-flight deliveries: {deliveries.get('sending', 0)}",
                 f"Failed deliveries: {deliveries.get('failed', 0)}",
+                f"Cancelled deliveries: {deliveries.get('cancelled', 0)}",
                 f"Unassigned reminder events: {unassigned}",
                 f"Pending DCA estimates: {pending_dca}",
                 f"Pending manual-add estimates: {pending_manual}",

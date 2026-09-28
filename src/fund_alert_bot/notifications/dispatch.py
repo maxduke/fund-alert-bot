@@ -9,6 +9,7 @@ from pathlib import Path
 
 from fund_alert_bot.checks import AlertNotification
 from fund_alert_bot.db import (
+    ALERT_NOTIFICATION_CANCELLED,
     ALERT_NOTIFICATION_SENT,
     claim_notification_deliveries,
     complete_notification_delivery,
@@ -34,6 +35,7 @@ class NotificationDispatchSummary:
     attempted: int
     delivered: int
     failed: int
+    cancelled: int = 0
 
 
 async def send_alert_notifications(
@@ -127,12 +129,17 @@ async def send_alert_notifications(
         str(row["notification_status"]) == ALERT_NOTIFICATION_SENT
         for row in status_rows
     )
-    failed = len(notifications) - delivered
+    cancelled = sum(
+        str(row["notification_status"]) == ALERT_NOTIFICATION_CANCELLED
+        for row in status_rows
+    )
+    failed = len(notifications) - delivered - cancelled
 
     return NotificationDispatchSummary(
         attempted=len(notifications),
         delivered=delivered,
         failed=failed,
+        cancelled=cancelled,
     )
 
 

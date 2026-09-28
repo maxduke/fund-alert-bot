@@ -18,6 +18,7 @@ from fund_alert_bot.commands import build_command_handlers
 from fund_alert_bot.db import (
     add_enhanced_dca_rule,
     add_rule,
+    cancel_removed_notification_targets,
     create_scheduled_dca_occurrence,
     ensure_notification_delivery_targets,
     initialize_database,
@@ -194,6 +195,38 @@ def test_delivery_failure_is_not_a_complete_task_success(tmp_path) -> None:
     assert "Failed deliveries: 1" in format_runtime_status(
         path, timezone="Asia/Shanghai"
     )
+
+
+def test_status_counts_removed_targets_separately(tmp_path) -> None:
+    path = tmp_path / "bot.sqlite3"
+    with open_connection(path) as connection:
+        initialize_database(connection)
+        event_id = reserve_alert_event(
+            connection,
+            rule_id=1,
+            alert_key="removed-status",
+            title="Reminder",
+            message="Status",
+        )
+        ensure_notification_delivery_targets(
+            connection,
+            event_ids=[event_id],
+            targets=[("removed", "test")],
+        )
+        cancel_removed_notification_targets(connection, active_target_keys=[])
+    language = get_language()
+    try:
+        set_language("en")
+        summary = format_runtime_status(path, timezone="Asia/Shanghai")
+        assert "Cancelled deliveries: 1" in summary
+        assert "Failed deliveries: 0" in summary
+        assert "Unassigned reminder events: 0" in summary
+        set_language("zh-CN")
+        assert "已取消投递目标数： 1" in format_runtime_status(
+            path, timezone="Asia/Shanghai"
+        )
+    finally:
+        set_language(language)
 
 
 def test_task_status_reports_cancellation_and_crash_without_inventing_success(

@@ -242,6 +242,11 @@ before replacing the position.
 
 Telegram remains the command channel and default notification channel; optional
 Bark, ntfy, and webhook channels can be enabled with environment variables.
+Each reminder keeps the recipients configured for its first delivery attempt.
+Adding a recipient later does not send older reminders to it. On startup, an
+unfinished delivery to a removed recipient or channel is cancelled; active
+recipients still retry. Re-adding the removed recipient does not resume that old
+delivery. `/status` shows cancelled targets separately from failed deliveries.
 User-facing Telegram replies, buttons, and every notification channel use one
 global language. Set `BOT_LANGUAGE=zh-CN` (default) or `BOT_LANGUAGE=en`, then
 restart the service. Commands such as `/check` keep their English Telegram names.

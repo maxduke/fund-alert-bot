@@ -64,6 +64,7 @@ _EN_TO_ZH = {
     "Pending deliveries:": "待投递目标数：",
     "In-flight deliveries:": "投递中目标数：",
     "Failed deliveries:": "失败投递目标数：",
+    "Cancelled deliveries:": "已取消投递目标数：",
     "Unassigned reminder events:": "尚未分配投递目标的提醒数：",
     "Pending DCA estimates:": "待处理定投估算数：",
     "Pending manual-add estimates:": "待处理手动加仓估算数：",
