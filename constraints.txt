@@ -69,7 +69,7 @@ packaging==26.3
     #   pytest
 pathspec==1.1.1
     # via hatchling
-pandas==3.0.5
+pandas==3.0.6
     # via
     #   akshare
     #   fund-alert-bot (pyproject.toml)
