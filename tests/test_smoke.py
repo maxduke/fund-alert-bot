@@ -251,6 +251,13 @@ def test_compose_preserves_schedule_environment_overrides() -> None:
         assert f"${{{name}:-{default}}}" in compose
 
 
+def test_docker_build_records_expire_after_seven_days() -> None:
+    workflow = (Path(__file__).parents[1] / ".github/workflows/ci.yml").read_text()
+    environment = workflow.split("\nenv:\n", 1)[1].split("\n\n", 1)[0]
+    assert '  DOCKER_BUILD_RECORD_RETENTION_DAYS: "7"' in environment.splitlines()
+    assert workflow.count("DOCKER_BUILD_RECORD_RETENTION_DAYS") == 1
+
+
 def test_production_artifacts_are_immutable_and_actions_are_sha_pinned() -> None:
     root = Path(__file__).parents[1]
     production_compose = (root / "deploy/docker-compose.prod.yml").read_text()

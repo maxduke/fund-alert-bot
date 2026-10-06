@@ -14,6 +14,7 @@ concurrency:
 
 env:
   IMAGE_NAME: ghcr.io/maxduke/fund-alert-bot
+  DOCKER_BUILD_RECORD_RETENTION_DAYS: "7"
 
 permissions: {}
 
