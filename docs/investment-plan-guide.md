@@ -559,6 +559,40 @@ read-only: running `/check` never confirms a new plan tier. It distinguishes
 a check mark never implies that the Bot or platform completed a purchase. `/check` can still create and send triggered legacy
 drawdown, Price-Gain, and due reminder-only DCA alerts.
 
+## Editing drawdown tier amounts
+
+```text
+/set_plan_amounts 1 15:3000,20:6000
+```
+
+Find the plan ID with `/list`. Specify any subset of existing percentages in
+ascending order. The command cannot change thresholds, tier count, or ETF/fund
+identity. It reads local state and previews old/new configured amounts, each
+tier's current-cycle amount/state, future cycle total and both pending totals.
+Nothing changes until confirmation.
+
+- Untriggered tiers use new amounts for later triggers in this cycle and future cycles.
+- Pending tiers can retain this cycle's amounts or change after you explicitly
+  confirm that the selected subscriptions have not been submitted.
+- Added tiers, including pending NAV estimates, keep their original amounts,
+  fees and estimates; new amounts start next cycle.
+- Skipped tiers remain skipped; new amounts start next cycle.
+
+Changing a purchased tier from 5,000 to 8,000 does not create a 3,000 top-up.
+Record any unlogged subscription with `/mark_added` before editing.
+
+Confirmation is scoped to your user/chat, ten minutes and the same China market
+date. Any intervening plan, cycle, purchase, reminder or fee change requires a
+fresh preview. Edits preserve market facts, cycle state, snoozes and position
+estimates. Old reminder buttons and addition confirmations expire; use
+`/mark_added` for a fresh confirmation. Unfinished old alert deliveries are
+cancelled; sent or already in-flight network messages cannot be recalled.
+
+`/plans` and `/check` show current-cycle amounts and differing next-cycle amounts;
+`/list` shows configured amounts. Historical corrections use the amount on the
+declared subscription date (the last confirmed edit that day), still require
+eligible close-confirmed facts, and never estimate historical units/cost.
+
 ## Low-maintenance DCA position tracking
 
 An enhanced DCA rule identifies the Investment Feeder Fund and gross recurring

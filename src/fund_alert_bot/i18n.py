@@ -568,6 +568,44 @@ _EN_TO_ZH.update(
     }
 )
 
+_EN_TO_ZH.update(
+    {
+        "Change drawdown tier amounts": "修改回撤档位金额",
+        "Preview tier amount changes": "预览档位金额修改",
+        "Preview drawdown tier amounts": "回撤档位金额修改预览",
+        "Plan amount:": "计划金额：",
+        "Current-cycle amount:": "本周期金额：",
+        "Next-cycle amount:": "下周期金额：",
+        "Next-cycle amounts:": "下周期金额：",
+        "Current cycle and future cycles": "本周期后续触发及未来周期生效",
+        "Choose whether to update this pending amount": "请选择是否同时修改本次待加仓金额",
+        "Purchase unchanged; next cycle only": "已加仓记录不变，新金额下周期生效",
+        "Still skipped; next cycle only": "本周期保持跳过，新金额下周期生效",
+        "Future one-cycle total:": "未来单周期总额：",
+        "Pending total (keep current amounts):": "待处理合计（保持本次金额）：",
+        "Pending total (update selected pending tiers):": "待处理合计（同时修改所选待处理档位）：",
+        "Already submitted a subscription? Record it with /mark_added before editing.": "若已实际申购，请先用 /mark_added 补记，再修改金额。",
+        "Trigger facts, purchases, skips and position estimates are preserved.": "保留触发事实、已加仓记录、跳过状态和持仓估算。",
+        "Old reminder buttons expire after saving; use /mark_added to record a purchase.": "保存后旧提醒按钮失效；实际申购后请使用 /mark_added 记录。",
+        "Not purchased: update pending + future amounts": "确认尚未申购，修改本次及未来金额",
+        "Keep pending amounts; save configuration": "本次待处理金额不变，保存计划金额",
+        "Confirm amount changes": "确认修改金额",
+        "Saved tier amounts. Selected pending amounts were updated.": "已保存档位金额，所选待处理档位的本次金额已更新。",
+        "Saved tier amounts. Existing pending amounts are unchanged.": "已保存档位金额，本次待处理金额保持不变。",
+        "Purchases and skips are unchanged. Use /plans to check amounts or /mark_added after subscribing.": "已加仓和跳过状态不变。使用 /plans 核对金额，实际申购后用 /mark_added 记录。",
+        "Amount changes cancelled. Nothing was changed.": "已取消金额修改，未更改任何记录。",
+        "Amount confirmation expired or belongs to another chat. Rerun /set_plan_amounts.": "金额确认已过期或不属于此聊天，请重新执行 /set_plan_amounts。",
+        "Amount confirmation expired. Rerun /set_plan_amounts.": "金额确认已过期，请重新执行 /set_plan_amounts。",
+        "Plan state changed. Rerun /set_plan_amounts for a fresh preview.": "计划状态已变化，请重新执行 /set_plan_amounts 查看最新预览。",
+        "Plan amounts changed; use /mark_added for a fresh confirmation.": "计划金额已变化，请使用 /mark_added 重新确认。",
+        "Plan amounts changed; rerun /mark_added.": "计划金额已变化，请重新执行 /mark_added。",
+        "Only amounts of existing tiers can change; keep drawdown percentages.": "只能修改已有档位的金额，请保留原回撤百分比。",
+        "The selected amounts are already configured.": "所选金额已与当前配置一致。",
+        "Fixed fee must be lower than each tier amount.": "固定手续费必须低于每档金额。",
+        "Confirm that the selected pending tiers have not been purchased.": "请确认所选待处理档位尚未实际申购。",
+    }
+)
+
 _EXACT_EN_TO_ZH = {"Cancel": "取消"}
 
 _ZH_TO_EN = {
