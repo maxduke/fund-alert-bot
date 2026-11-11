@@ -202,6 +202,20 @@ def init_db(connection: sqlite3.Connection) -> None:
             PRIMARY KEY (cycle_id, tier_key)
         );
 
+        CREATE TABLE IF NOT EXISTS drawdown_plan_amount_changes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            rule_id INTEGER NOT NULL REFERENCES rules(id),
+            cycle_id INTEGER REFERENCES drawdown_cycles(id) ON DELETE CASCADE,
+            tier_key TEXT NOT NULL,
+            plan_amount REAL NOT NULL CHECK (plan_amount > 0),
+            cycle_amount REAL NOT NULL CHECK (cycle_amount > 0),
+            effective_date TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS drawdown_plan_amount_changes_cycle_tier
+        ON drawdown_plan_amount_changes(cycle_id, tier_key, id);
+
         CREATE TABLE IF NOT EXISTS fund_settings (
             fund_symbol TEXT PRIMARY KEY,
             fee_mode TEXT CHECK (fee_mode IN ('rate', 'fixed')),
@@ -2369,6 +2383,7 @@ def record_manual_addition(
     effective_date: str | None = None,
     source_alert_event_ids: Mapping[str, int | None] | None = None,
     position_already_included: bool = False,
+    expected_amount_revision: int | None = None,
 ) -> tuple[int | None, tuple[str, ...]]:
     """Record selected tiers and optionally one fee-aware pending estimate."""
 
@@ -2410,6 +2425,33 @@ def record_manual_addition(
             raise sqlite3.IntegrityError("Drawdown plan is no longer enabled.")
         if active is None or int(active["id"]) != cycle_id:
             raise sqlite3.IntegrityError("Drawdown plan cycle changed.")
+        from fund_alert_bot.plan_amounts import amount_revision, cycle_amount_config
+
+        revision = amount_revision(connection, rule_id)
+        if (
+            expected_amount_revision is not None
+            and revision != expected_amount_revision
+        ) or (expected_amount_revision is None and revision != 0):
+            raise sqlite3.IntegrityError("Plan amounts changed; rerun /mark_added.")
+        config = parse_drawdown_plan_config(
+            reference_symbol=str(rule["symbol"]),
+            asset_type=str(rule["asset_type"]),
+            params=json.loads(str(rule["params_json"])),
+        )
+        effective_config = cycle_amount_config(
+            connection,
+            config,
+            cycle_id,
+            on_date=action_date_override,
+        )
+        effective_tiers = {tier.key: tier for tier in effective_config.tiers}
+        if config.investment_fund_symbol != fund_symbol or any(
+            str(tier.key) not in effective_tiers
+            or float(tier.drawdown) != effective_tiers[str(tier.key)].drawdown
+            or float(tier.amount) != effective_tiers[str(tier.key)].amount
+            for tier in tiers
+        ):
+            raise sqlite3.IntegrityError("Plan amounts changed; rerun /mark_added.")
         selected_keys = tuple(str(tier.key) for tier in tiers)
         if len(set(selected_keys)) != len(selected_keys):
             raise sqlite3.IntegrityError("Duplicate drawdown tiers were selected.")
@@ -2437,48 +2479,11 @@ def record_manual_addition(
                         float(tier.drawdown),
                         float(eligible_tiers[str(tier.key)]["drawdown"]),
                     )
-                    or not math.isclose(
-                        float(tier.amount),
-                        float(eligible_tiers[str(tier.key)]["amount"]),
-                    )
                     for tier in tiers
                 )
             ):
                 raise sqlite3.IntegrityError("Manual-add event is no longer eligible.")
         else:
-            try:
-                config = parse_drawdown_plan_config(
-                    reference_symbol=str(rule["symbol"]),
-                    asset_type=str(rule["asset_type"]),
-                    params=json.loads(str(rule["params_json"])),
-                )
-                configured_tiers = {tier.key: tier for tier in config.tiers}
-            except (TypeError, ValueError, json.JSONDecodeError):
-                raise sqlite3.IntegrityError(
-                    "Drawdown plan configuration changed; rerun /mark_added."
-                ) from None
-            if (
-                any(
-                    key not in configured_tiers
-                    or not math.isclose(
-                        float(tier.drawdown),
-                        float(configured_tiers[key].drawdown),
-                        rel_tol=1e-9,
-                        abs_tol=1e-12,
-                    )
-                    or not math.isclose(
-                        float(tier.amount),
-                        float(configured_tiers[key].amount),
-                        rel_tol=1e-9,
-                        abs_tol=1e-12,
-                    )
-                    for key, tier in ((str(tier.key), tier) for tier in tiers)
-                )
-                or config.investment_fund_symbol != fund_symbol
-            ):
-                raise sqlite3.IntegrityError(
-                    "Historical tiers no longer match the current plan."
-                )
             if any(key not in source_event_ids for key in selected_keys):
                 raise sqlite3.IntegrityError(
                     "Historical tier provenance is missing; rerun /mark_added."
@@ -2524,12 +2529,6 @@ def record_manual_addition(
                         rel_tol=1e-9,
                         abs_tol=1e-12,
                     )
-                    and math.isclose(
-                        float(record["amount"]),
-                        float(tier.amount),
-                        rel_tol=1e-9,
-                        abs_tol=1e-12,
-                    )
                 ):
                     raise sqlite3.IntegrityError(
                         "Historical tier no longer matches the current plan."
@@ -2570,7 +2569,7 @@ def record_manual_addition(
                             float(eligible_tier["drawdown"]), float(tier.drawdown)
                         )
                         or not math.isclose(
-                            float(eligible_tier["amount"]), float(tier.amount)
+                            float(eligible_tier["amount"]), float(record["amount"])
                         )
                     ):
                         raise sqlite3.IntegrityError(
@@ -3525,12 +3524,13 @@ def add_drawdown_plan_pre_alert_event(
     *,
     rule_id: int,
     alert: Any,
+    expected_params_json: str | None = None,
 ) -> int:
     """Reserve one expiring pre-alert only while its plan remains enabled."""
 
     with write_transaction(connection):
         rule = connection.execute(
-            "SELECT type, enabled FROM rules WHERE id = ?",
+            "SELECT type, enabled, params_json FROM rules WHERE id = ?",
             (rule_id,),
         ).fetchone()
         if (
@@ -3539,6 +3539,14 @@ def add_drawdown_plan_pre_alert_event(
             or not bool(rule["enabled"])
         ):
             raise sqlite3.IntegrityError("Drawdown plan is no longer enabled.")
+        from fund_alert_bot.plan_amounts import amount_revision
+
+        if expected_params_json is not None and (
+            str(rule["params_json"]) != expected_params_json
+            or amount_revision(connection, rule_id)
+            != alert["payload"].get("amount_revision", 0)
+        ):
+            raise sqlite3.IntegrityError("Plan amounts changed during evaluation.")
         cursor = connection.execute(
             """
             INSERT INTO alert_events (
@@ -4233,6 +4241,8 @@ def persist_drawdown_plan_evaluation(
     tier_source: str = "close_confirmed",
     alert: Any | None = None,
     alert_factory: Any | None = None,
+    expected_params_json: str | None = None,
+    expected_amount_revision: int | None = None,
 ) -> tuple[int, int | None]:
     """Atomically persist cycle state, tier facts, and an optional event."""
 
@@ -4249,11 +4259,21 @@ def persist_drawdown_plan_evaluation(
 
     with write_transaction(connection):
         rule = connection.execute(
-            "SELECT enabled FROM rules WHERE id = ?",
+            "SELECT enabled, params_json FROM rules WHERE id = ?",
             (rule_id,),
         ).fetchone()
         if rule is None or not bool(rule["enabled"]):
             raise sqlite3.IntegrityError("Drawdown plan is no longer enabled.")
+        from fund_alert_bot.plan_amounts import amount_revision
+
+        if (
+            expected_params_json is not None
+            and str(rule["params_json"]) != expected_params_json
+        ) or (
+            expected_amount_revision is not None
+            and amount_revision(connection, rule_id) != expected_amount_revision
+        ):
+            raise sqlite3.IntegrityError("Plan amounts changed during evaluation.")
 
         active = get_active_drawdown_cycle(connection, rule_id)
         active_id = None if active is None else int(active["id"])
