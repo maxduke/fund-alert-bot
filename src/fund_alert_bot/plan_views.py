@@ -208,6 +208,21 @@ def format_plan_overview(
             f"{format_plan_amount(next_tier.amount)}"
         )
         plan_lines.extend(_format_position_lines(status))
+        future = {tier.key: tier for tier in status.configured_tiers}
+        changed = tuple(
+            tier
+            for tier in status.config.tiers
+            if tier.key in future and tier.amount != future[tier.key].amount
+        )
+        if changed:
+            plan_lines.append(
+                "Next-cycle amounts: "
+                + ", ".join(
+                    f"-{format_plan_percent(tier.drawdown)} / "
+                    f"{format_plan_amount(future[tier.key].amount)}"
+                    for tier in changed
+                )
+            )
         lines.extend(plan_lines)
     for position, nav, ownership, nav_unavailable_reason in unmatched_positions:
         units = float(position["units"])
@@ -330,6 +345,11 @@ def format_plan_details(result: DrawdownPlanStatusResult) -> str:
                 f"• -{format_plan_percent(tier.drawdown)} / "
                 f"{format_plan_amount(tier.amount)}: {state}"
             )
+            future = next(
+                (item for item in status.configured_tiers if item.key == tier.key), tier
+            )
+            if future.amount != tier.amount:
+                lines.append(f"Next-cycle amount: {format_plan_amount(future.amount)}")
         next_tier = _next_open_tier(status)
         if next_tier is None:
             lines.append("Next level: all tiers already reminded")

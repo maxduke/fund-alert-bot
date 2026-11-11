@@ -41,6 +41,7 @@ Implemented Telegram commands:
 - `/sync_position <fund_symbol> <units> <average_unit_cost>`
 - `/add_drawdown_plan <reference_etf> <feeder_fund> <name> <tiers> [lookback:<days>] [rearm:<percent>]`
 - `/set_plan_rearm <plan_id> <percent>`
+- `/set_plan_amounts <plan_id> <percent:amount,...>`
 - `/mark_added <plan_id> <tier_percentages> [YYYY-MM-DD]`
 - `/plans [refresh]`
 - `/list`
@@ -57,6 +58,17 @@ before the same-day close, then runs the after-close market reminder check. Both
 scheduled market jobs skip official CN market holidays when AKShare's Sina
 trade-date calendar is available. If that calendar cannot be loaded, the
 scheduled check falls back to weekday behavior.
+
+Use `/set_plan_amounts 1 15:3000,20:6000` to preview changes to existing drawdown
+tier amounts. Confirmation is required. Untriggered tiers change in this cycle;
+pending tiers can retain their current amounts or change after explicit
+confirmation that the selected subscriptions have not been submitted. Added
+tiers (including pending NAV estimates) and skipped tiers keep their current
+amounts and state; their new amounts start next cycle. No purchase for a
+difference is inferred. Record any unlogged purchase before editing. Old reminder
+buttons expire after saving; use `/plans` to check current/next-cycle amounts and
+`/mark_added` to start a fresh purchase confirmation. Thresholds and tier count
+cannot be changed. See the [guide](docs/investment-plan-guide.md).
 
 Price-Gain reminders are added with `/add_profit`, for example
 `/add_profit cn_etf 159915 ChiNext-ETF 1.85 25,40` or
@@ -402,7 +414,7 @@ The local development flow is:
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --constraint constraints.txt `
-  editables==0.6 hatchling==1.32.0 setuptools==84.0.0 wheel==0.48.0
+  editables==0.6 hatchling==1.32.4 setuptools==84.0.0 wheel==0.48.0
 python -m pip install --no-build-isolation --constraint constraints.txt -e ".[dev]"
 ```
 
