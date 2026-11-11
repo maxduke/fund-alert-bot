@@ -64,6 +64,7 @@ ADD_DRAWDOWN_PLAN_USAGE = (
 
 SET_PLAN_REARM_USAGE = "Usage: /set_plan_rearm <plan_id> <percent>"
 SET_PLAN_AMOUNTS_USAGE = "Usage: /set_plan_amounts <plan_id> <percent:amount,...>"
+SET_PLAN_INDEX_USAGE = "Usage: /set_plan_index <plan_id> <index_code|off>"
 
 
 MARK_ADDED_USAGE = "Usage: /mark_added <plan_id> <tier_percentages> [YYYY-MM-DD]"
@@ -159,6 +160,12 @@ class SetPlanAmountsCommand:
 
     plan_id: int
     tiers: tuple[DrawdownTier, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SetPlanIndexCommand:
+    plan_id: int
+    index_symbol: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -557,6 +564,21 @@ def parse_set_plan_rearm_args(args: Sequence[str]) -> SetPlanRearmCommand:
     if plan_id <= 0:
         raise CommandParseError("plan_id must be a positive integer")
     return SetPlanRearmCommand(plan_id, parse_rearm_percent(args[1]))
+
+
+def parse_set_plan_index_args(args: Sequence[str]) -> SetPlanIndexCommand:
+    if len(args) != 2:
+        raise CommandParseError(SET_PLAN_INDEX_USAGE)
+    try:
+        plan_id = int(args[0])
+    except ValueError as exc:
+        raise CommandParseError("plan_id must be a positive integer") from exc
+    if plan_id <= 0:
+        raise CommandParseError("plan_id must be a positive integer")
+    index_symbol = args[1]
+    if index_symbol != "off" and not re.fullmatch(r"[0-9]{6}", index_symbol):
+        raise CommandParseError("index_code must contain exactly six digits or off")
+    return SetPlanIndexCommand(plan_id, None if index_symbol == "off" else index_symbol)
 
 
 def parse_set_plan_amounts_args(args: Sequence[str]) -> SetPlanAmountsCommand:

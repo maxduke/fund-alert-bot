@@ -13,6 +13,10 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+from fund_alert_bot.market_data.index_valuation import (
+    MAX_VALUATION_CONTEXT_CHARS,
+    ValuationContext,
+)
 from fund_alert_bot.market_data.models import AssetType, RealtimeQuote
 from fund_alert_bot.notifications.base import TELEGRAM_TEXT_LIMIT
 from fund_alert_bot.rules._params import THRESHOLD_TOLERANCE, meets_threshold
@@ -52,6 +56,7 @@ class DrawdownPlanConfig:
     sma_window: int
     sma_slope_window: int
     rearm_margin: float
+    valuation_index_symbol: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,6 +193,12 @@ def parse_drawdown_plan_config(
     )
     rearm_margin = _read_rearm_margin(params.get("rearm_margin", DEFAULT_REARM_MARGIN))
     tiers = _read_tiers(params.get("tiers"))
+    valuation_index = params.get("valuation_index_symbol")
+    if valuation_index is not None and (
+        not isinstance(valuation_index, str)
+        or _SYMBOL_PATTERN.fullmatch(valuation_index) is None
+    ):
+        raise ValueError("valuation index code must contain exactly six digits.")
     return DrawdownPlanConfig(
         investment_fund_symbol=fund_symbol,
         lookback_days=lookback_days,
@@ -195,6 +206,7 @@ def parse_drawdown_plan_config(
         sma_window=sma_window,
         sma_slope_window=slope_window,
         rearm_margin=rearm_margin,
+        valuation_index_symbol=valuation_index,
     )
 
 
@@ -419,6 +431,7 @@ def build_drawdown_plan_pre_alert(
     quote: RealtimeQuote,
     actionable_tiers: Sequence[DrawdownTier] | None = None,
     pending_tiers: Sequence[DrawdownTier] = (),
+    valuation: ValuationContext | None = None,
 ) -> dict[str, object] | None:
     """Build one provisional before-close reminder without consuming tiers."""
 
@@ -493,6 +506,7 @@ def build_drawdown_plan_pre_alert(
         *_format_trend(config, evaluation),
         "",
         "Final confirmation will use closing data.",
+        *(valuation.lines() if valuation is not None else ()),
         "Only after you actually subscribe, record it with:",
         f"/mark_added {rule_id} {_tier_command_text(tiers)}",
         "If you add today, remember to sync the fund position after units settle.",
@@ -507,6 +521,7 @@ def build_drawdown_plan_pre_alert(
         "message": message,
         "payload": {
             "phase": "before_close",
+            **({"valuation": valuation.payload()} if valuation is not None else {}),
             "rule_id": rule_id,
             "cycle_id": cycle_id,
             "reference_symbol": reference_symbol,
@@ -547,6 +562,7 @@ def build_drawdown_plan_alert(
     cycle_id: int | None = None,
     actionable_tiers: Sequence[DrawdownTier] | None = None,
     pending_tiers: Sequence[DrawdownTier] = (),
+    valuation: ValuationContext | None = None,
 ) -> dict[str, object] | None:
     """Build one aggregate reminder for actionable tiers."""
 
@@ -634,6 +650,7 @@ def build_drawdown_plan_alert(
         *trend_lines,
         "",
         "Regular DCA continues separately.",
+        *(valuation.lines() if valuation is not None else ()),
         "Only after you actually subscribe, record it with:",
         f"/mark_added {rule_id} {_tier_command_text(tiers)}",
         "This is a reminder only. No trade has been placed.",
@@ -654,6 +671,7 @@ def build_drawdown_plan_alert(
         "message": message,
         "payload": {
             "phase": "after_close",
+            **({"valuation": valuation.payload()} if valuation is not None else {}),
             "rule_id": rule_id,
             "cycle_id": cycle_id,
             "reference_symbol": reference_symbol,
@@ -777,7 +795,14 @@ def validate_drawdown_plan_notification_size(
         ),
     )
     if any(
-        alert is not None and len(str(alert["message"])) > TELEGRAM_TEXT_LIMIT
+        alert is not None
+        and len(str(alert["message"]))
+        + (
+            MAX_VALUATION_CONTEXT_CHARS
+            if config.valuation_index_symbol is not None
+            else 0
+        )
+        > TELEGRAM_TEXT_LIMIT
         for alert in alerts
     ):
         raise ValueError(

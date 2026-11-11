@@ -58,6 +58,7 @@ from fund_alert_bot.market_data import (
     MarketDataProviderError,
     PriceBasis,
 )
+from fund_alert_bot.market_data.index_valuation import ValuationContext
 from fund_alert_bot.market_data.normalize import NORMALIZED_COLUMNS
 from fund_alert_bot.plan_amounts import amount_revision, cycle_amount_config
 from fund_alert_bot.rules.dca import (
@@ -92,6 +93,7 @@ from fund_alert_bot.rules.profit import (
     build_profit_alerts,
     latest_unavailable_message,
 )
+from fund_alert_bot.valuation import get_valuation_context
 
 DCA_RULE_TYPE = "dca_reminder"
 DRAW_DOWN_RULE_TYPE = "drawdown_from_high"
@@ -368,6 +370,7 @@ class DrawdownPlanStatus:
     position_sync_required_since: str | None
     fund_nav_unavailable_reason: str | None = None
     configured_tiers: tuple[DrawdownTier, ...] = ()
+    valuation: ValuationContext | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -388,6 +391,7 @@ def evaluate_drawdown_plan_rule(
     expected_date: date,
     same_day_actions: bool = True,
     initialize_only: bool = False,
+    valuation_provider: MarketDataProvider | None = None,
 ) -> DrawdownPlanRuleResult:
     """Evaluate and atomically persist one drawdown plan."""
 
@@ -445,6 +449,16 @@ def evaluate_drawdown_plan_rule(
     )
     tiers_to_record = () if initialize_only else evaluation.newly_crossed_tiers
     resolved_alert: dict[str, object] | None = None
+    valuation = (
+        get_valuation_context(
+            connection,
+            valuation_provider,
+            config.valuation_index_symbol,
+            as_of_date=evaluation.latest_date,
+        )
+        if actionable_tiers
+        else None
+    )
 
     def build_alert(cycle_id: int) -> dict[str, object] | None:
         nonlocal resolved_alert
@@ -457,6 +471,7 @@ def evaluate_drawdown_plan_rule(
             cycle_id=cycle_id,
             actionable_tiers=actionable_tiers,
             pending_tiers=pending_tiers,
+            valuation=valuation,
         )
         if resolved_alert is not None and not same_day_actions:
             resolved_alert["message"] = format_delayed_drawdown_plan_message(
@@ -586,6 +601,7 @@ def evaluate_drawdown_plan_rules(
                 rule,
                 history,
                 expected_date=expected_date,
+                valuation_provider=market_data_provider,
             )
             if result.notification is not None:
                 notifications.append(result.notification)
@@ -667,6 +683,7 @@ def evaluate_drawdown_plan_prealerts(
                     history,
                     expected_date=confirmed_date,
                     same_day_actions=False,
+                    valuation_provider=market_data_provider,
                 )
                 if catch_up.notification is not None:
                     notifications.append(catch_up.notification)
@@ -753,6 +770,16 @@ def evaluate_drawdown_plan_prealerts(
             pending_tiers = tuple(
                 tier for tier in actionable_tiers if tier.key not in newly_keys
             )
+            valuation = (
+                get_valuation_context(
+                    connection,
+                    market_data_provider,
+                    config.valuation_index_symbol,
+                    as_of_date=confirmed_date,
+                )
+                if actionable_tiers
+                else None
+            )
             alert = build_drawdown_plan_pre_alert(
                 rule_id=rule_id,
                 cycle_id=cycle_id,
@@ -764,6 +791,7 @@ def evaluate_drawdown_plan_prealerts(
                 quote=quote,
                 actionable_tiers=actionable_tiers,
                 pending_tiers=pending_tiers,
+                valuation=valuation,
             )
             if alert is None:
                 continue
@@ -1076,6 +1104,7 @@ def read_drawdown_plan_statuses(
     statuses: list[DrawdownPlanStatus] = []
     no_data_skips: list[RuleNoDataSkip] = []
     errors: list[RuleCheckError] = []
+    refreshed_valuation_indices: set[str | None] = set()
     for rule in rules:
         try:
             config, active_cycle, recorded_tier_keys = _load_drawdown_plan_state(
@@ -1168,6 +1197,15 @@ def read_drawdown_plan_statuses(
                                 str(exc),
                             )
                         )
+            valuation = get_valuation_context(
+                connection,
+                market_data_provider,
+                config.valuation_index_symbol,
+                as_of_date=evaluation.latest_date,
+                force_refresh=force_refresh
+                and config.valuation_index_symbol not in refreshed_valuation_indices,
+            )
+            refreshed_valuation_indices.add(config.valuation_index_symbol)
             statuses.append(
                 DrawdownPlanStatus(
                     rule_id=int(rule["id"]),
@@ -1192,6 +1230,7 @@ def read_drawdown_plan_statuses(
                     ),
                     fund_nav_unavailable_reason=nav_unavailable_reason,
                     configured_tiers=configured_tiers,
+                    valuation=valuation,
                 )
             )
         except MarketDataProviderError as exc:

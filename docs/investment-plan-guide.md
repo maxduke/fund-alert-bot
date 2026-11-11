@@ -593,6 +593,37 @@ cancelled; sent or already in-flight network messages cannot be recalled.
 declared subscription date (the last confirmed edit that day), still require
 eligible close-confirmed facts, and never estimate historical units/cost.
 
+## Optional index valuation context
+
+Use `/set_plan_index <plan_id> <index_code|off>` only after checking the tracked
+index of your actual feeder fund and reference ETF. For an A500 plan, for example,
+`/set_plan_index 1 000510` explicitly declares that relationship. Before saving,
+the bot reads the exact code's official CSI indicator file, checks its identity,
+and displays the fund, ETF, index name/code. It cannot verify a fund prospectus or
+infer the relationship from your display name. An unverified code, disabled plan
+or concurrent configuration change leaves the association unchanged.
+
+Drawdown prealerts use observations no later than the confirmed closing date;
+close alerts and status use observations no later than the displayed price date.
+Show P/E1 and D/P1 (total shares), P/E2 and D/P2 (calculation shares), source and
+actual data date. Do not silently relabel these metrics as TTM or blend providers.
+Missing PE is shown as a dash; a zero dividend yield is valid. The recent-only
+source has no PB or multi-year percentiles, which remain explicitly unavailable.
+A500 and STAR 50 were live-probed; other exact codes require successful source
+verification. No similar-index fallback is allowed.
+
+One request has an eight-second network timeout and a two-MiB response limit.
+SQLite shares recent observations across plans and restarts. Successful requests
+are cached for an hour, failed attempts for five minutes. `/plans refresh` forces
+refresh once per index. On failure, use a validated dated prior snapshot with a
+refresh-failure label, or display unavailable. An older valuation is labelled as
+predating the price date. Valuation failure never suppresses a drawdown reminder,
+and retries retain the event's original valuation snapshot.
+
+Valuation never changes tiers, amounts, cycles, DCA, purchase records or positions.
+Unconfigured plans make no valuation requests. `off` removes the association
+without requiring the source to be available.
+
 ## Low-maintenance DCA position tracking
 
 An enhanced DCA rule identifies the Investment Feeder Fund and gross recurring

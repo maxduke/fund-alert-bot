@@ -833,6 +833,76 @@ def test_set_plan_amount_confirmation_is_scoped_and_revalidated(tmp_path, scenar
         )
 
 
+@pytest.mark.parametrize("failed", [False, True])
+def test_set_plan_index_verifies_identity_before_changing_association(tmp_path, failed):
+    from fund_alert_bot.market_data.index_valuation import IndexValuation
+
+    path = tmp_path / "bot.sqlite3"
+    rule_id = _prepare_ready_plan_alert(
+        path, closes=[100, 80], expected_date=date(2024, 1, 2)
+    )
+    calls = []
+
+    def get_values(code):
+        calls.append(code)
+        if failed:
+            raise TimeoutError("temporarily unavailable")
+        return (IndexValuation(code, "中证A500", date(2024, 1, 2), 15, 18, 2.5, 2),)
+
+    handlers = build_command_handlers(
+        {123},
+        sqlite_path=path,
+        market_data_provider=SimpleNamespace(get_index_valuations=get_values),
+        now_factory=lambda: datetime(2024, 1, 2, 6, tzinfo=UTC),
+    )
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123), effective_message=message
+    )
+    protected = (
+        "drawdown_cycles",
+        "drawdown_tier_records",
+        "alert_events",
+        "manual_add_actions",
+        "position_snapshots",
+    )
+    with open_connection(path) as connection:
+        before = {
+            table: [dict(row) for row in connection.execute(f"SELECT * FROM {table}")]
+            for table in protected
+        }
+    asyncio.run(
+        _handler_by_command(handlers, "set_plan_index").callback(
+            update, SimpleNamespace(args=[str(rule_id), "000510"])
+        )
+    )
+    assert calls == ["000510"]
+    with open_connection(path) as connection:
+        params = json.loads(list_rules(connection)[0]["params_json"])
+        assert params.get("valuation_index_symbol") == (None if failed else "000510")
+        assert {
+            table: [dict(row) for row in connection.execute(f"SELECT * FROM {table}")]
+            for table in protected
+        } == before
+    if failed:
+        assert "Association unchanged" in message.replies[-1]
+    else:
+        assert "Valuation index: 中证A500 (000510)" in message.replies[-1]
+        assert "Reference ETF: 510300" in message.replies[-1]
+        assert "Investment fund: 000001" in message.replies[-1]
+    asyncio.run(
+        _handler_by_command(handlers, "set_plan_index").callback(
+            update, SimpleNamespace(args=[str(rule_id), "off"])
+        )
+    )
+    assert "disabled" in message.replies[-1]
+    assert calls == ["000510"]
+    with open_connection(path) as connection:
+        assert "valuation_index_symbol" not in json.loads(
+            list_rules(connection)[0]["params_json"]
+        )
+
+
 def test_set_plan_rearm_updates_only_plan_config(tmp_path) -> None:
     sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
     with open_connection(sqlite_path) as connection:

@@ -20,6 +20,10 @@ from fund_alert_bot.market_data.exceptions import (
     MarketDataNormalizeError,
     UnsupportedAssetTypeError,
 )
+from fund_alert_bot.market_data.index_valuation import (
+    IndexValuation,
+    fetch_csindex_valuations,
+)
 from fund_alert_bot.market_data.models import (
     AssetType,
     FundNav,
@@ -363,6 +367,16 @@ class AkshareMarketDataProvider(MarketDataProvider):
         if matches.empty or not str(matches.iloc[0]).strip():
             raise EmptyMarketDataError("Fund metadata has no declared fund type.")
         return str(matches.iloc[0]).strip()
+
+    def get_index_valuations(self, index_symbol: str) -> tuple[IndexValuation, ...]:
+        """Read the exact index's official CSI file with a bounded request."""
+
+        self._count_request("csindex:valuation")
+        return fetch_csindex_valuations(
+            index_symbol,
+            today=self._today_factory(),
+            http_get=self._http_get,
+        )
 
     def _get_realtime_latest(
         self,

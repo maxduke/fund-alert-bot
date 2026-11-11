@@ -208,6 +208,13 @@ def format_plan_overview(
             f"{format_plan_amount(next_tier.amount)}"
         )
         plan_lines.extend(_format_position_lines(status))
+        plan_lines.extend(
+            status.valuation.lines()
+            if status.valuation is not None
+            else (
+                f"Configure valuation: /set_plan_index {status.rule_id} <index_code>",
+            )
+        )
         future = {tier.key: tier for tier in status.configured_tiers}
         changed = tuple(
             tier
@@ -362,6 +369,13 @@ def format_plan_details(result: DrawdownPlanStatusResult) -> str:
                 )
             )
         lines.extend(_format_position_lines(status))
+        lines.extend(
+            status.valuation.lines()
+            if status.valuation is not None
+            else (
+                f"Configure valuation: /set_plan_index {status.rule_id} <index_code>",
+            )
+        )
     _append_plan_failures(lines, result)
     return "\n".join(lines)
 

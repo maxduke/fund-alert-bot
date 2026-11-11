@@ -7,6 +7,7 @@ from typing import Protocol
 
 import pandas as pd
 
+from fund_alert_bot.market_data.index_valuation import IndexValuation
 from fund_alert_bot.market_data.models import (
     FundNav,
     Instrument,
@@ -48,3 +49,6 @@ class MarketDataProvider(Protocol):
 
     def get_fund_type(self, symbol: str) -> str:
         """Return the provider-declared type for one feeder fund."""
+
+    def get_index_valuations(self, index_symbol: str) -> tuple[IndexValuation, ...]:
+        """Return recent valuations for this exact index, without substitution."""

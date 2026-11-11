@@ -39,6 +39,7 @@ SQLite 会自动清理已终结历史（基准保留 400 天），但保留活�
 - `/add_drawdown_plan <reference_etf> <feeder_fund> <name> <tiers> [lookback:<days>] [rearm:<percent>]`
 - `/set_plan_rearm <plan_id> <percent>`
 - `/set_plan_amounts <plan_id> <percent:amount,...>`
+- `/set_plan_index <plan_id> <index_code|off>`
 - `/mark_added <plan_id> <tier_percentages> [YYYY-MM-DD]`
 - `/plans [refresh]`
 - `/list`
@@ -66,6 +67,27 @@ AKShare 的新浪交易日历取得官方开市状态，节假日会跳过；日
 如果已经申购但未记录，请先 `/mark_added` 补记再修改。保存后旧提醒按钮失效；
 使用 `/plans` 核对本周期和下周期金额，使用 `/mark_added` 创建新的加仓确认。
 详情见[操作指南](docs/investment-plan-guide.zh-CN.md)。
+
+## 补仓时的指数估值参考
+
+如果计划 1 的联接基金及参考 ETF 确实跟踪中证 A500，可明确关联：
+
+```text
+/set_plan_index 1 000510
+```
+
+这条命令代表你对跟踪关系的确认；Bot 不会按名称猜测，也不替换成相近指数。
+保存前会读取该代码的中证官方指标文件并核对返回的指数身份，结果同时列出基金、ETF、
+指数名称和代码。当前已实测的来源包括 A500（000510）和科创50（000688）；
+其他代码只有同一来源能返回有效数据时才可配置，不保证覆盖所有指数。
+
+配置后，补仓提醒、`/plans` 和 `/check` 会展示 PE1/PE2、两种股息率及日期、来源。
+PE1/D/P1 按总股本，PE2/D/P2 按计算用股本；不会冒充已核实的 PE(TTM)。
+该来源只有近期记录，不提供 PB 或多年分位，缺失项明确标注。
+
+估值只作参考，不改变档位、金额或持仓。失败时保留带日期的有效缓存并说明刷新失败；
+没有有效缓存时显示暂不可用，补仓提醒照常发送。未配置的计划不会新增估值请求。
+`/plans refresh` 可强制刷新；`/set_plan_index 1 off` 可关闭且不依赖数据源可用。
 
 ## Price-Gain 涨幅提醒
 

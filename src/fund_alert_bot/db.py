@@ -389,6 +389,14 @@ def init_db(connection: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS fund_nav_history_lookup
         ON fund_nav_history(fund_symbol, nav_date);
+
+        CREATE TABLE IF NOT EXISTS index_valuation_cache (
+            index_symbol TEXT PRIMARY KEY,
+            observations_json TEXT,
+            attempted_at TEXT NOT NULL,
+            succeeded_at TEXT,
+            refresh_failed INTEGER NOT NULL CHECK (refresh_failed IN (0, 1))
+        );
         """
     )
     _ensure_notification_delivery_cancelled_status(connection)
