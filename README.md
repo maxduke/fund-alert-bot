@@ -42,6 +42,7 @@ Implemented Telegram commands:
 - `/add_drawdown_plan <reference_etf> <feeder_fund> <name> <tiers> [lookback:<days>] [rearm:<percent>]`
 - `/set_plan_rearm <plan_id> <percent>`
 - `/set_plan_amounts <plan_id> <percent:amount,...>`
+- `/set_plan_index <plan_id> <index_code|off>`
 - `/mark_added <plan_id> <tier_percentages> [YYYY-MM-DD]`
 - `/plans [refresh]`
 - `/list`
@@ -69,6 +70,25 @@ difference is inferred. Record any unlogged purchase before editing. Old reminde
 buttons expire after saving; use `/plans` to check current/next-cycle amounts and
 `/mark_added` to start a fresh purchase confirmation. Thresholds and tier count
 cannot be changed. See the [guide](docs/investment-plan-guide.md).
+
+Optional valuation context is configured with `/set_plan_index <plan_id>
+<index_code|off>`. For a plan whose ETF/feeder pair actually tracks CSI A500, use
+`/set_plan_index 1 000510`. The command is your explicit tracking-index
+declaration; the bot verifies the exact code against its official CSI indicator
+file before saving and displays the fund, ETF, index code and source name.
+It never infers a mapping from a display name or substitutes a similar index.
+The source was verified for A500 and STAR 50; other codes require the same source
+to return valid data and are not guaranteed to be supported.
+
+Configured plans show PE1/PE2, D/P1/D/P2, source and data date in drawdown reminders,
+`/plans` and `/check`. The two metric variants respectively use total shares and
+calculation shares; they are not relabelled as unverified TTM metrics. PB and
+multi-year percentiles are explicitly unavailable from this recent-only source.
+Valuation never changes tiers, amounts or positions. Failed requests use a
+validated dated cache with a failure label, or show unavailable, while drawdown
+reminders continue. Unconfigured plans make no valuation requests. Successful
+requests are cached across restart for one hour, failures for five minutes.
+`/plans refresh` forces refresh; `off` disables context without a source request.
 
 Price-Gain reminders are added with `/add_profit`, for example
 `/add_profit cn_etf 159915 ChiNext-ETF 1.85 25,40` or

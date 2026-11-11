@@ -606,6 +606,30 @@ _EN_TO_ZH.update(
     }
 )
 
+_EN_TO_ZH.update(
+    {
+        "Set the plan valuation index": "设置计划估值参考指数",
+        "Set optional index valuation context": "设置可选的指数估值参考",
+        "Configure valuation:": "配置估值参考：",
+        "Valuation index:": "估值参考指数：",
+        "PE1 / PE2:": "市盈率 PE1 / PE2：",
+        "Dividend yield D/P1 / D/P2:": "股息率 D/P1 / D/P2：",
+        "PE1, D/P1: total shares; PE2, D/P2: calculation shares.": "口径：PE1、D/P1 使用总股本；PE2、D/P2 使用计算用股本。",
+        "Valuation date:": "估值数据日期：",
+        "Valuation source: CSI official indicator file": "估值来源：中证指数官方指标文件",
+        "PB / historical percentiles: not provided by this source": "PB / 历史估值分位：此数据源未提供",
+        "Valuation predates the price date.": "估值数据早于价格数据日期。",
+        "Cached valuation; refresh failed.": "使用已缓存估值，本次刷新失败。",
+        "Valuation unavailable; drawdown reminder unchanged.": "估值暂不可用，不影响回撤提醒。",
+        "Index valuation context disabled.": "已关闭指数估值参考。",
+        "Saved valuation association declared by you.": "已按你声明的跟踪关系保存估值参考指数。",
+        "Valuation is context only; tiers, amounts and positions are unchanged.": "估值仅作参考，档位、金额和持仓均未改变。",
+        "Unable to verify this index's official valuation data. Association unchanged.": "无法核实此指数的官方估值数据，关联设置未改变。",
+        "Plan changed. Rerun /set_plan_index.": "计划已变化，请重新执行 /set_plan_index。",
+        "index_code must contain exactly six digits or off": "指数代码必须为六位数字，或填写 off 关闭",
+    }
+)
+
 _EXACT_EN_TO_ZH = {"Cancel": "取消"}
 
 _ZH_TO_EN = {

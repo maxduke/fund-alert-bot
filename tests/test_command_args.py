@@ -19,6 +19,7 @@ from fund_alert_bot.command_args import (
     parse_mark_added_args,
     parse_set_fund_cutoff_args,
     parse_set_fund_fee_args,
+    parse_set_plan_index_args,
     parse_set_plan_rearm_args,
     parse_sync_position_args,
     parse_thresholds,
@@ -64,6 +65,28 @@ def test_existing_command_imports_preserve_types_and_error_handling() -> None:
     assert isinstance(parsed, commands.DrawdownCommand)
     with pytest.raises(commands.CommandParseError, match="positive"):
         command_args.parse_add_dca_args(["Core", "MON", "-1"])
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        [],
+        ["1"],
+        ["0", "000510"],
+        ["bad", "000510"],
+        ["1", "510"],
+        ["1", "../000510"],
+        ["1", "创业板指"],
+    ],
+)
+def test_set_plan_index_rejects_invalid_arguments(args):
+    with pytest.raises(CommandParseError):
+        parse_set_plan_index_args(args)
+
+
+def test_set_plan_index_keeps_exact_index_identity_and_off():
+    assert parse_set_plan_index_args(["1", "399006"]).index_symbol == "399006"
+    assert parse_set_plan_index_args(["1", "off"]).index_symbol is None
 
 
 def test_parse_valid_drawdown_command() -> None:

@@ -46,6 +46,7 @@ from fund_alert_bot.command_args import (  # noqa: F401
     SET_FUND_CUTOFF_USAGE,
     SET_FUND_FEE_USAGE,
     SET_PLAN_AMOUNTS_USAGE,
+    SET_PLAN_INDEX_USAGE,
     SET_PLAN_REARM_USAGE,
     SYNC_POSITION_USAGE,
     CommandParseError,
@@ -57,6 +58,7 @@ from fund_alert_bot.command_args import (  # noqa: F401
     MarkAddedCommand,
     ProfitCommand,
     SetPlanAmountsCommand,
+    SetPlanIndexCommand,
     SetPlanRearmCommand,
     SyncPositionCommand,
     _parse_drawdown_plan_tiers,
@@ -76,6 +78,7 @@ from fund_alert_bot.command_args import (  # noqa: F401
     parse_set_fund_cutoff_args,
     parse_set_fund_fee_args,
     parse_set_plan_amounts_args,
+    parse_set_plan_index_args,
     parse_set_plan_rearm_args,
     parse_sync_position_args,
     parse_thresholds,
@@ -173,6 +176,7 @@ from fund_alert_bot.rules.profit import (
     build_position_profit_alert,
 )
 from fund_alert_bot.runtime_status import format_runtime_status
+from fund_alert_bot.valuation import get_valuation_context, update_plan_index
 
 if TYPE_CHECKING:
     from telegram import Update
@@ -203,6 +207,8 @@ HELP_MESSAGE = "\n".join(
         "/set_plan_rearm <plan_id> <percent> - Change a plan rearm margin",
         "/set_plan_amounts <plan_id> <percent:amount,...> "
         "- Preview tier amount changes",
+        "/set_plan_index <plan_id> <index_code|off> "
+        "- Set optional index valuation context",
         "/mark_added <plan_id> <tier_percentages> [YYYY-MM-DD] "
         "- Record an addition you made",
         "/plans - Show investment-plan status",
@@ -242,6 +248,7 @@ BOT_COMMAND_MENU = (
     ("add_drawdown_plan", "Add a Drawdown Add Plan"),
     ("set_plan_rearm", "Change a plan rearm margin"),
     ("set_plan_amounts", "Change drawdown tier amounts"),
+    ("set_plan_index", "Set the plan valuation index"),
     ("mark_added", "Record a completed addition"),
     ("plans", "Show investment-plan status"),
     ("list", "List configured rules and IDs"),
@@ -1646,6 +1653,82 @@ def build_command_handlers(
                 )
             ),
         )
+
+    async def set_plan_index(
+        update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        if await reject_if_unauthorized(update, allowed_user_ids):
+            return
+        try:
+            command = parse_set_plan_index_args(getattr(context, "args", ()))
+        except CommandParseError as exc:
+            await _reply_text(update, str(exc))
+            return
+
+        def save_association() -> str:
+            with open_connection(sqlite_path) as connection:
+                initialize_database(connection)
+                rule = connection.execute(
+                    "SELECT * FROM rules WHERE id = ? "
+                    "AND type = 'drawdown_plan' AND enabled = 1",
+                    (command.plan_id,),
+                ).fetchone()
+                if rule is None:
+                    raise ValueError("Enabled drawdown plan was not found.")
+                config = parse_drawdown_plan_config(
+                    reference_symbol=str(rule["symbol"]),
+                    asset_type=str(rule["asset_type"]),
+                    params=_load_params(str(rule["params_json"])),
+                )
+                valuation = get_valuation_context(
+                    connection,
+                    market_data_provider,
+                    command.index_symbol,
+                    as_of_date=_clock_now(clock).astimezone(cn_market_timezone).date(),
+                    force_refresh=True,
+                    now=_clock_now(clock),
+                )
+                if command.index_symbol is not None and (
+                    valuation is None
+                    or valuation.quote is None
+                    or valuation.refresh_failed
+                ):
+                    raise ValueError(
+                        "Unable to verify this index's official valuation data. "
+                        "Association unchanged."
+                    )
+                update_plan_index(
+                    connection,
+                    rule_id=command.plan_id,
+                    index_symbol=command.index_symbol,
+                    expected_params_json=str(rule["params_json"]),
+                )
+                lines = [
+                    f"Plan: {rule['name']} ({command.plan_id})",
+                    f"Reference ETF: {rule['symbol']}",
+                    f"Investment fund: {config.investment_fund_symbol}",
+                ]
+                if valuation is None:
+                    lines.append("Index valuation context disabled.")
+                else:
+                    lines.extend(
+                        (
+                            "Saved valuation association declared by you.",
+                            *valuation.lines(),
+                        )
+                    )
+                lines.append(
+                    "Valuation is context only; "
+                    "tiers, amounts and positions are unchanged."
+                )
+                return "\n".join(lines)
+
+        try:
+            message = await run_serialized(work_lock, save_association)
+        except (ValueError, sqlite3.IntegrityError) as exc:
+            await _reply_text(update, str(exc))
+            return
+        await _reply_text(update, message)
 
     async def set_plan_amounts(
         update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -3666,6 +3749,7 @@ def build_command_handlers(
         CommandHandler("set_dca_amount", set_dca_amount),
         CommandHandler("set_plan_rearm", set_plan_rearm),
         CommandHandler("set_plan_amounts", set_plan_amounts),
+        CommandHandler("set_plan_index", set_plan_index),
         CommandHandler("add_drawdown_plan", add_drawdown_plan),
         CommandHandler("mark_added", mark_added),
         CommandHandler("set_fund_fee", set_fund_fee),
