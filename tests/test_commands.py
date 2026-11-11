@@ -687,6 +687,152 @@ def test_set_dca_amount_updates_rule_without_replacing_it(tmp_path) -> None:
     ]
 
 
+@pytest.mark.parametrize("update_pending", [True, False])
+def test_set_plan_amounts_previews_then_confirms_and_records_fresh_amount(
+    tmp_path, update_pending
+) -> None:
+    path = tmp_path / "bot.sqlite3"
+    rule_id = _prepare_ready_plan_alert(
+        path, closes=[100, 80], expected_date=date(2024, 1, 2)
+    )
+    handlers = build_command_handlers(
+        {123},
+        sqlite_path=path,
+        market_calendar=FakeMarketCalendar(),
+        now_factory=lambda: datetime(2024, 1, 2, 6, tzinfo=UTC),
+    )
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        effective_message=message,
+    )
+    asyncio.run(
+        _handler_by_command(handlers, "set_plan_amounts").callback(
+            update, SimpleNamespace(args=[str(rule_id), "20:6000"])
+        )
+    )
+    assert "Plan amount: ¥10,000 → ¥6,000" in message.replies[0]
+    assert "Pending total (keep current amounts): ¥15,000" in message.replies[0]
+    assert (
+        "Pending total (update selected pending tiers): ¥11,000" in message.replies[0]
+    )
+    with open_connection(path) as connection:
+        assert (
+            json.loads(list_rules(connection)[0]["params_json"])["tiers"][1]["amount"]
+            == 10000
+        )
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM drawdown_plan_amount_changes"
+            ).fetchone()[0]
+            == 0
+        )
+    buttons = message.reply_markups[0].inline_keyboard
+    query = FakeCallbackQuery(buttons[0 if update_pending else 1][0].callback_data)
+    update.callback_query = query
+    callback = _callback_by_name(handlers, "plan_amounts_callback")
+    asyncio.run(callback.callback(update, SimpleNamespace()))
+    asyncio.run(callback.callback(update, SimpleNamespace()))
+    assert query.edits[-1] == query.edits[-2]
+    with open_connection(path) as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM drawdown_plan_amount_changes"
+            ).fetchone()[0]
+            == 1
+        )
+    # The command refreshes amount confirmation while retaining market eligibility.
+    update.callback_query = None
+    asyncio.run(
+        _handler_by_command(handlers, "mark_added").callback(
+            update, SimpleNamespace(args=[str(rule_id), "20"])
+        )
+    )
+    amount = "¥6,000" if update_pending else "¥10,000"
+    assert f"Configured gross total: {amount}" in message.replies[-1]
+    update.callback_query = FakeCallbackQuery(
+        message.reply_markups[-1].inline_keyboard[0][0].callback_data
+    )
+    asyncio.run(
+        _callback_by_name(handlers, "manual_add_confirm_callback").callback(
+            update, SimpleNamespace()
+        )
+    )
+    with open_connection(path) as connection:
+        estimate = connection.execute(
+            "SELECT gross_amount FROM manual_add_estimates"
+        ).fetchone()
+        assert estimate[0] == (6000 if update_pending else 10000)
+
+
+@pytest.mark.parametrize(
+    "scenario", ["cancel", "chat", "user", "expiry", "midnight", "state"]
+)
+def test_set_plan_amount_confirmation_is_scoped_and_revalidated(tmp_path, scenario):
+    path = tmp_path / "bot.sqlite3"
+    rule_id = _prepare_ready_plan_alert(
+        path, closes=[100, 80], expected_date=date(2024, 1, 2)
+    )
+    now = datetime(2024, 1, 2, 15, 59, tzinfo=UTC)
+    handlers = build_command_handlers(
+        {123, 124}, sqlite_path=path, now_factory=lambda: now
+    )
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=456),
+        effective_message=message,
+    )
+    asyncio.run(
+        _handler_by_command(handlers, "set_plan_amounts").callback(
+            update, SimpleNamespace(args=[str(rule_id), "20:6000"])
+        )
+    )
+    buttons = message.reply_markups[0].inline_keyboard
+    query = FakeCallbackQuery(
+        buttons[-1 if scenario == "cancel" else 0][0].callback_data
+    )
+    update.callback_query = query
+    if scenario == "chat":
+        update.effective_chat.id = 457
+    elif scenario == "user":
+        update.effective_user.id = 124
+    elif scenario == "expiry":
+        now += timedelta(minutes=11)
+    elif scenario == "midnight":
+        now += timedelta(minutes=2)
+    elif scenario == "state":
+        with open_connection(path) as connection:
+            snooze_drawdown_tiers_for_date(
+                connection,
+                cycle_id=get_active_drawdown_cycle(connection, rule_id)["id"],
+                tier_keys=("0.2",),
+                market_date="2024-01-02",
+            )
+    asyncio.run(
+        _callback_by_name(handlers, "plan_amounts_callback").callback(
+            update, SimpleNamespace()
+        )
+    )
+    assert (
+        "cancelled" in query.edits[-1]
+        or "expired" in query.edits[-1]
+        or "state changed" in query.edits[-1]
+    )
+    with open_connection(path) as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM drawdown_plan_amount_changes"
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            json.loads(list_rules(connection)[0]["params_json"])["tiers"][1]["amount"]
+            == 10000
+        )
+
+
 def test_set_plan_rearm_updates_only_plan_config(tmp_path) -> None:
     sqlite_path = tmp_path / "fund_alert_bot.sqlite3"
     with open_connection(sqlite_path) as connection:
