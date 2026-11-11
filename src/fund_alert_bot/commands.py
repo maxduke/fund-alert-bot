@@ -45,6 +45,7 @@ from fund_alert_bot.command_args import (  # noqa: F401
     SET_DCA_AMOUNT_USAGE,
     SET_FUND_CUTOFF_USAGE,
     SET_FUND_FEE_USAGE,
+    SET_PLAN_AMOUNTS_USAGE,
     SET_PLAN_REARM_USAGE,
     SYNC_POSITION_USAGE,
     CommandParseError,
@@ -55,6 +56,7 @@ from fund_alert_bot.command_args import (  # noqa: F401
     FundFeeCommand,
     MarkAddedCommand,
     ProfitCommand,
+    SetPlanAmountsCommand,
     SetPlanRearmCommand,
     SyncPositionCommand,
     _parse_drawdown_plan_tiers,
@@ -73,6 +75,7 @@ from fund_alert_bot.command_args import (  # noqa: F401
     parse_rearm_percent,
     parse_set_fund_cutoff_args,
     parse_set_fund_fee_args,
+    parse_set_plan_amounts_args,
     parse_set_plan_rearm_args,
     parse_sync_position_args,
     parse_thresholds,
@@ -136,6 +139,14 @@ from fund_alert_bot.market_data import (
 from fund_alert_bot.notifications.base import split_telegram_text
 from fund_alert_bot.notifications.dispatch import send_alert_notifications
 from fund_alert_bot.notifications.service import build_notification_service
+from fund_alert_bot.plan_amounts import (
+    PlanAmountPreview,
+    amount_revision,
+    apply_plan_amounts,
+    cycle_amount_config,
+    format_amount_preview,
+    preview_plan_amounts,
+)
 
 # Preserve the existing plan-formatting imports for command callers.
 from fund_alert_bot.plan_views import (  # noqa: F401
@@ -190,6 +201,8 @@ HELP_MESSAGE = "\n".join(
         "/add_drawdown_plan <reference_etf> <feeder_fund> <name> <tiers> "
         "[lookback:<days>] [rearm:<percent>]",
         "/set_plan_rearm <plan_id> <percent> - Change a plan rearm margin",
+        "/set_plan_amounts <plan_id> <percent:amount,...> "
+        "- Preview tier amount changes",
         "/mark_added <plan_id> <tier_percentages> [YYYY-MM-DD] "
         "- Record an addition you made",
         "/plans - Show investment-plan status",
@@ -228,6 +241,7 @@ BOT_COMMAND_MENU = (
     ("sync_position", "Sync a feeder-fund position"),
     ("add_drawdown_plan", "Add a Drawdown Add Plan"),
     ("set_plan_rearm", "Change a plan rearm margin"),
+    ("set_plan_amounts", "Change drawdown tier amounts"),
     ("mark_added", "Record a completed addition"),
     ("plans", "Show investment-plan status"),
     ("list", "List configured rules and IDs"),
@@ -283,6 +297,7 @@ class ManualAddSelection:
     market_date: date
     historical: bool = False
     tier_source_event_ids: tuple[tuple[str, int | None], ...] = ()
+    amount_revision: int = 0
 
 
 @dataclass(slots=True)
@@ -305,6 +320,16 @@ class PositionSyncDraft:
     expires_at: datetime
     command: SyncPositionCommand
     item_keys: tuple[str, ...]
+    completed_message: str | None = None
+
+
+@dataclass(slots=True)
+class PlanAmountsDraft:
+    user_id: int
+    chat_id: int
+    expires_at: datetime
+    market_date: date
+    preview: PlanAmountPreview
     completed_message: str | None = None
 
 
@@ -348,6 +373,9 @@ def load_manual_add_selection(
             reference_symbol=str(rule["symbol"]),
             asset_type=str(rule["asset_type"]),
             params=_load_params(str(rule["params_json"])),
+        )
+        config = cycle_amount_config(
+            connection, config, int(active["id"]), on_date=action_date
         )
         configured_by_key = {tier.key: tier for tier in config.tiers}
         if any(key not in configured_by_key for key in requested_keys):
@@ -396,12 +424,6 @@ def load_manual_add_selection(
                     rel_tol=1e-9,
                     abs_tol=1e-12,
                 )
-                and math.isclose(
-                    float(record["amount"]),
-                    float(tier.amount),
-                    rel_tol=1e-9,
-                    abs_tol=1e-12,
-                )
             ):
                 raise CommandParseError(
                     "A selected tier no longer matches the current plan."
@@ -442,6 +464,7 @@ def load_manual_add_selection(
             market_date=action_date,
             historical=True,
             tier_source_event_ids=tuple(source_event_ids),
+            amount_revision=amount_revision(connection, plan_id),
         )
     event = get_drawdown_plan_action_event(
         connection,
@@ -465,6 +488,7 @@ def load_manual_add_selection(
         asset_type=str(event["asset_type"]),
         params=_load_params(str(event["params_json"])),
     )
+    config = cycle_amount_config(connection, config, int(active["id"]))
     if event_id is None and requested_keys:
         configured_by_key = {tier.key: tier for tier in config.tiers}
         if any(key not in configured_by_key for key in requested_keys):
@@ -483,6 +507,11 @@ def load_manual_add_selection(
                 message = "Selected tiers are not all present in that dated reminder."
             raise CommandParseError(message)
     payload = json.loads(str(event["payload_json"]))
+    revision = amount_revision(connection, plan_id)
+    if event_id is not None and payload.get("amount_revision", 0) != revision:
+        raise CommandParseError(
+            "Plan amounts changed; use /mark_added for a fresh confirmation."
+        )
     if (
         int(payload.get("cycle_id", -1)) != int(active["id"])
         or str(payload.get("data_date")) != action_date.isoformat()
@@ -537,6 +566,7 @@ def load_manual_add_selection(
         cutoff=cutoff,
         market_date=action_date,
         historical=historical,
+        amount_revision=revision,
     )
 
 
@@ -1124,6 +1154,7 @@ def build_command_handlers(
     plan_drafts: dict[str, DrawdownPlanDraft] = {}
     manual_add_drafts: dict[str, ManualAddDraft] = {}
     position_sync_drafts: dict[str, PositionSyncDraft] = {}
+    plan_amount_drafts: dict[str, PlanAmountsDraft] = {}
     profit_setup_names: dict[tuple[int, str], str] = {}
     clock = now_factory or (lambda: datetime.now(UTC))
     timezone_info = ZoneInfo(timezone)
@@ -1132,7 +1163,12 @@ def build_command_handlers(
     def purge_drafts(now: datetime) -> None:
         """Drop expired in-memory Telegram confirmations at command boundaries."""
 
-        for drafts in (plan_drafts, manual_add_drafts, position_sync_drafts):
+        for drafts in (
+            plan_drafts,
+            manual_add_drafts,
+            position_sync_drafts,
+            plan_amount_drafts,
+        ):
             for token, draft in tuple(drafts.items()):
                 if draft.expires_at <= now:
                     drafts.pop(token, None)
@@ -1610,6 +1646,157 @@ def build_command_handlers(
                 )
             ),
         )
+
+    async def set_plan_amounts(
+        update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        if await reject_if_unauthorized(update, allowed_user_ids):
+            return
+        try:
+            command = parse_set_plan_amounts_args(getattr(context, "args", ()))
+        except CommandParseError as exc:
+            await _reply_text(update, str(exc))
+            return
+        user_id, chat_id = get_update_user_id(update), get_update_chat_id(update)
+        if user_id is None or chat_id is None:
+            await _reply_text(
+                update, "Unable to scope the confirmation; rerun command."
+            )
+            return
+
+        def load_preview() -> PlanAmountPreview:
+            with open_connection(sqlite_path) as connection:
+                initialize_database(connection)
+                return preview_plan_amounts(
+                    connection, rule_id=command.plan_id, requested=command.tiers
+                )
+
+        try:
+            preview = await run_serialized(work_lock, load_preview)
+        except (ValueError, sqlite3.IntegrityError) as exc:
+            await _reply_text(update, str(exc))
+            return
+        now = _clock_now(clock)
+        purge_drafts(now)
+        token = secrets.token_urlsafe(9)
+        plan_amount_drafts[token] = PlanAmountsDraft(
+            user_id,
+            chat_id,
+            now + timedelta(minutes=10),
+            now.astimezone(cn_market_timezone).date(),
+            preview,
+        )
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+        rows = []
+        if preview.changes_pending:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        "Not purchased: update pending + future amounts",
+                        callback_data=f"plan_amounts:{token}:current",
+                    )
+                ]
+            )
+        rows.extend(
+            (
+                [
+                    InlineKeyboardButton(
+                        "Keep pending amounts; save configuration"
+                        if preview.changes_pending
+                        else "Confirm amount changes",
+                        callback_data=f"plan_amounts:{token}:future",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "Cancel", callback_data=f"plan_amounts:{token}:cancel"
+                    )
+                ],
+            )
+        )
+        await _reply_text(
+            update,
+            format_amount_preview(preview),
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+
+    async def plan_amounts_callback(
+        update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        del context
+        query = getattr(update, "callback_query", None)
+        if query is None:
+            return
+        await query.answer()
+        if await reject_if_unauthorized(update, allowed_user_ids):
+            return
+        parts = str(getattr(query, "data", "")).split(":")
+        if len(parts) != 3 or parts[2] not in {"current", "future", "cancel"}:
+            return
+        _, token, action = parts
+        now = _clock_now(clock)
+        purge_drafts(now)
+        draft = plan_amount_drafts.get(token)
+        if (
+            draft is None
+            or draft.user_id != get_update_user_id(update)
+            or draft.chat_id != get_update_chat_id(update)
+            or draft.market_date != now.astimezone(cn_market_timezone).date()
+        ):
+            await _edit_message_text(
+                query,
+                "Amount confirmation expired or belongs to another chat. "
+                "Rerun /set_plan_amounts.",
+            )
+            return
+        if draft.completed_message is not None:
+            await _edit_message_text(query, draft.completed_message)
+            return
+        if action == "cancel":
+            plan_amount_drafts.pop(token, None)
+            await _edit_message_text(
+                query, "Amount changes cancelled. Nothing was changed."
+            )
+            return
+
+        def commit_amounts() -> str:
+            if draft.completed_message is not None:
+                return draft.completed_message
+            commit_now = _clock_now(clock)
+            if (
+                commit_now >= draft.expires_at
+                or draft.market_date != commit_now.astimezone(cn_market_timezone).date()
+            ):
+                raise ValueError(
+                    "Amount confirmation expired. Rerun /set_plan_amounts."
+                )
+            with open_connection(sqlite_path) as connection:
+                initialize_database(connection)
+                apply_plan_amounts(
+                    connection,
+                    draft.preview,
+                    update_pending=action == "current",
+                    confirmed_unpurchased=action == "current",
+                    now=commit_now,
+                )
+            draft.completed_message = (
+                (
+                    "Saved tier amounts. Selected pending amounts were updated."
+                    if action == "current"
+                    else "Saved tier amounts. Existing pending amounts are unchanged."
+                )
+                + "\nPurchases and skips are unchanged. Use /plans to check amounts "
+                "or /mark_added after subscribing."
+            )
+            return draft.completed_message
+
+        try:
+            message = await run_serialized(work_lock, commit_amounts)
+        except (ValueError, sqlite3.IntegrityError) as exc:
+            await _edit_message_text(query, str(exc))
+            return
+        await _edit_message_text(query, message)
 
     async def add_drawdown_plan(
         update: Update,
@@ -2348,6 +2535,7 @@ def build_command_handlers(
                     ),
                     source_alert_event_ids=dict(draft.selection.tier_source_event_ids),
                     position_already_included=position_already_included,
+                    expected_amount_revision=draft.selection.amount_revision,
                 )
             return estimate_id, tuple(recorded_keys), effective_date
 
@@ -3477,6 +3665,7 @@ def build_command_handlers(
         CommandHandler("add_dca", add_dca),
         CommandHandler("set_dca_amount", set_dca_amount),
         CommandHandler("set_plan_rearm", set_plan_rearm),
+        CommandHandler("set_plan_amounts", set_plan_amounts),
         CommandHandler("add_drawdown_plan", add_drawdown_plan),
         CommandHandler("mark_added", mark_added),
         CommandHandler("set_fund_fee", set_fund_fee),
@@ -3491,6 +3680,7 @@ def build_command_handlers(
             drawdown_plan_draft_callback,
             pattern=r"^drawdown_plan_(?:confirm|cancel):",
         ),
+        CallbackQueryHandler(plan_amounts_callback, pattern=r"^plan_amounts:"),
         CallbackQueryHandler(
             manual_add_event_callback,
             pattern=(r"^drawdown_add:[0-9]+:[0-9]+:(?:all|none|tier:[0-9]+)$"),

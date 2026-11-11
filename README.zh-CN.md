@@ -38,6 +38,7 @@ SQLite 会自动清理已终结历史（基准保留 400 天），但保留活�
 - `/sync_position <fund_symbol> <units> <average_unit_cost>`
 - `/add_drawdown_plan <reference_etf> <feeder_fund> <name> <tiers> [lookback:<days>] [rearm:<percent>]`
 - `/set_plan_rearm <plan_id> <percent>`
+- `/set_plan_amounts <plan_id> <percent:amount,...>`
 - `/mark_added <plan_id> <tier_percentages> [YYYY-MM-DD]`
 - `/plans [refresh]`
 - `/list`
@@ -54,6 +55,17 @@ SQLite 会自动清理已终结历史（基准保留 400 天），但保留活�
 调度器在交易日收盘前运行实时估算，在收盘后使用确认数据检查。若能从
 AKShare 的新浪交易日历取得官方开市状态，节假日会跳过；日历不可用时，
 普通定时检查退回到工作日判断，并在日志中明确记录。
+
+## 修改回撤加仓金额
+
+例如 `/set_plan_amounts 1 15:3000,20:6000` 会预览计划 1 的两档金额修改，
+确认后才保存；回撤百分比和档位数量保持不变。未触发档位从本周期后续触发生效。
+已触发未加仓的档位可选择保持本次金额，或确认“尚未实际申购”后同时修改本次金额。
+已加仓（含等待净值结算）和已跳过的档位保留原状态，新金额下周期生效，不补投差额。
+
+如果已经申购但未记录，请先 `/mark_added` 补记再修改。保存后旧提醒按钮失效；
+使用 `/plans` 核对本周期和下周期金额，使用 `/mark_added` 创建新的加仓确认。
+详情见[操作指南](docs/investment-plan-guide.zh-CN.md)。
 
 ## Price-Gain 涨幅提醒
 
@@ -204,7 +216,7 @@ occurrence 和手动加仓估算；历史快照不会重算。因为它是基金
 /mark_added 1 15,20
 ```
 
-只确认你实际提交的档位和配置金额。截止时间前提交时，Bot 等待该市场日期的
+只确认你实际提交的档位和本周期金额。截止时间前提交时，Bot 等待该市场日期的
 准确基金净值；截止时间后会询问实际申购发生在截止前还是截止后。配置完整且
 金额相符时，准确日期净值发布后会更新“估算”持仓；金额不同或配置不完整时，
 只记录档位，之后必须 `/sync_position`。

@@ -6,7 +6,7 @@ import json
 import logging
 import sqlite3
 from collections.abc import Collection
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, tzinfo
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -59,6 +59,7 @@ from fund_alert_bot.market_data import (
     PriceBasis,
 )
 from fund_alert_bot.market_data.normalize import NORMALIZED_COLUMNS
+from fund_alert_bot.plan_amounts import amount_revision, cycle_amount_config
 from fund_alert_bot.rules.dca import (
     build_dca_reminder_alert,
     normalize_weekday,
@@ -366,6 +367,7 @@ class DrawdownPlanStatus:
     fund_nav: FundNav | None
     position_sync_required_since: str | None
     fund_nav_unavailable_reason: str | None = None
+    configured_tiers: tuple[DrawdownTier, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -399,6 +401,7 @@ def evaluate_drawdown_plan_rule(
     config, active_cycle, recorded_tier_keys = _load_drawdown_plan_state(
         connection, rule
     )
+    revision = amount_revision(connection, rule_id)
 
     evaluation = evaluate_drawdown_plan(
         history,
@@ -409,6 +412,9 @@ def evaluate_drawdown_plan_rule(
         recorded_tier_keys=recorded_tier_keys,
     )
     cycle_changed = active_cycle is None or evaluation.cycle_changed
+    config, evaluation = _resolve_cycle_amounts(
+        connection, config, active_cycle, evaluation
+    )
     added_tier_keys, skipped_tier_keys, snoozed_tier_keys = (
         (frozenset(), frozenset(), frozenset())
         if cycle_changed or active_cycle is None
@@ -456,6 +462,8 @@ def evaluate_drawdown_plan_rule(
             resolved_alert["message"] = format_delayed_drawdown_plan_message(
                 str(resolved_alert["message"])
             )
+        if resolved_alert is not None:
+            resolved_alert["payload"]["amount_revision"] = revision
         return resolved_alert
 
     cycle_id, event_id = persist_drawdown_plan_evaluation(
@@ -478,6 +486,8 @@ def evaluate_drawdown_plan_rule(
         saw_below_peak=evaluation.saw_below_peak,
         tiers_to_record=tiers_to_record,
         alert_factory=(None if not actionable_tiers else build_alert),
+        expected_params_json=str(rule["params_json"]),
+        expected_amount_revision=revision,
     )
     LOGGER.info(
         "Drawdown plan evaluation rule_id=%s cycle_id=%s symbol=%s evaluation_date=%s "
@@ -612,6 +622,7 @@ def evaluate_drawdown_plan_prealerts(
         try:
             rule_id = int(rule["id"])
             reference_symbol = str(rule["symbol"])
+            revision = amount_revision(connection, rule_id)
             prealert_exists = (
                 connection.execute(
                     "SELECT 1 FROM alert_events WHERE alert_key = ? LIMIT 1",
@@ -669,6 +680,9 @@ def evaluate_drawdown_plan_prealerts(
                 expected_date=confirmed_date,
                 active_cycle=active_cycle,
                 recorded_tier_keys=recorded_tier_keys,
+            )
+            config, confirmed = _resolve_cycle_amounts(
+                connection, config, active_cycle, confirmed
             )
             if prealert_exists:
                 continue
@@ -753,11 +767,13 @@ def evaluate_drawdown_plan_prealerts(
             )
             if alert is None:
                 continue
+            alert["payload"]["amount_revision"] = revision
             try:
                 event_id = add_drawdown_plan_pre_alert_event(
                     connection,
                     rule_id=rule_id,
                     alert=alert,
+                    expected_params_json=str(rule["params_json"]),
                 )
             except sqlite3.IntegrityError:
                 continue
@@ -1086,6 +1102,10 @@ def read_drawdown_plan_statuses(
                 active_cycle=active_cycle,
                 recorded_tier_keys=recorded_tier_keys,
             )
+            configured_tiers = config.tiers
+            config, evaluation = _resolve_cycle_amounts(
+                connection, config, active_cycle, evaluation
+            )
             position = get_position_snapshot(
                 connection,
                 config.investment_fund_symbol,
@@ -1171,6 +1191,7 @@ def read_drawdown_plan_statuses(
                         else settings["position_sync_required_since"]
                     ),
                     fund_nav_unavailable_reason=nav_unavailable_reason,
+                    configured_tiers=configured_tiers,
                 )
             )
         except MarketDataProviderError as exc:
@@ -1248,6 +1269,24 @@ def _drawdown_plan_action_rows(
         )
     )
     return tuple(rows)
+
+
+def _resolve_cycle_amounts(
+    connection: Any,
+    config: DrawdownPlanConfig,
+    active: ActiveDrawdownCycle | None,
+    evaluation: DrawdownPlanEvaluation,
+) -> tuple[DrawdownPlanConfig, DrawdownPlanEvaluation]:
+    if active is None or evaluation.cycle_changed:
+        return config, evaluation
+    effective = cycle_amount_config(connection, config, active.cycle_id)
+    tiers = {tier.key: tier for tier in effective.tiers}
+    crossed = tuple(tiers[tier.key] for tier in evaluation.newly_crossed_tiers)
+    return effective, replace(
+        evaluation,
+        newly_crossed_tiers=crossed,
+        total_amount=sum(tier.amount for tier in crossed),
+    )
 
 
 def _load_drawdown_plan_state(
