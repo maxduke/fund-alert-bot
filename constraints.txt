@@ -48,7 +48,7 @@ httpcore==1.0.9
     # via httpx
 httpx==0.28.1
     # via python-telegram-bot
-idna==3.19
+idna==3.20
     # via
     #   anyio
     #   httpx
@@ -69,7 +69,7 @@ packaging==26.3
     #   pytest
 pathspec==1.1.1
     # via hatchling
-pandas==3.0.5
+pandas==3.0.6
     # via
     #   akshare
     #   fund-alert-bot (pyproject.toml)
@@ -104,13 +104,13 @@ six==1.17.0
     # via
     #   html5lib
     #   python-dateutil
-soupsieve==2.9.2
+soupsieve==2.10
     # via beautifulsoup4
 tabulate==0.10.0
     # via akshare
 tomlkit==0.15.1
     # via hatchling
-trove-classifiers==2026.6.1.19
+trove-classifiers==2026.9.21.13
     # via hatchling
 tqdm==4.70.1
     # via akshare
