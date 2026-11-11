@@ -16,6 +16,7 @@ from fund_alert_bot.rules.drawdown import MAX_WINDOW_DAYS
 from fund_alert_bot.rules.drawdown_plan import (
     DEFAULT_REARM_MARGIN,
     DrawdownPlanConfig,
+    DrawdownTier,
     parse_drawdown_plan_config,
     validate_drawdown_plan_notification_size,
 )
@@ -62,6 +63,7 @@ ADD_DRAWDOWN_PLAN_USAGE = (
 
 
 SET_PLAN_REARM_USAGE = "Usage: /set_plan_rearm <plan_id> <percent>"
+SET_PLAN_AMOUNTS_USAGE = "Usage: /set_plan_amounts <plan_id> <percent:amount,...>"
 
 
 MARK_ADDED_USAGE = "Usage: /mark_added <plan_id> <tier_percentages> [YYYY-MM-DD]"
@@ -149,6 +151,14 @@ class SetPlanRearmCommand:
 
     plan_id: int
     rearm_margin: float
+
+
+@dataclass(frozen=True, slots=True)
+class SetPlanAmountsCommand:
+    """Amount updates for a subset of the plan's existing thresholds."""
+
+    plan_id: int
+    tiers: tuple[DrawdownTier, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -547,6 +557,31 @@ def parse_set_plan_rearm_args(args: Sequence[str]) -> SetPlanRearmCommand:
     if plan_id <= 0:
         raise CommandParseError("plan_id must be a positive integer")
     return SetPlanRearmCommand(plan_id, parse_rearm_percent(args[1]))
+
+
+def parse_set_plan_amounts_args(args: Sequence[str]) -> SetPlanAmountsCommand:
+    """Parse amount edits without allowing threshold/identity changes."""
+
+    if len(args) != 2:
+        raise CommandParseError(SET_PLAN_AMOUNTS_USAGE)
+    try:
+        plan_id = int(args[0])
+    except ValueError as exc:
+        raise CommandParseError("plan_id must be a positive integer") from exc
+    if plan_id <= 0:
+        raise CommandParseError("plan_id must be a positive integer")
+    try:
+        config = parse_drawdown_plan_config(
+            reference_symbol="510300",
+            asset_type=AssetType.CN_ETF,
+            params={
+                "investment_fund_symbol": "000001",
+                "tiers": _parse_drawdown_plan_tiers(args[1]),
+            },
+        )
+    except ValueError as exc:
+        raise CommandParseError(str(exc)) from exc
+    return SetPlanAmountsCommand(plan_id, config.tiers)
 
 
 def _parse_drawdown_plan_tiers(raw_tiers: str) -> list[dict[str, int | float]]:
