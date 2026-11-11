@@ -13,7 +13,7 @@ COPY src ./src
 
 RUN python -m pip install --no-cache-dir \
         --constraint constraints.txt \
-        hatchling==1.32.0 \
+        hatchling==1.32.4 \
         setuptools==84.0.0 \
         wheel==0.48.0 \
     && python -m pip wheel \
