@@ -6,7 +6,7 @@
 #
 # Build and editable-install pins are listed below because pip-compile does not
 # include PEP 517 build-system requirements in application dependencies.
-hatchling==1.32.0
+hatchling==1.32.4
     # via build-system (pyproject.toml)
 akracer==0.0.14
     # via akshare
