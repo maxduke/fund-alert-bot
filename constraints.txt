@@ -10,7 +10,7 @@ hatchling==1.32.4
     # via build-system (pyproject.toml)
 akracer==0.0.14
     # via akshare
-akshare==1.18.94
+akshare==1.20.37
     # via fund-alert-bot (pyproject.toml)
 akshare-proxy-patch==0.5.0
     # via fund-alert-bot (pyproject.toml)
