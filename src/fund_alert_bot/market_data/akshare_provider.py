@@ -104,7 +104,7 @@ class AkshareMarketDataProvider(MarketDataProvider):
         self._fund_nav_cache_ttl_seconds = fund_nav_cache_ttl_seconds
         self._eastmoney_failure_ttl_seconds = eastmoney_failure_ttl_seconds
         self._today_factory = today_factory
-        self._now_factory = now_factory or (lambda: datetime.now(UTC))
+        del now_factory
         self._http_get = http_get or requests.get
         self._history_cache: dict[
             tuple[str, str, str, str, str], tuple[float, pd.DataFrame]
@@ -243,6 +243,7 @@ class AkshareMarketDataProvider(MarketDataProvider):
         history: pd.DataFrame,
     ) -> None:
         if self._history_cache_ttl_seconds > 0:
+            self._history_cache.pop(cache_key, None)
             self._history_cache[cache_key] = (
                 time.monotonic(),
                 history.copy(deep=True),
@@ -516,6 +517,7 @@ class AkshareMarketDataProvider(MarketDataProvider):
         quote: RealtimeQuote,
     ) -> None:
         if self._realtime_spot_ttl_seconds > 0:
+            self._etf_quote_cache.pop((source, symbol), None)
             self._etf_quote_cache[(source, symbol)] = (time.monotonic(), quote)
             if len(self._etf_quote_cache) > _CACHE_MAX_ENTRIES:
                 self._etf_quote_cache.pop(next(iter(self._etf_quote_cache)))
@@ -642,11 +644,13 @@ class AkshareMarketDataProvider(MarketDataProvider):
             )
         except MarketDataFetchError:
             if self._eastmoney_failure_ttl_seconds > 0:
+                self._fund_nav_cache.pop(symbol, None)
                 self._fund_nav_cache[symbol] = (time.monotonic(), None)
                 if len(self._fund_nav_cache) > _CACHE_MAX_ENTRIES:
                     self._fund_nav_cache.pop(next(iter(self._fund_nav_cache)))
             raise
         if self._fund_nav_cache_ttl_seconds > 0:
+            self._fund_nav_cache.pop(symbol, None)
             self._fund_nav_cache[symbol] = (time.monotonic(), raw_data)
             if len(self._fund_nav_cache) > _CACHE_MAX_ENTRIES:
                 self._fund_nav_cache.pop(next(iter(self._fund_nav_cache)))

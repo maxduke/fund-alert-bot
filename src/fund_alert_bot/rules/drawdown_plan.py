@@ -419,6 +419,56 @@ def _tier_payload(tiers: Sequence[DrawdownTier]) -> list[dict[str, object]]:
     ]
 
 
+def _format_tier_sections(
+    *,
+    tiers: tuple[DrawdownTier, ...],
+    newly_tiers: tuple[DrawdownTier, ...],
+    pending: tuple[DrawdownTier, ...],
+    mixed: bool,
+    newly_heading: str,
+    single_heading: str,
+) -> list[str]:
+    if not mixed:
+        return [
+            single_heading,
+            *(
+                f"-{format_plan_percent(tier.drawdown)} → "
+                f"{format_plan_amount(tier.amount)}"
+                for tier in tiers
+            ),
+        ]
+    tier_lines: list[str] = []
+    if pending:
+        tier_lines.extend(
+            [
+                "⏳ Previously triggered, still pending",
+                *(
+                    f"-{format_plan_percent(tier.drawdown)} → "
+                    f"{format_plan_amount(tier.amount)}"
+                    for tier in pending
+                ),
+            ]
+        )
+    actionable_keys = {item.key for item in tiers}
+    newly_actionable = tuple(
+        tier for tier in newly_tiers if tier.key in actionable_keys
+    )
+    if newly_actionable:
+        if tier_lines:
+            tier_lines.append("")
+        tier_lines.extend(
+            [
+                newly_heading,
+                *(
+                    f"-{format_plan_percent(tier.drawdown)} → "
+                    f"{format_plan_amount(tier.amount)}"
+                    for tier in newly_actionable
+                ),
+            ]
+        )
+    return tier_lines
+
+
 def build_drawdown_plan_pre_alert(
     *,
     rule_id: int,
@@ -442,44 +492,14 @@ def build_drawdown_plan_pre_alert(
         return None
     total_amount = sum((tier.amount for tier in tiers), start=0)
     mixed = bool(pending) or tuple(tiers) != tuple(newly_tiers)
-    if mixed:
-        tier_lines: list[str] = []
-        if pending:
-            tier_lines.extend(
-                [
-                    "⏳ Previously triggered, still pending",
-                    *(
-                        f"-{format_plan_percent(tier.drawdown)} → "
-                        f"{format_plan_amount(tier.amount)}"
-                        for tier in pending
-                    ),
-                ]
-            )
-        newly_actionable = tuple(
-            tier for tier in newly_tiers if tier.key in {item.key for item in tiers}
-        )
-        if newly_actionable:
-            if tier_lines:
-                tier_lines.append("")
-            tier_lines.extend(
-                [
-                    "🆕 Newly reached in this realtime estimate",
-                    *(
-                        f"-{format_plan_percent(tier.drawdown)} → "
-                        f"{format_plan_amount(tier.amount)}"
-                        for tier in newly_actionable
-                    ),
-                ]
-            )
-    else:
-        tier_lines = [
-            "🎯 Tiers currently reached:",
-            *(
-                f"-{format_plan_percent(tier.drawdown)} → "
-                f"{format_plan_amount(tier.amount)}"
-                for tier in tiers
-            ),
-        ]
+    tier_lines = _format_tier_sections(
+        tiers=tiers,
+        newly_tiers=newly_tiers,
+        pending=pending,
+        mixed=mixed,
+        newly_heading="🆕 Newly reached in this realtime estimate",
+        single_heading="🎯 Tiers currently reached:",
+    )
     quote_time = quote.fetched_at.astimezone(ZoneInfo("Asia/Shanghai"))
     amount_label = (
         "All currently actionable amount" if mixed else "Configured additional amount"
@@ -584,50 +604,19 @@ def build_drawdown_plan_alert(
             f"(shorter than {config.lookback_days} calendar days)",
         )
     mixed = bool(pending) or tuple(tiers) != tuple(newly_tiers)
-    actionable_keys = {tier.key for tier in tiers}
     total_label = (
         "Total actionable amount now due"
         if mixed
         else "Total additional amount now due"
     )
-    if mixed:
-        tier_sections: list[str] = []
-        if pending:
-            tier_sections.extend(
-                [
-                    "⏳ Previously triggered, still pending",
-                    *(
-                        f"-{format_plan_percent(tier.drawdown)} → "
-                        f"{format_plan_amount(tier.amount)}"
-                        for tier in pending
-                    ),
-                ]
-            )
-        newly_actionable = tuple(
-            tier for tier in newly_tiers if tier.key in actionable_keys
-        )
-        if newly_actionable:
-            if tier_sections:
-                tier_sections.append("")
-            tier_sections.extend(
-                [
-                    "🆕 Newly confirmed today",
-                    *(
-                        f"-{format_plan_percent(tier.drawdown)} → "
-                        f"{format_plan_amount(tier.amount)}"
-                        for tier in newly_actionable
-                    ),
-                ]
-            )
-    else:
-        tier_sections = [
-            "🎯 Newly triggered tier" + ("s:" if len(tiers) > 1 else ":"),
-            *(
-                f"-{format_plan_percent(tier.drawdown)} → "
-                f"{format_plan_amount(tier.amount)}"
-                for tier in tiers
-            ),
-        ]
+    tier_sections = _format_tier_sections(
+        tiers=tiers,
+        newly_tiers=newly_tiers,
+        pending=pending,
+        mixed=mixed,
+        newly_heading="🆕 Newly confirmed today",
+        single_heading="🎯 Newly triggered tier" + ("s:" if len(tiers) > 1 else ":"),
+    )
     message_lines = [
         f"📉 Drawdown Add Plan reminder — {name}",
         "",
