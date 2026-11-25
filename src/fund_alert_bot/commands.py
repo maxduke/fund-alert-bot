@@ -286,6 +286,7 @@ class DrawdownPlanDraft:
     expires_at: datetime
     command: DrawdownPlanCommand
     created_rule_id: int | None = None
+    in_progress: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -305,6 +306,7 @@ class ManualAddSelection:
     historical: bool = False
     tier_source_event_ids: tuple[tuple[str, int | None], ...] = ()
     amount_revision: int = 0
+    tier_indices: tuple[int, ...] = ()
 
 
 @dataclass(slots=True)
@@ -316,6 +318,7 @@ class ManualAddDraft:
     expires_at: datetime
     selection: ManualAddSelection
     completed_message: str | None = None
+    in_progress: bool = False
 
 
 @dataclass(slots=True)
@@ -328,6 +331,7 @@ class PositionSyncDraft:
     command: SyncPositionCommand
     item_keys: tuple[str, ...]
     completed_message: str | None = None
+    in_progress: bool = False
 
 
 @dataclass(slots=True)
@@ -338,6 +342,43 @@ class PlanAmountsDraft:
     market_date: date
     preview: PlanAmountPreview
     completed_message: str | None = None
+
+
+def _resolve_requested_tiers(
+    requested_keys: Sequence[str],
+    tiers: Sequence[DrawdownTier],
+    *,
+    error_message: str,
+) -> tuple[DrawdownTier, ...]:
+    """Match requested tier keys, tolerating legacy float-imprecise keys."""
+
+    by_key = {tier.key: tier for tier in tiers}
+    resolved: list[DrawdownTier] = []
+    for key in requested_keys:
+        tier = by_key.get(key)
+        if tier is None:
+            try:
+                requested_value = float(key)
+            except ValueError:
+                requested_value = math.nan
+            if math.isfinite(requested_value):
+                tier = next(
+                    (
+                        item
+                        for item in tiers
+                        if math.isclose(
+                            float(item.drawdown),
+                            requested_value,
+                            rel_tol=1e-9,
+                            abs_tol=1e-12,
+                        )
+                    ),
+                    None,
+                )
+        if tier is None:
+            raise CommandParseError(error_message)
+        resolved.append(tier)
+    return tuple(resolved)
 
 
 def load_manual_add_selection(
@@ -384,9 +425,11 @@ def load_manual_add_selection(
         config = cycle_amount_config(
             connection, config, int(active["id"]), on_date=action_date
         )
-        configured_by_key = {tier.key: tier for tier in config.tiers}
-        if any(key not in configured_by_key for key in requested_keys):
-            raise CommandParseError("One or more selected tiers are not configured.")
+        selected = _resolve_requested_tiers(
+            requested_keys,
+            config.tiers,
+            error_message="One or more selected tiers are not configured.",
+        )
         records = {
             str(row["tier_key"]): row
             for row in list_drawdown_tier_records(
@@ -395,12 +438,11 @@ def load_manual_add_selection(
                 source="close_confirmed",
             )
         }
-        if any(key not in records for key in requested_keys):
+        if any(tier.key not in records for tier in selected):
             raise CommandParseError(
                 "No close-confirmed plan record containing these tiers was found in "
                 "the active cycle."
             )
-        selected = tuple(configured_by_key[key] for key in requested_keys)
         source_event_ids: list[tuple[str, int | None]] = []
         for tier in selected:
             record = records[tier.key]
@@ -481,11 +523,6 @@ def load_manual_add_selection(
         cycle_id=int(active["id"]),
     )
     if event is None:
-        if historical:
-            raise CommandParseError(
-                "No eligible plan reminder containing these tiers was found on "
-                f"{action_date}."
-            )
         raise CommandParseError(
             "No eligible same-day plan reminder was found. For a past addition, "
             "use /mark_added <plan_id> <tier_percentages> <YYYY-MM-DD>."
@@ -497,10 +534,11 @@ def load_manual_add_selection(
     )
     config = cycle_amount_config(connection, config, int(active["id"]))
     if event_id is None and requested_keys:
-        configured_by_key = {tier.key: tier for tier in config.tiers}
-        if any(key not in configured_by_key for key in requested_keys):
-            raise CommandParseError("One or more selected tiers are not configured.")
-        requested = tuple(configured_by_key[key] for key in requested_keys)
+        requested = _resolve_requested_tiers(
+            requested_keys,
+            config.tiers,
+            error_message="One or more selected tiers are not configured.",
+        )
         event = get_drawdown_plan_action_event(
             connection,
             rule_id=plan_id,
@@ -509,10 +547,9 @@ def load_manual_add_selection(
             required_tier_keys=tuple(tier.key for tier in requested),
         )
         if event is None:
-            message = "Selected tiers are not all present in a same-day reminder."
-            if historical:
-                message = "Selected tiers are not all present in that dated reminder."
-            raise CommandParseError(message)
+            raise CommandParseError(
+                "Selected tiers are not all present in a same-day reminder."
+            )
     payload = json.loads(str(event["payload_json"]))
     revision = amount_revision(connection, plan_id)
     if event_id is not None and payload.get("amount_revision", 0) != revision:
@@ -533,28 +570,39 @@ def load_manual_add_selection(
         if isinstance(item, dict) and "key" in item
     }
     eligible = tuple(tier for tier in config.tiers if tier.key in eligible_keys)
+    indexed_eligible = tuple(enumerate(eligible))
     if select_all:
-        selected = eligible
+        selected_indexed = indexed_eligible
     elif tier_index is not None:
-        selected = eligible[tier_index : tier_index + 1]
+        selected_indexed = (
+            indexed_eligible[tier_index : tier_index + 1] if tier_index >= 0 else ()
+        )
     else:
-        eligible_by_key = {tier.key: tier for tier in eligible}
-        if any(key not in eligible_by_key for key in requested_keys):
-            message = "Selected tiers are not all present in a same-day reminder."
-            if historical:
-                message = "Selected tiers are not all present in that dated reminder."
-            raise CommandParseError(message)
-        selected = tuple(eligible_by_key[key] for key in requested_keys)
-    if not selected:
+        resolved = _resolve_requested_tiers(
+            requested_keys,
+            eligible,
+            error_message="Selected tiers are not all present in a same-day reminder.",
+        )
+        index_by_key = {tier.key: index for index, tier in indexed_eligible}
+        selected_indexed = tuple((index_by_key[tier.key], tier) for tier in resolved)
+    if not selected_indexed:
         raise CommandParseError("No eligible tiers were selected.")
     already_added = {
         str(row["tier_key"])
         for row in list_manual_add_actions(connection, int(active["id"]))
     }
     if ignore_already_added:
-        selected = tuple(tier for tier in selected if tier.key not in already_added)
-    elif any(tier.key in already_added for tier in selected):
+        selected_indexed = tuple(
+            (index, tier)
+            for index, tier in selected_indexed
+            if tier.key not in already_added
+        )
+        if not selected_indexed:
+            raise CommandParseError("One or more selected tiers were already recorded.")
+    elif any(tier.key in already_added for _index, tier in selected_indexed):
         raise CommandParseError("One or more selected tiers were already recorded.")
+    selected = tuple(tier for _index, tier in selected_indexed)
+    selected_indices = tuple(index for index, _tier in selected_indexed)
     readiness, missing_setup = derive_plan_readiness(
         connection,
         config.investment_fund_symbol,
@@ -574,6 +622,7 @@ def load_manual_add_selection(
         market_date=action_date,
         historical=historical,
         amount_revision=revision,
+        tier_indices=selected_indices,
     )
 
 
@@ -1992,24 +2041,38 @@ def build_command_handlers(
                 "Rerun /add_drawdown_plan.",
             )
             return
+        if draft.created_rule_id is not None:
+            await _edit_message_text(
+                query,
+                f"Saved Drawdown Add Plan id={draft.created_rule_id}: "
+                f"ETF {draft.command.reference_symbol} → fund "
+                f"{draft.command.investment_fund_symbol}. The first scheduled "
+                "confirmed-close evaluation will initialize its cycle. No order "
+                "has been placed.",
+            )
+            return
+        if draft.in_progress:
+            return
         if action == "drawdown_plan_cancel":
             plan_drafts.pop(token, None)
             await _edit_message_text(query, "Drawdown Add Plan creation cancelled.")
             return
-        if draft.created_rule_id is None:
-            try:
-                with open_connection(sqlite_path) as connection:
-                    initialize_database(connection)
-                    draft.created_rule_id = add_drawdown_plan_rule(
-                        connection,
-                        reference_symbol=draft.command.reference_symbol,
-                        investment_fund_symbol=(draft.command.investment_fund_symbol),
-                        name=draft.command.name,
-                        params=draft.command.params,
-                    )
-            except sqlite3.IntegrityError as exc:
-                await _edit_message_text(query, f"Plan was not saved: {exc}")
-                return
+        draft.in_progress = True
+        try:
+            with open_connection(sqlite_path) as connection:
+                initialize_database(connection)
+                draft.created_rule_id = add_drawdown_plan_rule(
+                    connection,
+                    reference_symbol=draft.command.reference_symbol,
+                    investment_fund_symbol=(draft.command.investment_fund_symbol),
+                    name=draft.command.name,
+                    params=draft.command.params,
+                )
+        except sqlite3.IntegrityError as exc:
+            await _edit_message_text(query, f"Plan was not saved: {exc}")
+            return
+        finally:
+            draft.in_progress = False
         await _edit_message_text(
             query,
             f"Saved Drawdown Add Plan id={draft.created_rule_id}: "
@@ -2393,7 +2456,11 @@ def build_command_handlers(
                                     ),
                                 )
                             ]
-                            for index, tier in enumerate(selection.tiers)
+                            for index, tier in zip(
+                                selection.tier_indices,
+                                selection.tiers,
+                                strict=True,
+                            )
                         )
                         rows.append(
                             [
@@ -2569,6 +2636,8 @@ def build_command_handlers(
         if draft.completed_message is not None:
             await _edit_message_text(query, draft.completed_message)
             return
+        if draft.in_progress:
+            return
         if draft.selection.historical and create_estimate:
             await _edit_message_text(
                 query,
@@ -2585,7 +2654,11 @@ def build_command_handlers(
             )
             return
 
-        def record_addition() -> tuple[int | None, tuple[str, ...], date | None]:
+        def record_addition() -> tuple[
+            int | None, tuple[str, ...], date | None, str | None
+        ]:
+            if draft.completed_message is not None:
+                return None, (), None, draft.completed_message
             effective_date = None
             if create_estimate:
                 if not market_calendar.confirmed_status(now.date()):
@@ -2620,15 +2693,26 @@ def build_command_handlers(
                     position_already_included=position_already_included,
                     expected_amount_revision=draft.selection.amount_revision,
                 )
-            return estimate_id, tuple(recorded_keys), effective_date
+            return estimate_id, tuple(recorded_keys), effective_date, None
 
+        draft.in_progress = True
         try:
-            estimate_id, recorded_keys, effective_date = await run_serialized(
+            (
+                estimate_id,
+                recorded_keys,
+                effective_date,
+                existing_message,
+            ) = await run_serialized(
                 work_lock,
                 record_addition,
             )
         except (MarketDataProviderError, ValueError, sqlite3.IntegrityError) as exc:
             await _edit_message_text(query, f"Addition was not recorded: {exc}")
+            return
+        finally:
+            draft.in_progress = False
+        if existing_message is not None:
+            await _edit_message_text(query, existing_message)
             return
         tier_text = ", ".join(
             f"-{format_plan_percent(float(key))}" for key in recorded_keys
@@ -2794,6 +2878,11 @@ def build_command_handlers(
                 "Rerun /mark_added.",
             )
             return
+        if draft.completed_message is not None:
+            await _edit_message_text(query, draft.completed_message)
+            return
+        if draft.in_progress:
+            return
         if action == "cancel":
             manual_add_drafts.pop(token, None)
             await _edit_message_text(query, "Manual addition recording cancelled.")
@@ -2872,11 +2961,16 @@ def build_command_handlers(
         if draft is None:
             await _edit_message_text(query, "This cutoff confirmation expired.")
             return
+        if draft.completed_message is not None:
+            await _edit_message_text(query, draft.completed_message)
+            return
+        if draft.in_progress:
+            return
         if choice == "cancel":
             manual_add_drafts.pop(token, None)
             await _edit_message_text(query, "Manual addition recording cancelled.")
             return
-        if choice not in {"before", "after"}:
+        if choice not in {"before", "after"} or draft.selection.readiness != "READY":
             return
         await commit_manual_add(
             query,
@@ -3099,6 +3193,11 @@ def build_command_handlers(
                 query, "This position confirmation expired. Rerun /sync_position."
             )
             return
+        if draft.completed_message is not None:
+            await _edit_message_text(query, draft.completed_message)
+            return
+        if draft.in_progress:
+            return
         if choice in {"cancel", "partial"}:
             position_sync_drafts.pop(token, None)
             message = "Position sync cancelled."
@@ -3112,11 +3211,10 @@ def build_command_handlers(
             return
         if choice not in {"included", "none_included"}:
             return
-        if draft.completed_message is not None:
-            await _edit_message_text(query, draft.completed_message)
-            return
 
-        def reconcile_position_work() -> tuple[Any, FundNav | None]:
+        def reconcile_position_work() -> tuple[Any, FundNav | None, str | None]:
+            if draft.completed_message is not None:
+                return None, None, draft.completed_message
             with open_connection(sqlite_path) as connection:
                 initialize_database(connection)
                 current_row = reconcile_position_snapshot(
@@ -3142,12 +3240,20 @@ def build_command_handlers(
                             "Unable to fetch latest feeder-fund NAV symbol=%s",
                             draft.command.fund_symbol,
                         )
-                return current_row, current_nav
+                return current_row, current_nav, None
 
+        draft.in_progress = True
         try:
-            row, nav = await run_serialized(work_lock, reconcile_position_work)
+            row, nav, existing_message = await run_serialized(
+                work_lock, reconcile_position_work
+            )
         except sqlite3.IntegrityError as exc:
             await _edit_message_text(query, str(exc))
+            return
+        finally:
+            draft.in_progress = False
+        if existing_message is not None:
+            await _edit_message_text(query, existing_message)
             return
         message = format_position_snapshot(row, nav)
         if choice == "none_included":

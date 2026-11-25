@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
-from collections.abc import Collection, Iterator
+from collections.abc import Awaitable, Callable, Collection, Iterator
 from contextlib import contextmanager
 from datetime import date, datetime, time, timedelta, tzinfo
+from functools import wraps
 from pathlib import Path
 from threading import Lock
 from typing import TYPE_CHECKING, Any
+from weakref import WeakKeyDictionary
 from zoneinfo import ZoneInfo
 
 from fund_alert_bot.async_work import run_serialized
@@ -73,6 +76,31 @@ FUND_NAV_PROCESS_JOB_ID = "fund-nav-process"
 HEARTBEAT_JOB_ID = "runtime-heartbeat"
 DCA_LAST_CHECKED_DATE_KEY = "dca_last_checked_date"
 WEEKDAY_CRON_FILTER = "mon-fri"
+_SCHEDULED_JOB_LOCKS: WeakKeyDictionary[
+    asyncio.AbstractEventLoop, dict[str, asyncio.Lock]
+] = WeakKeyDictionary()
+
+
+def _serialize_job(
+    job_id: str,
+) -> Callable[[Callable[..., Awaitable[Any]]], Callable[..., Awaitable[Any]]]:
+    """Serialize startup catch-up and cron runs of the same scheduled job."""
+
+    def decorate(work: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
+        @wraps(work)
+        async def serialized(*args: Any, **kwargs: Any) -> Any:
+            loop = asyncio.get_running_loop()
+            locks = _SCHEDULED_JOB_LOCKS.setdefault(loop, {})
+            lock = locks.get(job_id)
+            if lock is None:
+                lock = asyncio.Lock()
+                locks[job_id] = lock
+            async with lock:
+                return await work(*args, **kwargs)
+
+        return serialized
+
+    return decorate
 
 
 def create_scheduler(*, timezone: str) -> Any:
@@ -723,6 +751,7 @@ async def run_scheduled_drawdown_check(
     await run_scheduled_market_check(**kwargs)
 
 
+@_serialize_job(FUND_NAV_PROCESS_JOB_ID)
 @track_job(FUND_NAV_PROCESS_JOB_ID)
 async def run_scheduled_fund_nav_process(
     *,
@@ -976,6 +1005,7 @@ async def run_scheduled_dca_check(
             )
 
 
+@_serialize_job(DCA_MORNING_JOB_ID)
 @track_job(DCA_MORNING_JOB_ID)
 async def run_due_dca_checks(
     *,
@@ -1103,6 +1133,7 @@ def _write_dca_check_date(sqlite_path: str | Path, check_date: date) -> None:
             ON CONFLICT(key) DO UPDATE SET
                 value = excluded.value,
                 updated_at = excluded.updated_at
+            WHERE excluded.value > app_metadata.value
             """,
             (DCA_LAST_CHECKED_DATE_KEY, check_date.isoformat()),
         )
