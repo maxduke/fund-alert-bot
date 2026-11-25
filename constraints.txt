@@ -108,7 +108,7 @@ soupsieve==2.10
     # via beautifulsoup4
 tabulate==0.10.0
     # via akshare
-tomlkit==0.15.1
+tomlkit==0.15.2
     # via hatchling
 trove-classifiers==2026.9.21.13
     # via hatchling
