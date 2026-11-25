@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import sqlite3
 from collections.abc import Collection
 from dataclasses import dataclass, replace
@@ -62,6 +63,9 @@ from fund_alert_bot.market_data.index_valuation import ValuationContext
 from fund_alert_bot.market_data.normalize import NORMALIZED_COLUMNS
 from fund_alert_bot.plan_amounts import amount_revision, cycle_amount_config
 from fund_alert_bot.rules.dca import (
+    _read_amount as read_dca_amount,
+)
+from fund_alert_bot.rules.dca import (
     build_dca_reminder_alert,
     normalize_weekday,
     rule_creation_date,
@@ -91,6 +95,7 @@ from fund_alert_bot.rules.profit import (
     LatestDataUnavailableError,
     build_position_profit_alert,
     build_profit_alerts,
+    format_profit_threshold_key,
     latest_unavailable_message,
 )
 from fund_alert_bot.valuation import get_valuation_context
@@ -146,7 +151,24 @@ def build_dca_notification_summary(
     """Build the concise portion of a persisted fixed-DCA reminder."""
 
     lines = message.splitlines()
-    status_line = lines[6]
+    status_index = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if line.startswith(
+                (
+                    "• Holiday policy skipped",
+                    "• Estimated subscription NAV date:",
+                    "• Waiting for the next confirmed open day",
+                    "• Deduction failed/not executed",
+                    "• This estimate was already applied.",
+                    "• This occurrence was already reconciled by Position Sync.",
+                )
+            )
+        ),
+        6 if len(lines) > 6 else None,
+    )
+    status_line = "" if status_index is None else lines[status_index]
     if current_status == "skipped" and "Holiday policy skipped" not in status_line:
         status_line = "• Deduction failed/not executed; this occurrence is skipped."
     elif current_status == "applied":
@@ -155,15 +177,43 @@ def build_dca_notification_summary(
         status_line = "• This occurrence was already reconciled by Position Sync."
     elif current_status == "pending" and current_effective_date is not None:
         status_line = f"• Estimated subscription NAV date: {current_effective_date}."
-    lines[6] = status_line
+    if status_index is not None:
+        lines[status_index] = status_line
+
     resolved = current_status in {"skipped", "applied", "reconciled_by_sync"}
-    action_line = None if skipped or resolved else lines[9]
-    if resolved:
-        lines.pop(9)
+    skip_action_index = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if line.startswith("If deduction failed, use /dca_skip ")
+        ),
+        None,
+    )
+    action_line = (
+        None
+        if skipped or resolved or skip_action_index is None
+        else lines[skip_action_index]
+    )
+    if resolved and skip_action_index is not None:
+        lines.pop(skip_action_index)
+
+    fund_line = next(
+        (line for line in lines if line.startswith("• Fund: ")),
+        lines[2] if len(lines) > 2 else "",
+    )
+    detail_lines = tuple(
+        line
+        for line in lines
+        if line.startswith(("• Gross amount: ", "• Holiday policy: "))
+    )
+    if not detail_lines and len(lines) >= 6:
+        detail_lines = tuple(lines[4:6])
+    summary_lines = tuple(
+        line for line in (fund_line, *detail_lines, status_line, action_line) if line
+    )
     return DcaNotificationSummary(
         due_date=due_date,
-        lines=(lines[2], *lines[4:6], status_line)
-        + ((action_line,) if action_line else ()),
+        lines=summary_lines,
         amount=amount,
         skipped=skipped,
         rebuilt_text="\n".join(lines) if current_status is not None else None,
@@ -654,6 +704,11 @@ def evaluate_drawdown_plan_prealerts(
                 rule,
             )
             if (
+                active_cycle is not None
+                and active_cycle.last_evaluated_date >= market_date
+            ):
+                continue
+            if (
                 prealert_exists
                 and active_cycle is not None
                 and active_cycle.last_evaluated_date >= confirmed_date
@@ -1096,6 +1151,10 @@ def read_drawdown_plan_statuses(
     """Calculate current plan state without reserving alerts or changing cycles."""
 
     check_date = end_date or date.today()
+    if force_refresh:
+        clear_caches = getattr(market_data_provider, "clear_caches", None)
+        if callable(clear_caches):
+            clear_caches()
     rules = [
         row
         for row in list_enabled_rules(connection)
@@ -1117,6 +1176,7 @@ def read_drawdown_plan_statuses(
                 market_data_provider,
                 end_date=check_date,
                 require_end_date=False,
+                minimum_end_date=minimum_fund_nav_date,
                 force_refresh=force_refresh,
                 persist_end_date=check_date - timedelta(days=1),
             )
@@ -1474,6 +1534,7 @@ def _history_with_persistent_cache(
     end_date: date,
     price_basis: PriceBasis,
     require_end_date: bool,
+    minimum_end_date: date | None = None,
     force_refresh: bool = False,
     cache_end_date: date | None = None,
     persist_end_date: date | None = None,
@@ -1503,6 +1564,7 @@ def _history_with_persistent_cache(
     cached = cached_coverage
     latest = None if cached is None else _latest_history_date(cached)
     coverage_end_date = required_end_date or end_date
+    freshness_floor = coverage_end_date if require_end_date else minimum_end_date
     covered = (
         cached_coverage is not None
         and cached is not None
@@ -1510,7 +1572,8 @@ def _history_with_persistent_cache(
         and earliest is not None
         and earliest <= start_date
         and (
-            not require_end_date or (latest is not None and latest >= coverage_end_date)
+            freshness_floor is None
+            or (latest is not None and latest >= freshness_floor)
         )
     )
     if covered and not force_refresh:
@@ -1630,6 +1693,7 @@ def _fetch_drawdown_plan_history(
     *,
     end_date: date,
     require_end_date: bool = True,
+    minimum_end_date: date | None = None,
     force_refresh: bool = False,
     persist_end_date: date | None = None,
     return_fetched_if_persisted: bool = False,
@@ -1655,6 +1719,7 @@ def _fetch_drawdown_plan_history(
         end_date=end_date,
         price_basis=PriceBasis.QFQ,
         require_end_date=require_end_date,
+        minimum_end_date=minimum_end_date,
         force_refresh=force_refresh,
         persist_end_date=persist_end_date,
         return_fetched_if_persisted=return_fetched_if_persisted,
@@ -2076,7 +2141,9 @@ def _evaluate_cached_position_profit_nav(
         position_cycle_id=cycle_id,
     )
     configured_thresholds = _load_params(str(row["params_json"]))["thresholds"]
-    if len(recorded_threshold_keys) >= len(configured_thresholds) or (
+    if _all_profit_thresholds_recorded(
+        configured_thresholds, recorded_threshold_keys
+    ) or (
         has_position_profit_evaluation(
             connection,
             rule_id=rule_id,
@@ -2208,7 +2275,9 @@ def evaluate_position_profit_rules(
                 position_cycle_id=cycle_id,
             )
             configured_thresholds = _load_params(str(row["params_json"]))["thresholds"]
-            if len(recorded_threshold_keys) >= len(configured_thresholds):
+            if _all_profit_thresholds_recorded(
+                configured_thresholds, recorded_threshold_keys
+            ):
                 continue
             nav_date = expected_date.isoformat()
             if has_position_profit_evaluation(
@@ -2239,11 +2308,12 @@ def evaluate_position_profit_rules(
                 raise MarketDataProviderError(
                     f"Exact Eastmoney fund NAV for {expected_date} is unavailable."
                 )
+            current_row = row
             for attempt in range(2):
                 try:
                     notification = _evaluate_cached_position_profit_nav(
                         connection,
-                        row,
+                        current_row,
                         navs[nav_key],
                         nav_date=nav_date,
                     )
@@ -2253,11 +2323,26 @@ def evaluate_position_profit_rules(
                 except sqlite3.IntegrityError:
                     if attempt:
                         raise
+                    refreshed_row = connection.execute(
+                        "SELECT * FROM rules WHERE id = ? AND enabled = 1",
+                        (rule_id,),
+                    ).fetchone()
+                    if refreshed_row is None:
+                        break
+                    current_row = refreshed_row
         except (MarketDataProviderError, MarketCalendarUnavailableError) as exc:
             no_data_skips.append(
                 RuleNoDataSkip(rule_id, symbol, str(exc), expected_date)
             )
-        except sqlite3.IntegrityError:
+        except sqlite3.IntegrityError as exc:
+            LOGGER.warning(
+                "Position-linked Price-Gain persistence conflict rule_id=%s "
+                "symbol=%s date=%s: %s",
+                rule_id,
+                symbol,
+                expected_date,
+                exc,
+            )
             continue
         except Exception as exc:  # noqa: BLE001
             errors.append(RuleCheckError(rule_id, symbol, str(exc), expected_date))
@@ -2323,12 +2408,13 @@ def evaluate_dca_rules(
                     open_due_date = market_calendar.confirmed_status(check_date)
                 except MarketCalendarUnavailableError:
                     open_due_date = None
+                validated_amount = float(read_dca_amount(params))
                 occurrence = create_scheduled_dca_occurrence(
                     connection,
                     rule_id=int(row["id"]),
                     fund_symbol=str(row["symbol"]),
                     due_date=check_date.isoformat(),
-                    gross_amount=float(params["amount"]),
+                    gross_amount=validated_amount,
                     holiday_policy=policy,
                     effective_date=(check_date.isoformat() if open_due_date else None),
                     skipped=open_due_date is False and policy == "skip",
@@ -2509,6 +2595,13 @@ class DrawdownMarketDataCache:
                         not self._include_latest
                         or (self._confirmed_end_date is not None and has_latest)
                     ),
+                    minimum_end_date=(
+                        self._confirmed_end_date
+                        if self._include_latest
+                        and self._confirmed_end_date is not None
+                        and not has_latest
+                        else None
+                    ),
                     cache_end_date=(
                         self._confirmed_end_date
                         if self._include_latest and self._confirmed_end_date is not None
@@ -2578,6 +2671,21 @@ def _format_no_data_message(
     )
 
 
+def _all_profit_thresholds_recorded(
+    configured_thresholds: Any,
+    recorded_threshold_keys: Collection[str],
+) -> bool:
+    if not configured_thresholds:
+        return True
+    try:
+        return all(
+            format_profit_threshold_key(float(threshold)) in recorded_threshold_keys
+            for threshold in configured_thresholds
+        )
+    except (TypeError, ValueError):
+        return False
+
+
 def _append_latest_row(
     history: pd.DataFrame,
     latest: dict[str, object] | None,
@@ -2590,9 +2698,19 @@ def _append_latest_row(
     latest_date = pd.to_datetime(latest["date"], errors="coerce")
     if pd.isna(latest_date):
         return history
+    raw_close = latest["close"]
+    if isinstance(raw_close, bool):
+        return history
+    try:
+        latest_close = float(raw_close)
+    except (TypeError, ValueError):
+        return history
+    if not math.isfinite(latest_close) or latest_close <= 0:
+        return history
 
     latest_row = {column: latest.get(column) for column in history.columns}
     latest_row["date"] = latest_date.normalize()
+    latest_row["close"] = latest_close
     latest_frame = pd.DataFrame([latest_row]).dropna(axis="columns", how="all")
     frame = pd.concat([history, latest_frame], ignore_index=True).reindex(
         columns=history.columns
@@ -2600,7 +2718,7 @@ def _append_latest_row(
     frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
     frame = frame.dropna(subset=["date"])
     return (
-        frame.sort_values("date", ascending=True)
+        frame.sort_values("date", ascending=True, kind="stable")
         .drop_duplicates(subset=["date"], keep="last")
         .reset_index(drop=True)
     )

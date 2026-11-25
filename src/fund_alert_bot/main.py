@@ -88,6 +88,7 @@ def run() -> None:
         # The proxy patch owns retries for paid Eastmoney requests. Keeping
         # this provider budget at one avoids multiplying proxy attempts.
         eastmoney_retries=1 if proxy_active else None,
+        today_factory=lambda: datetime.now(ZoneInfo(settings.timezone)).date(),
     )
     market_calendar = CNMarketCalendar()
     work_lock = Lock()

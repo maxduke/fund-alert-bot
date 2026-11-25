@@ -898,6 +898,21 @@ def _prune_ended_drawdown_cycles(
             "DELETE FROM drawdown_tier_records WHERE cycle_id = ?",
             (cycle_id,),
         )
+        # Keep the latest amount-change row per rule detached from pruned
+        # cycles so monotonic amount_revision() never regresses on cascade.
+        connection.execute(
+            """
+            UPDATE drawdown_plan_amount_changes
+            SET cycle_id = NULL
+            WHERE cycle_id = ?
+              AND id IN (
+                  SELECT MAX(id)
+                  FROM drawdown_plan_amount_changes
+                  GROUP BY rule_id
+              )
+            """,
+            (cycle_id,),
+        )
         cycles_deleted += _delete_rows(
             connection,
             "DELETE FROM drawdown_cycles WHERE id = ? AND end_date IS NOT NULL",
@@ -3836,6 +3851,8 @@ def claim_notification_deliveries(
         if target_keys is None
         else tuple(dict.fromkeys(str(target_key) for target_key in target_keys))
     )
+    if normalized_target_keys is not None and not normalized_target_keys:
+        return []
 
     with write_transaction(connection):
         now = _utc_now_text()
@@ -3991,10 +4008,10 @@ def _refresh_alert_notification_status(
             "SELECT notification_status FROM alert_events WHERE id = ?",
             (event_id,),
         ).fetchone()
-        if (
-            existing is not None
-            and str(existing["notification_status"]) == ALERT_NOTIFICATION_SENT
-        ):
+        if existing is not None and str(existing["notification_status"]) in {
+            ALERT_NOTIFICATION_SENT,
+            ALERT_NOTIFICATION_CANCELLED,
+        }:
             return
         status = ALERT_NOTIFICATION_FAILED
         attempted_at = now

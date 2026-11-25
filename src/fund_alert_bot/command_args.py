@@ -617,9 +617,10 @@ def _parse_drawdown_plan_tiers(raw_tiers: str) -> list[dict[str, int | float]]:
             raise CommandParseError("tiers must use percent:amount separated by commas")
         raw_percent, raw_amount = piece.split(":")
         try:
-            percent = float(raw_percent)
+            percent_decimal = Decimal(raw_percent)
+            percent = float(percent_decimal)
             amount = float(raw_amount)
-        except ValueError as exc:
+        except (InvalidOperation, ValueError) as exc:
             raise CommandParseError("tier percent and amount must be numbers") from exc
         if not math.isfinite(percent) or percent <= 0 or percent >= 100:
             raise CommandParseError(
@@ -629,8 +630,10 @@ def _parse_drawdown_plan_tiers(raw_tiers: str) -> list[dict[str, int | float]]:
             raise CommandParseError("tier amount must be a positive finite number")
         tiers.append(
             {
-                "drawdown": percent / 100,
-                "amount": int(amount) if amount.is_integer() else amount,
+                "drawdown": float(percent_decimal / Decimal(100)),
+                "amount": (
+                    int(amount) if amount.is_integer() and amount <= 2**53 else amount
+                ),
             }
         )
     return tiers

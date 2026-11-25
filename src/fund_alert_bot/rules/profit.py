@@ -184,12 +184,18 @@ def build_position_profit_alert(
     if str(getattr(nav, "symbol", "")) != symbol:
         raise ValueError("Fund NAV does not match the Price-Gain rule.")
     profit_rate = calculate_profit_rate(current_price=nav_value, cost=cost)
-    crossed = tuple(
-        (format_profit_threshold_key(threshold), threshold)
-        for threshold in thresholds
-        if meets_threshold(profit_rate, threshold)
-        and format_profit_threshold_key(threshold) not in recorded_threshold_keys
-    )
+    crossed_list: list[tuple[str, float]] = []
+    seen_keys: set[str] = set()
+    for threshold in thresholds:
+        key = format_profit_threshold_key(threshold)
+        if (
+            meets_threshold(profit_rate, threshold)
+            and key not in recorded_threshold_keys
+            and key not in seen_keys
+        ):
+            seen_keys.add(key)
+            crossed_list.append((key, threshold))
+    crossed = tuple(crossed_list)
     if not crossed:
         return None
     name = str(read_rule_value(rule, "name", ""))

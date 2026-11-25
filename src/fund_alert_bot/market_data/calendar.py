@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Protocol
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -14,6 +16,12 @@ from fund_alert_bot.market_data.exceptions import MarketCalendarUnavailableError
 LOGGER = logging.getLogger(__name__)
 
 AKSHARE_TRADE_DATE_COLUMNS = ("trade_date", "\u65e5\u671f")
+_CN_TIMEZONE = ZoneInfo("Asia/Shanghai")
+DEFAULT_CALENDAR_FAILURE_COOLDOWN_SECONDS = 300.0
+
+
+def _cn_today() -> date:
+    return datetime.now(_CN_TIMEZONE).date()
 
 
 class MarketCalendar(Protocol):
@@ -35,15 +43,21 @@ class CNMarketCalendar:
         self,
         *,
         ak_module: Any | None = None,
-        today_factory: Callable[[], date] = date.today,
+        today_factory: Callable[[], date] = _cn_today,
+        failure_retry_cooldown_seconds: float = (
+            DEFAULT_CALENDAR_FAILURE_COOLDOWN_SECONDS
+        ),
     ) -> None:
         self._ak_module = ak_module
         self._today_factory = today_factory
+        self._failure_retry_cooldown_seconds = failure_retry_cooldown_seconds
         self._trade_days: set[date] | None = None
         self._loaded_on: date | None = None
         self._load_attempted_on: date | None = None
+        self._load_failed_at: float | None = None
         self._coverage_refresh_on: date | None = None
         self._coverage_refresh_failed = False
+        self._coverage_refresh_failed_at: float | None = None
 
     def is_trading_day(self, check_date: date) -> bool:
         """Return True when check_date is a CN trading day."""
@@ -79,17 +93,24 @@ class CNMarketCalendar:
 
     def _load_trade_days(self, *, refresh: bool = False) -> set[date] | None:
         today = self._today_factory()
+        now = time.monotonic()
         if not refresh:
             if self._loaded_on == today:
                 return self._trade_days
-            if self._load_attempted_on == today:
+            if self._load_attempted_on == today and self._is_cooling_down(
+                self._load_failed_at, now
+            ):
                 return self._trade_days
             self._load_attempted_on = today
         elif self._coverage_refresh_on == today:
-            return None if self._coverage_refresh_failed else self._trade_days
+            if not self._coverage_refresh_failed:
+                return self._trade_days
+            if self._is_cooling_down(self._coverage_refresh_failed_at, now):
+                return None
         else:
             self._coverage_refresh_on = today
             self._coverage_refresh_failed = False
+            self._coverage_refresh_failed_at = None
 
         try:
             raw_data = self._akshare.tool_trade_date_hist_sina()
@@ -102,6 +123,9 @@ class CNMarketCalendar:
             )
             if refresh:
                 self._coverage_refresh_failed = True
+                self._coverage_refresh_failed_at = now
+            else:
+                self._load_failed_at = now
             return None if refresh else self._trade_days
 
         if trade_days is None:
@@ -111,12 +135,23 @@ class CNMarketCalendar:
             )
             if refresh:
                 self._coverage_refresh_failed = True
+                self._coverage_refresh_failed_at = now
+            else:
+                self._load_failed_at = now
             return None if refresh else self._trade_days
 
         self._trade_days = trade_days
         self._loaded_on = today
+        self._load_failed_at = None
         self._coverage_refresh_failed = False
+        self._coverage_refresh_failed_at = None
         return self._trade_days
+
+    def _is_cooling_down(self, failed_at: float | None, now: float) -> bool:
+        return (
+            failed_at is not None
+            and now - failed_at < self._failure_retry_cooldown_seconds
+        )
 
     def _cache_is_stale_for(self, check_date: date) -> bool:
         today = self._today_factory()

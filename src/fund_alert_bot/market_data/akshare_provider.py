@@ -42,6 +42,10 @@ LOGGER = logging.getLogger(__name__)
 _CACHE_MAX_ENTRIES = 128
 
 
+def _cn_today() -> date:
+    return datetime.now(_CN_TIMEZONE).date()
+
+
 class AkshareMarketDataProvider(MarketDataProvider):
     """Fetch and normalize historical market data from AKShare."""
 
@@ -57,7 +61,7 @@ class AkshareMarketDataProvider(MarketDataProvider):
         realtime_spot_ttl_seconds: float = 30.0,
         fund_nav_cache_ttl_seconds: float = 300.0,
         eastmoney_failure_ttl_seconds: float = 30.0,
-        today_factory: Callable[[], date] = date.today,
+        today_factory: Callable[[], date] = _cn_today,
         now_factory: Callable[[], datetime] | None = None,
         http_get: Callable[..., Any] | None = None,
     ) -> None:
@@ -124,6 +128,16 @@ class AkshareMarketDataProvider(MarketDataProvider):
     def _count_request(self, kind: str) -> None:
         self._request_counts[kind] = self._request_counts.get(kind, 0) + 1
 
+    def clear_caches(self) -> None:
+        """Clear positive in-memory history and NAV caches on explicit refresh."""
+
+        self._history_cache.clear()
+        self._fund_nav_cache = {
+            key: value
+            for key, value in self._fund_nav_cache.items()
+            if value[1] is None
+        }
+
     def get_history(
         self,
         instrument: Instrument,
@@ -177,7 +191,14 @@ class AkshareMarketDataProvider(MarketDataProvider):
                 "frequency": "daily",
             }
         )
-        self._write_history_cache(cache_key, result)
+        requested_end = _to_timestamp(end_date)
+        latest_in_result = pd.Timestamp(result["date"].iloc[-1])
+        incomplete_today_request = (
+            requested_end >= _to_timestamp(self._today_factory())
+            and latest_in_result < requested_end
+        )
+        if not incomplete_today_request:
+            self._write_history_cache(cache_key, result)
         return result
 
     def _read_history_cache(
@@ -570,7 +591,7 @@ class AkshareMarketDataProvider(MarketDataProvider):
             return (
                 self._call_eastmoney_with_retry(
                     ak_module.stock_zh_a_hist,
-                    symbol=instrument.symbol,
+                    symbol=_strip_exchange_prefix(instrument.symbol),
                     period="daily",
                     start_date=start,
                     end_date=end,
@@ -592,7 +613,12 @@ class AkshareMarketDataProvider(MarketDataProvider):
         cached = self._fund_nav_cache.get(symbol)
         if cached is not None:
             cached_at, raw_data = cached
-            if time.monotonic() - cached_at <= self._fund_nav_cache_ttl_seconds:
+            ttl = (
+                self._eastmoney_failure_ttl_seconds
+                if raw_data is None
+                else self._fund_nav_cache_ttl_seconds
+            )
+            if time.monotonic() - cached_at <= ttl:
                 if raw_data is None:
                     raise MarketDataFetchError(
                         f"Recent unit NAV request for {symbol} failed; "
@@ -601,15 +627,21 @@ class AkshareMarketDataProvider(MarketDataProvider):
                 return raw_data, False
             self._fund_nav_cache.pop(symbol, None)
 
+        # Do not write a per-symbol negative entry when suppressed by the
+        # global Eastmoney cooldown; otherwise healthy funds inherit the cache.
+        self._raise_if_source_cooling_down("Eastmoney", self._eastmoney_failed_at)
         try:
+            # akshare_proxy_patch bypasses .js endpoints like pingzhongdata, so
+            # keep the full provider retry budget instead of eastmoney_retries.
             raw_data = self._call_eastmoney_with_retry(
                 self._akshare.fund_open_fund_info_em,
+                attempts=self._retries,
                 request_kind="eastmoney:nav",
                 symbol=symbol,
                 indicator="\u5355\u4f4d\u51c0\u503c\u8d70\u52bf",
             )
         except MarketDataFetchError:
-            if self._fund_nav_cache_ttl_seconds > 0:
+            if self._eastmoney_failure_ttl_seconds > 0:
                 self._fund_nav_cache[symbol] = (time.monotonic(), None)
                 if len(self._fund_nav_cache) > _CACHE_MAX_ENTRIES:
                     self._fund_nav_cache.pop(next(iter(self._fund_nav_cache)))
@@ -629,12 +661,13 @@ class AkshareMarketDataProvider(MarketDataProvider):
         price_basis: PriceBasis,
     ) -> tuple[pd.DataFrame, str, bool]:
         ak_module = self._akshare
+        bare_symbol = _strip_exchange_prefix(instrument.symbol)
         adjust = "qfq" if price_basis is PriceBasis.QFQ else ""
         if price_basis is PriceBasis.QFQ:
             return (
                 self._call_eastmoney_with_retry(
                     ak_module.fund_etf_hist_em,
-                    symbol=instrument.symbol,
+                    symbol=bare_symbol,
                     period="daily",
                     start_date=start_date,
                     end_date=end_date,
@@ -647,7 +680,7 @@ class AkshareMarketDataProvider(MarketDataProvider):
         try:
             raw_data = self._call_eastmoney_with_retry(
                 ak_module.fund_etf_hist_em,
-                symbol=instrument.symbol,
+                symbol=bare_symbol,
                 period="daily",
                 start_date=start_date,
                 end_date=end_date,
@@ -699,6 +732,7 @@ class AkshareMarketDataProvider(MarketDataProvider):
         self,
         func: Callable[..., pd.DataFrame],
         *,
+        attempts: int | None = None,
         request_kind: str = "eastmoney:history",
         **kwargs: object,
     ) -> pd.DataFrame:
@@ -706,7 +740,7 @@ class AkshareMarketDataProvider(MarketDataProvider):
         try:
             result = self._call_with_retry(
                 func,
-                attempts=self._eastmoney_retries,
+                attempts=self._eastmoney_retries if attempts is None else attempts,
                 request_kind=request_kind,
                 **kwargs,
             )
