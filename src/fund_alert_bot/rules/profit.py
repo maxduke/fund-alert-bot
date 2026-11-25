@@ -13,6 +13,7 @@ from typing import Any
 import pandas as pd
 
 from fund_alert_bot.market_data import AssetType
+from fund_alert_bot.notifications.base import TELEGRAM_TEXT_LIMIT
 from fund_alert_bot.rules._params import (
     meets_threshold,
     read_params,
@@ -26,8 +27,6 @@ _read_required_param = partial(read_required_param, subject="profit rule")
 _read_required_rule_value = partial(read_required_rule_value, subject="profit rule")
 
 AlertChecker = Callable[[str], bool]
-
-_TELEGRAM_TEXT_LIMIT = 4096
 
 
 class LatestDataUnavailableError(ValueError):
@@ -153,7 +152,7 @@ def validate_position_profit_notification_size(
         position_cycle_id=2**63 - 1,
         recorded_threshold_keys=set(),
     )
-    if preview is not None and len(str(preview[0]["message"])) > _TELEGRAM_TEXT_LIMIT:
+    if preview is not None and len(str(preview[0]["message"])) > TELEGRAM_TEXT_LIMIT:
         raise ValueError(
             "auto thresholds and name produce a Price-Gain reminder over "
             "Telegram's 4096-character limit"

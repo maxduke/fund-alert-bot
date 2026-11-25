@@ -433,6 +433,20 @@ class DrawdownPlanStatusResult:
     errors: list[RuleCheckError]
 
 
+def _partition_actionable_tiers(
+    *,
+    actionable_tiers: tuple[DrawdownTier, ...],
+    newly_crossed_tiers: tuple[DrawdownTier, ...],
+) -> tuple[tuple[DrawdownTier, ...], tuple[DrawdownTier, ...]]:
+    """Split actionable tiers into newly crossed vs previously confirmed pending."""
+
+    actionable_keys = {tier.key for tier in actionable_tiers}
+    newly = tuple(tier for tier in newly_crossed_tiers if tier.key in actionable_keys)
+    newly_keys = {tier.key for tier in newly}
+    pending = tuple(tier for tier in actionable_tiers if tier.key not in newly_keys)
+    return newly, pending
+
+
 def evaluate_drawdown_plan_rule(
     connection: Any,
     rule: Any,
@@ -489,13 +503,9 @@ def evaluate_drawdown_plan_rule(
             snoozed_tier_keys=snoozed_tier_keys,
         )
     )
-    actionable_keys = {tier.key for tier in actionable_tiers}
-    newly_crossed_tiers = tuple(
-        tier for tier in evaluation.newly_crossed_tiers if tier.key in actionable_keys
-    )
-    newly_keys = {tier.key for tier in newly_crossed_tiers}
-    pending_tiers = tuple(
-        tier for tier in actionable_tiers if tier.key not in newly_keys
+    _newly_crossed_tiers, pending_tiers = _partition_actionable_tiers(
+        actionable_tiers=actionable_tiers,
+        newly_crossed_tiers=evaluation.newly_crossed_tiers,
     )
     tiers_to_record = () if initialize_only else evaluation.newly_crossed_tiers
     resolved_alert: dict[str, object] | None = None
@@ -815,15 +825,9 @@ def evaluate_drawdown_plan_prealerts(
                 skipped_tier_keys=skipped_tier_keys,
                 snoozed_tier_keys=snoozed_tier_keys,
             )
-            actionable_keys = {tier.key for tier in actionable_tiers}
-            newly_realtime_tiers = tuple(
-                tier
-                for tier in realtime.newly_crossed_tiers
-                if tier.key in actionable_keys
-            )
-            newly_keys = {tier.key for tier in newly_realtime_tiers}
-            pending_tiers = tuple(
-                tier for tier in actionable_tiers if tier.key not in newly_keys
+            newly_realtime_tiers, pending_tiers = _partition_actionable_tiers(
+                actionable_tiers=actionable_tiers,
+                newly_crossed_tiers=realtime.newly_crossed_tiers,
             )
             valuation = (
                 get_valuation_context(
@@ -1207,34 +1211,15 @@ def read_drawdown_plan_statuses(
                 connection,
                 config.investment_fund_symbol,
             )
-            added_tier_keys = (
-                frozenset()
+            added_tier_keys, skipped_tier_keys, snoozed_tier_keys = (
+                (frozenset(), frozenset(), frozenset())
                 if active_cycle is None or evaluation.cycle_changed
-                else frozenset(
-                    str(row["tier_key"])
-                    for row in list_manual_add_actions(
-                        connection,
-                        active_cycle.cycle_id,
-                    )
-                )
-            )
-            skipped_tier_keys = frozenset()
-            snoozed_tier_keys = frozenset()
-            if active_cycle is not None and not evaluation.cycle_changed:
-                reminder_states = get_drawdown_tier_reminder_states(
+                else _drawdown_reminder_key_sets(
                     connection,
                     active_cycle.cycle_id,
+                    market_date=check_date,
                 )
-                skipped_tier_keys = frozenset(
-                    key
-                    for key, row in reminder_states.items()
-                    if bool(row["skipped_for_cycle"])
-                )
-                snoozed_tier_keys = frozenset(
-                    key
-                    for key, row in reminder_states.items()
-                    if row["snoozed_market_date"] == check_date.isoformat()
-                )
+            )
             fund_nav = None
             nav_unavailable_reason = None
             if position is not None and float(position["units"]) > 0:

@@ -101,6 +101,7 @@ from fund_alert_bot.db import (
     get_fund_settings,
     get_position_profit_event,
     get_position_snapshot,
+    get_rule,
     get_scheduled_dca_occurrence,
     initialize_database,
     is_auto_cost_profit_rule,
@@ -184,6 +185,40 @@ if TYPE_CHECKING:
     from telegram.ext import Application, ContextTypes
 
 LOGGER = logging.getLogger(__name__)
+_MAX_DRAFTS = 128
+_MAX_PROFIT_SETUP_NAMES = 128
+
+
+def _store_bounded(
+    store: dict[Any, Any],
+    key: Any,
+    value: Any,
+    *,
+    max_entries: int,
+) -> None:
+    """Insert an entry while keeping in-memory Telegram stores bounded."""
+    store.pop(key, None)
+    store[key] = value
+    while len(store) > max_entries:
+        store.pop(next(iter(store)))
+
+
+def _verify_domestic_cn_fund_calendar(
+    market_data_provider: MarketDataProvider,
+    fund_symbol: str,
+) -> tuple[str, str | None, str | None]:
+    """Verify that fund metadata confirms a domestic CN valuation calendar."""
+    metadata_reader = getattr(market_data_provider, "get_fund_type", None)
+    if not callable(metadata_reader):
+        return "missing_metadata", None, None
+    try:
+        fund_type = str(metadata_reader(fund_symbol))
+    except MarketDataProviderError as exc:
+        return "metadata_error", None, str(exc)
+    if "QDII" in fund_type.upper() or "海外" in fund_type:
+        return "foreign_fund", fund_type, None
+    return "ok", fund_type, None
+
 
 START_MESSAGE = "fund-alert-bot is running. Use /help to see available commands."
 HELP_MESSAGE = "\n".join(
@@ -1327,15 +1362,12 @@ def build_command_handlers(
                 Any,
                 str | None,
             ]:
-                metadata_reader = getattr(market_data_provider, "get_fund_type", None)
-                if not callable(metadata_reader):
-                    return "missing_metadata", None, None, None, None
-                try:
-                    fund_type = str(metadata_reader(command.symbol))
-                except MarketDataProviderError as exc:
-                    return "metadata_error", None, None, None, str(exc)
-                if "QDII" in fund_type.upper() or "海外" in fund_type:
-                    return "foreign_fund", None, fund_type, None, None
+                status, fund_type, metadata_error = _verify_domestic_cn_fund_calendar(
+                    market_data_provider,
+                    command.symbol,
+                )
+                if status != "ok":
+                    return status, None, fund_type, None, metadata_error
 
                 with open_connection(sqlite_path) as connection:
                     initialize_database(connection)
@@ -1374,11 +1406,9 @@ def build_command_handlers(
                             ),
                             nav_date=expected_date,
                         )
-                        rule = next(
-                            row
-                            for row in db_list_rules(connection)
-                            if int(row["id"]) == rule_id
-                        )
+                        rule = get_rule(connection, rule_id)
+                        if rule is None:
+                            raise ValueError("created rule could not be loaded")
                         preview = build_position_profit_alert(
                             rule,
                             nav,
@@ -1499,19 +1529,18 @@ def build_command_handlers(
                 str,
                 tuple[str, ...],
             ]:
-                metadata_reader = getattr(market_data_provider, "get_fund_type", None)
-                if not callable(metadata_reader):
-                    return "missing_metadata", 0, "", "", "SETUP_REQUIRED", ()
-                try:
-                    current_fund_type = str(metadata_reader(command.fund_symbol))
-                except MarketDataProviderError as exc:
-                    return "metadata_error", 0, "", str(exc), "SETUP_REQUIRED", ()
-                if "QDII" in current_fund_type.upper() or "海外" in current_fund_type:
+                calendar_status, current_fund_type, metadata_error = (
+                    _verify_domestic_cn_fund_calendar(
+                        market_data_provider,
+                        command.fund_symbol,
+                    )
+                )
+                if calendar_status != "ok":
                     return (
-                        "foreign_fund",
+                        calendar_status,
                         0,
-                        current_fund_type,
-                        "",
+                        current_fund_type or "",
+                        metadata_error or "",
                         "SETUP_REQUIRED",
                         (),
                     )
@@ -1824,12 +1853,17 @@ def build_command_handlers(
         now = _clock_now(clock)
         purge_drafts(now)
         token = secrets.token_urlsafe(9)
-        plan_amount_drafts[token] = PlanAmountsDraft(
-            user_id,
-            chat_id,
-            now + timedelta(minutes=10),
-            now.astimezone(cn_market_timezone).date(),
-            preview,
+        _store_bounded(
+            plan_amount_drafts,
+            token,
+            PlanAmountsDraft(
+                user_id,
+                chat_id,
+                now + timedelta(minutes=10),
+                now.astimezone(cn_market_timezone).date(),
+                preview,
+            ),
+            max_entries=_MAX_DRAFTS,
         )
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -1995,11 +2029,16 @@ def build_command_handlers(
         now = _clock_now(clock)
         purge_drafts(now)
         token = secrets.token_urlsafe(9)
-        plan_drafts[token] = DrawdownPlanDraft(
-            user_id=user_id,
-            chat_id=chat_id,
-            expires_at=now + timedelta(minutes=10),
-            command=command,
+        _store_bounded(
+            plan_drafts,
+            token,
+            DrawdownPlanDraft(
+                user_id=user_id,
+                chat_id=chat_id,
+                expires_at=now + timedelta(minutes=10),
+                command=command,
+            ),
+            max_entries=_MAX_DRAFTS,
         )
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -2110,7 +2149,12 @@ def build_command_handlers(
             expires_at=now + timedelta(minutes=10),
             selection=selection,
         )
-        manual_add_drafts[token] = draft
+        _store_bounded(
+            manual_add_drafts,
+            token,
+            draft,
+            max_entries=_MAX_DRAFTS,
+        )
         return token, draft
 
     def manual_add_confirmation_markup(
@@ -3098,12 +3142,17 @@ def build_command_handlers(
                 return
             now = _clock_now(clock)
             token = secrets.token_urlsafe(9)
-            position_sync_drafts[token] = PositionSyncDraft(
-                user_id=user_id,
-                chat_id=chat_id,
-                expires_at=now + timedelta(minutes=10),
-                command=command,
-                item_keys=tuple(str(item["key"]) for item in pending_items),
+            _store_bounded(
+                position_sync_drafts,
+                token,
+                PositionSyncDraft(
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    expires_at=now + timedelta(minutes=10),
+                    command=command,
+                    item_keys=tuple(str(item["key"]) for item in pending_items),
+                ),
+                max_entries=_MAX_DRAFTS,
             )
             from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -3551,9 +3600,13 @@ def build_command_handlers(
         for key in tuple(profit_setup_names):
             if key[0] == user_id:
                 profit_setup_names.pop(key)
-        profit_setup_names.update(
-            ((user_id, symbol), name) for symbol, name in profit_setup_funds
-        )
+        for symbol, name in profit_setup_funds:
+            _store_bounded(
+                profit_setup_names,
+                (user_id, symbol),
+                name,
+                max_entries=_MAX_PROFIT_SETUP_NAMES,
+            )
         markup = None
         if profit_setup_funds:
             from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -3626,10 +3679,7 @@ def build_command_handlers(
 
         with open_connection(sqlite_path) as connection:
             initialize_database(connection)
-            rule = next(
-                (row for row in db_list_rules(connection) if int(row["id"]) == rule_id),
-                None,
-            )
+            rule = get_rule(connection, rule_id)
         if rule is None:
             await _reply_text(update, f"Rule id={rule_id} was not found")
             return
@@ -3700,10 +3750,7 @@ def build_command_handlers(
             return
         with open_connection(sqlite_path) as connection:
             initialize_database(connection)
-            rule = next(
-                (row for row in db_list_rules(connection) if int(row["id"]) == rule_id),
-                None,
-            )
+            rule = get_rule(connection, rule_id)
             if rule is None:
                 result = f"Rule id={rule_id} was not found"
             elif not bool(rule["enabled"]):

@@ -39,7 +39,14 @@ from fund_alert_bot.checks import (
     process_scheduled_dca_occurrences,
     reserve_drawdown_plan_data_unavailable_notice,
 )
-from fund_alert_bot.config import NotificationSettings, parse_hhmm_time
+from fund_alert_bot.config import (
+    DEFAULT_AFTER_CLOSE_CHECK_TIME,
+    DEFAULT_BEFORE_CLOSE_CHECK_TIME,
+    DEFAULT_DCA_REMINDER_TIME,
+    DEFAULT_FUND_NAV_PROCESS_TIME,
+    NotificationSettings,
+    parse_hhmm_time,
+)
 from fund_alert_bot.db import (
     clear_dca_evaluation_failure,
     initialize_database,
@@ -68,10 +75,6 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
-DEFAULT_AFTER_CLOSE_CHECK_TIME = "17:10"
-DEFAULT_BEFORE_CLOSE_CHECK_TIME = "14:50"
-DEFAULT_DCA_REMINDER_TIME = "09:30"
-DEFAULT_FUND_NAV_PROCESS_TIME = "08:30"
 MARKET_AFTER_CLOSE_JOB_ID = "market-after-close-check"
 MARKET_BEFORE_CLOSE_JOB_ID = "market-before-close-check"
 DCA_MORNING_JOB_ID = "dca-morning-reminder-check"
