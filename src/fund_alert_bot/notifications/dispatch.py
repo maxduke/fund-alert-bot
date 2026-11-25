@@ -53,15 +53,20 @@ async def send_alert_notifications(
     delivery_targets = notification_service.delivery_targets
     event_ids = tuple(notification_by_event)
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_DELIVERIES)
+    db_lock = asyncio.Lock()
     for batch in _notification_batches(notifications):
         batch_ids = tuple(item.event_id for item in batch)
-        with open_connection(sqlite_path) as connection:
-            initialize_database(connection)
-            ensure_notification_delivery_targets(
-                connection,
-                event_ids=batch_ids,
-                targets=delivery_targets,
-            )
+
+        def ensure_targets(ids: tuple[int, ...] = batch_ids) -> None:
+            with open_connection(sqlite_path) as connection:
+                initialize_database(connection)
+                ensure_notification_delivery_targets(
+                    connection,
+                    event_ids=ids,
+                    targets=delivery_targets,
+                )
+
+        await asyncio.to_thread(ensure_targets)
         claimed_target_keys: list[str] = []
 
         async def deliver(
@@ -69,49 +74,69 @@ async def send_alert_notifications(
             batch_ids: tuple[int, ...],
             claimed_target_keys: list[str],
         ) -> None:
-            async with semaphore:
-                # Claim only once a delivery slot is held so queued targets do
-                # not burn their lease while waiting behind slower sends.
-                with open_connection(sqlite_path) as connection:
-                    initialize_database(connection)
-                    target_claims = claim_notification_deliveries(
-                        connection,
-                        event_ids=batch_ids,
-                        target_keys=(target_key,),
+            try:
+                async with semaphore:
+                    # Claim only once a delivery slot is held so queued targets do
+                    # not burn their lease while waiting behind slower sends.
+                    def claim_target() -> list:
+                        with open_connection(sqlite_path) as connection:
+                            initialize_database(connection)
+                            return claim_notification_deliveries(
+                                connection,
+                                event_ids=batch_ids,
+                                target_keys=(target_key,),
+                            )
+
+                    async with db_lock:
+                        target_claims = await asyncio.to_thread(claim_target)
+                    if not target_claims:
+                        return
+                    claimed_target_keys.append(target_key)
+                    notification = _merge_dca_batch(
+                        [
+                            notification_by_event[claim.event_id]
+                            for claim in target_claims
+                        ]
                     )
-                if not target_claims:
-                    return
-                claimed_target_keys.append(target_key)
-                notification = _merge_dca_batch(
-                    [notification_by_event[claim.event_id] for claim in target_claims]
-                )
-                resume = _common_delivery_progress(target_claims)
-                result = await notification_service.send_target(
+                    resume = _common_delivery_progress(target_claims)
+                    result = await notification_service.send_target(
+                        target_key,
+                        title=notification.title,
+                        body=notification.text,
+                        telegram_actions=notification.telegram_actions,
+                        resume_sent_chunks=None if resume is None else resume[0],
+                        resume_body_fingerprint=None if resume is None else resume[1],
+                    )
+
+                def record_outcomes() -> None:
+                    with open_connection(sqlite_path) as connection:
+                        initialize_database(connection)
+                        for claim in target_claims:
+                            completed = complete_notification_delivery(
+                                connection,
+                                event_id=claim.event_id,
+                                target_key=claim.target_key,
+                                claim_token=claim.claim_token,
+                                result=result,
+                            )
+                            if not completed:
+                                LOGGER.warning(
+                                    "Discarded stale notification result event_id=%s "
+                                    "target=%s success=%s; the delivery lease expired",
+                                    claim.event_id,
+                                    claim.target_key,
+                                    result.success,
+                                )
+
+                await asyncio.to_thread(record_outcomes)
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning(
+                    "Notification delivery persistence error event_ids=%s "
+                    "target=%s error=%s",
+                    batch_ids,
                     target_key,
-                    title=notification.title,
-                    body=notification.text,
-                    telegram_actions=notification.telegram_actions,
-                    resume_sent_chunks=None if resume is None else resume[0],
-                    resume_body_fingerprint=None if resume is None else resume[1],
+                    type(exc).__name__,
                 )
-            with open_connection(sqlite_path) as connection:
-                initialize_database(connection)
-                for claim in target_claims:
-                    completed = complete_notification_delivery(
-                        connection,
-                        event_id=claim.event_id,
-                        target_key=claim.target_key,
-                        claim_token=claim.claim_token,
-                        result=result,
-                    )
-                    if not completed:
-                        LOGGER.warning(
-                            "Discarded stale notification result event_id=%s "
-                            "target=%s success=%s; the delivery lease expired",
-                            claim.event_id,
-                            claim.target_key,
-                            result.success,
-                        )
 
         await asyncio.gather(
             *(
@@ -119,25 +144,32 @@ async def send_alert_notifications(
                 for target_key, _channel in delivery_targets
             )
         )
-        with open_connection(sqlite_path) as connection:
-            initialize_database(connection)
-            refresh_alert_notification_status(connection, event_ids=batch_ids)
+
+        def refresh_batch(ids: tuple[int, ...] = batch_ids) -> None:
+            with open_connection(sqlite_path) as connection:
+                initialize_database(connection)
+                refresh_alert_notification_status(connection, event_ids=ids)
+
+        await asyncio.to_thread(refresh_batch)
         LOGGER.info(
             "Notification result event_ids=%s targets=%s",
             [item.event_id for item in batch],
             claimed_target_keys,
         )
 
-    with open_connection(sqlite_path) as connection:
-        initialize_database(connection)
-        status_rows = connection.execute(
-            """
-            SELECT id, notification_status
-            FROM alert_events
-            WHERE id IN ({})
-            """.format(", ".join("?" for _ in event_ids)),
-            event_ids,
-        ).fetchall()
+    def load_statuses() -> list:
+        with open_connection(sqlite_path) as connection:
+            initialize_database(connection)
+            return connection.execute(
+                """
+                SELECT id, notification_status
+                FROM alert_events
+                WHERE id IN ({})
+                """.format(", ".join("?" for _ in event_ids)),
+                event_ids,
+            ).fetchall()
+
+    status_rows = await asyncio.to_thread(load_statuses)
     delivered = sum(
         str(row["notification_status"]) == ALERT_NOTIFICATION_SENT
         for row in status_rows
@@ -146,10 +178,10 @@ async def send_alert_notifications(
         str(row["notification_status"]) == ALERT_NOTIFICATION_CANCELLED
         for row in status_rows
     )
-    failed = len(notifications) - delivered - cancelled
+    failed = len(event_ids) - delivered - cancelled
 
     return NotificationDispatchSummary(
-        attempted=len(notifications),
+        attempted=len(event_ids),
         delivered=delivered,
         failed=failed,
         cancelled=cancelled,

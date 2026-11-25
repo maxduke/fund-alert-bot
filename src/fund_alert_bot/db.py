@@ -43,6 +43,32 @@ NOTIFICATION_DELIVERY_SENT = "sent"
 NOTIFICATION_DELIVERY_FAILED = "failed"
 NOTIFICATION_DELIVERY_CANCELLED = "cancelled"
 NOTIFICATION_DELIVERY_CLAIM_LEASE_SECONDS = 120
+CURRENT_SCHEMA_VERSION = 1
+_REQUIRED_SCHEMA_TABLES = frozenset(
+    {
+        "app_metadata",
+        "rules",
+        "alert_events",
+        "notification_deliveries",
+        "notification_channels",
+        "drawdown_cycles",
+        "drawdown_tier_records",
+        "drawdown_tier_reminder_states",
+        "drawdown_plan_amount_changes",
+        "fund_settings",
+        "position_snapshots",
+        "position_cycles",
+        "position_profit_thresholds",
+        "position_profit_evaluations",
+        "manual_add_estimates",
+        "manual_add_actions",
+        "scheduled_dca_occurrences",
+        "dca_evaluation_failures",
+        "market_daily_history",
+        "fund_nav_history",
+        "index_valuation_cache",
+    }
+)
 _CN_TIMEZONE = ZoneInfo("Asia/Shanghai")
 
 
@@ -53,13 +79,17 @@ def connect(sqlite_path: str | Path) -> sqlite3.Connection:
         path.parent.mkdir(parents=True, exist_ok=True)
 
     connection = sqlite3.connect(path)
-    if path != Path(":memory:") and os.name == "posix":
-        path.chmod(0o600)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA foreign_keys = ON")
-    connection.execute("PRAGMA busy_timeout = 5000")
-    if path != Path(":memory:"):
-        connection.execute("PRAGMA journal_mode = WAL")
+    try:
+        if path != Path(":memory:") and os.name == "posix":
+            path.chmod(0o600)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA busy_timeout = 5000")
+        if path != Path(":memory:"):
+            connection.execute("PRAGMA journal_mode = WAL")
+    except BaseException:
+        connection.close()
+        raise
     return connection
 
 
@@ -91,8 +121,31 @@ def write_transaction(connection: sqlite3.Connection) -> Iterator[None]:
     connection.commit()
 
 
+def _schema_is_current(connection: sqlite3.Connection) -> bool:
+    """Verify schema version and core tables using read-only sqlite_master."""
+
+    current_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+    if current_version != CURRENT_SCHEMA_VERSION:
+        return False
+    tables = {
+        str(row["name"]): str(row["sql"] or "")
+        for row in connection.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    }
+    if not _REQUIRED_SCHEMA_TABLES.issubset(tables):
+        return False
+    if "'cancelled'" not in tables["notification_deliveries"]:
+        return False
+    if "source_alert_event_id INTEGER NOT NULL" in tables["manual_add_actions"]:
+        return False
+    return True
+
+
 def init_db(connection: sqlite3.Connection) -> None:
     """Create storage tables if they do not already exist."""
+    if _schema_is_current(connection):
+        return
     connection.executescript(
         """
         CREATE TABLE IF NOT EXISTS app_metadata (
@@ -399,34 +452,40 @@ def init_db(connection: sqlite3.Connection) -> None:
         );
         """
     )
-    _ensure_notification_delivery_cancelled_status(connection)
-    delivery_columns_added = _ensure_alert_event_delivery_columns(connection)
-    _migrate_monotonic_ids(connection)
-    _ensure_manual_add_action_source_event_nullable(connection)
-    _ensure_drawdown_cycle_columns(connection)
-    _ensure_fund_settings_columns(connection)
-    now = _utc_now_text()
-    _ensure_standard_notification_recovery_migration(
-        connection,
-        delivery_columns_added=delivery_columns_added,
-        now=now,
-    )
-    connection.execute(
-        """
-        INSERT INTO position_cycles (
-            fund_symbol, started_at, created_at, updated_at
+    try:
+        _ensure_notification_delivery_cancelled_status(connection)
+        delivery_columns_added = _ensure_alert_event_delivery_columns(connection)
+        _migrate_monotonic_ids(connection)
+        _ensure_manual_add_action_source_event_nullable(connection)
+        _ensure_drawdown_cycle_columns(connection)
+        _ensure_fund_settings_columns(connection)
+        now = _utc_now_text()
+        _ensure_standard_notification_recovery_migration(
+            connection,
+            delivery_columns_added=delivery_columns_added,
+            now=now,
         )
-        SELECT
-            p.fund_symbol, p.last_synced_at, ?, ?
-        FROM position_snapshots AS p
-        WHERE p.units > 0 AND NOT EXISTS (
-            SELECT 1 FROM position_cycles AS c
-            WHERE c.fund_symbol = p.fund_symbol AND c.ended_at IS NULL
+        connection.execute(
+            """
+            INSERT INTO position_cycles (
+                fund_symbol, started_at, created_at, updated_at
+            )
+            SELECT
+                p.fund_symbol, p.last_synced_at, ?, ?
+            FROM position_snapshots AS p
+            WHERE p.units > 0 AND NOT EXISTS (
+                SELECT 1 FROM position_cycles AS c
+                WHERE c.fund_symbol = p.fund_symbol AND c.ended_at IS NULL
+            )
+            """,
+            (now, now),
         )
-        """,
-        (now, now),
-    )
-    connection.commit()
+        connection.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
+        connection.commit()
+    except BaseException:
+        if connection.in_transaction:
+            connection.rollback()
+        raise
 
 
 def initialize_database(connection: sqlite3.Connection) -> None:
@@ -533,8 +592,9 @@ def prune_database(
 
     cutoff = today - timedelta(days=retention_days)
     counts = {table: 0 for table in _PRUNE_TABLES}
-    connection.execute("SAVEPOINT prune_database")
-    try:
+
+    def run_prune() -> None:
+        _cancel_expired_before_close_events(connection, today=today)
         counts["market_daily_history"] = _prune_market_daily_history(
             connection,
             today=today,
@@ -570,12 +630,83 @@ def prune_database(
             today=today,
             cutoff=cutoff,
         )
-        connection.execute("RELEASE SAVEPOINT prune_database")
-    except Exception:
-        connection.execute("ROLLBACK TO SAVEPOINT prune_database")
-        connection.execute("RELEASE SAVEPOINT prune_database")
-        raise
+
+    if connection.in_transaction:
+        connection.execute("SAVEPOINT prune_database")
+        try:
+            run_prune()
+            connection.execute("RELEASE SAVEPOINT prune_database")
+        except BaseException:
+            connection.execute("ROLLBACK TO SAVEPOINT prune_database")
+            connection.execute("RELEASE SAVEPOINT prune_database")
+            raise
+    else:
+        with write_transaction(connection):
+            run_prune()
     return counts
+
+
+def _cancel_expired_before_close_events(
+    connection: sqlite3.Connection,
+    *,
+    today: date,
+) -> int:
+    """Cancel unfinished before-close pre-alerts from earlier dates."""
+
+    now = _utc_now_text()
+    today_text = today.isoformat()
+    rows = connection.execute(
+        """
+        SELECT id
+        FROM alert_events
+        WHERE notification_status IN (?, ?)
+            AND json_valid(payload_json)
+            AND json_extract(payload_json, '$.phase') = 'before_close'
+            AND COALESCE(
+                json_extract(payload_json, '$.data_date'),
+                substr(triggered_at, 1, 10)
+            ) < ?
+        """,
+        (ALERT_NOTIFICATION_PENDING, ALERT_NOTIFICATION_FAILED, today_text),
+    ).fetchall()
+    event_ids = tuple(int(row["id"]) for row in rows)
+    if not event_ids:
+        return 0
+    placeholders = ", ".join("?" for _ in event_ids)
+    connection.execute(
+        f"""
+        UPDATE notification_deliveries
+        SET status = ?,
+            claim_token = NULL,
+            claim_until = NULL,
+            updated_at = ?
+        WHERE event_id IN ({placeholders})
+            AND status IN (?, ?, ?)
+        """,
+        (
+            NOTIFICATION_DELIVERY_CANCELLED,
+            now,
+            *event_ids,
+            NOTIFICATION_DELIVERY_PENDING,
+            NOTIFICATION_DELIVERY_FAILED,
+            NOTIFICATION_DELIVERY_SENDING,
+        ),
+    )
+    connection.execute(
+        f"""
+        UPDATE alert_events
+        SET notification_status = ?
+        WHERE id IN ({placeholders})
+            AND notification_status IN (?, ?)
+        """,
+        (
+            ALERT_NOTIFICATION_CANCELLED,
+            *event_ids,
+            ALERT_NOTIFICATION_PENDING,
+            ALERT_NOTIFICATION_FAILED,
+        ),
+    )
+    return len(event_ids)
 
 
 def _prune_market_daily_history(
@@ -1052,6 +1183,17 @@ def _alert_event_key_may_still_be_used(
     title = str(row["title"])
     alert_key = str(row["alert_key"])
     phase = str(payload.get("phase", ""))
+
+    if (
+        rule is None
+        and phase == ""
+        and title
+        in {
+            "Drawdown reminder",
+            "Price-Gain reminder",
+        }
+    ):
+        return False
 
     if title == "Price-Gain reminder" and rule_enabled:
         # Fixed-cost reminders intentionally use a once-per-cost key.  An
@@ -3262,7 +3404,7 @@ def reconcile_position_snapshot(
                 )
         unresolved = connection.execute(
             """
-            SELECT 1
+            SELECT MIN(a.created_at) AS earliest_action_at
             FROM manual_add_actions AS a
             JOIN drawdown_cycles AS c ON c.id = a.cycle_id
             JOIN rules AS r ON r.id = c.rule_id
@@ -3270,18 +3412,56 @@ def reconcile_position_snapshot(
                 json_extract(r.params_json, '$.investment_fund_symbol') = ?
                 AND a.estimate_id IS NULL
                 AND a.reconciled_at IS NULL
-            LIMIT 1
             """,
             (fund_symbol,),
         ).fetchone()
-        connection.execute(
-            """
-            UPDATE fund_settings
-            SET position_sync_required_since = ?, updated_at = ?
-            WHERE fund_symbol = ?
-            """,
-            (None if unresolved is None else sync_time, now, fund_symbol),
+        unresolved_since = (
+            None
+            if unresolved is None or unresolved["earliest_action_at"] is None
+            else str(unresolved["earliest_action_at"])
         )
+        if unresolved_since is not None:
+            connection.execute(
+                """
+                UPDATE position_snapshots
+                SET position_sync_required_since = COALESCE(
+                        position_sync_required_since, ?
+                    ),
+                    updated_at = ?
+                WHERE fund_symbol = ?
+                """,
+                (unresolved_since, now, fund_symbol),
+            )
+            connection.execute(
+                """
+                INSERT INTO fund_settings (
+                    fund_symbol,
+                    fee_mode,
+                    fee_value,
+                    subscription_cutoff,
+                    position_sync_required_since,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, NULL, NULL, '15:00', ?, ?, ?)
+                ON CONFLICT(fund_symbol) DO UPDATE SET
+                    position_sync_required_since = COALESCE(
+                        fund_settings.position_sync_required_since,
+                        excluded.position_sync_required_since
+                    ),
+                    updated_at = excluded.updated_at
+                """,
+                (fund_symbol, unresolved_since, now, now),
+            )
+        else:
+            connection.execute(
+                """
+                UPDATE fund_settings
+                SET position_sync_required_since = NULL, updated_at = ?
+                WHERE fund_symbol = ?
+                """,
+                (now, fund_symbol),
+            )
     row = get_position_snapshot(connection, fund_symbol)
     if row is None:
         raise RuntimeError("Position snapshot reconciliation did not persist.")
@@ -4474,8 +4654,10 @@ def list_retryable_drawdown_plan_alert_events(
             """
             SELECT
                 e.id,
+                e.rule_id,
                 e.title,
                 e.message,
+                e.payload_json,
                 e.notification_status,
                 json_extract(e.payload_json, '$.data_date') AS data_date
             FROM alert_events AS e

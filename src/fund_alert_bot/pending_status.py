@@ -26,7 +26,7 @@ def _timestamp(value: str, zone: ZoneInfo) -> str:
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=ZoneInfo("UTC"))
         return parsed.astimezone(zone).strftime("%Y-%m-%d %H:%M")
-    except ValueError:
+    except (TypeError, ValueError):
         return localize_text("Unknown date")
 
 
@@ -45,7 +45,7 @@ def _reason(row: sqlite3.Row, *, today: date, zone: ZoneInfo) -> str:
     try:
         if date.fromisoformat(row["effective_date"]) >= today:
             return "Effective date has not completed."
-    except ValueError:
+    except (TypeError, ValueError):
         return "Reason unknown from local records."
     if row["position_fund"] is None:
         return "Initial position is missing; position sync required."
@@ -54,6 +54,8 @@ def _reason(row: sqlite3.Row, *, today: date, zone: ZoneInfo) -> str:
     nav = row["unit_nav"]
     if (
         nav is None
+        or isinstance(nav, bool)
+        or not isinstance(nav, (int, float))
         or not math.isfinite(nav)
         or nav <= 0
         or row["nav_source"] != "akshare_eastmoney"

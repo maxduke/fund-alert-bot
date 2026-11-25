@@ -58,6 +58,8 @@ def get_valuation_context(
     if index_symbol is None:
         return None
     now = now or datetime.now(UTC)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=UTC)
     today = now.astimezone(ZoneInfo("Asia/Shanghai")).date()
     quotes: tuple[IndexValuation, ...] = ()
     row = None
@@ -118,9 +120,17 @@ def get_valuation_context(
                          succeeded_at, refresh_failed)
                     VALUES (?, ?, ?, ?, ?)
                     ON CONFLICT(index_symbol) DO UPDATE SET
-                        observations_json = excluded.observations_json,
+                        observations_json = CASE
+                            WHEN excluded.refresh_failed = 1
+                                AND excluded.observations_json IS NULL
+                            THEN index_valuation_cache.observations_json
+                            ELSE excluded.observations_json
+                        END,
                         attempted_at = excluded.attempted_at,
-                        succeeded_at = excluded.succeeded_at,
+                        succeeded_at = COALESCE(
+                            excluded.succeeded_at,
+                            index_valuation_cache.succeeded_at
+                        ),
                         refresh_failed = excluded.refresh_failed
                     """,
                     (
