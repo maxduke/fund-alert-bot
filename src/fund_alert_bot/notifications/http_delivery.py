@@ -25,7 +25,12 @@ def post_notification(
     """
 
     try:
-        response = requests.post(url, timeout=timeout, **request_kwargs)
+        response = requests.post(
+            url,
+            timeout=timeout,
+            allow_redirects=False,
+            **request_kwargs,
+        )
     except requests.RequestException as exc:
         return NotificationResult(
             channel=channel,
@@ -33,11 +38,18 @@ def post_notification(
             detail=f"request_error={type(exc).__name__}",
         )
 
-    if response.status_code >= 400:
+    try:
+        status_code = response.status_code
+    finally:
+        close = getattr(response, "close", None)
+        if callable(close):
+            close()
+
+    if not 200 <= status_code < 300:
         return NotificationResult(
             channel=channel,
             success=False,
-            detail=f"http_status={response.status_code}",
+            detail=f"http_status={status_code}",
         )
 
     return NotificationResult(channel=channel, success=True, detail="sent")

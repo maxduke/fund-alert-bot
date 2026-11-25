@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from collections.abc import Awaitable, Callable, Collection, Iterator
@@ -23,6 +24,7 @@ from fund_alert_bot.checks import (
     ManualAddSettlementResult,
     ProfitCheckResult,
     RuleNoDataSkip,
+    _drawdown_plan_action_rows,
     build_dca_notification_summary,
     evaluate_dca_rules,
     evaluate_drawdown_plan_prealerts,
@@ -58,6 +60,7 @@ from fund_alert_bot.market_data import (
 )
 from fund_alert_bot.notifications.dispatch import send_alert_notifications
 from fund_alert_bot.notifications.service import build_notification_service
+from fund_alert_bot.rules.drawdown_plan import DrawdownTier
 from fund_alert_bot.runtime_status import observe_job_result, track_job
 
 if TYPE_CHECKING:
@@ -208,6 +211,7 @@ def register_jobs(
         replace_existing=True,
         coalesce=True,
         max_instances=1,
+        misfire_grace_time=50,
     )
 
     scheduler.add_job(
@@ -289,7 +293,7 @@ def register_jobs(
         replace_existing=True,
         coalesce=True,
         max_instances=1,
-        misfire_grace_time=1800,
+        misfire_grace_time=600,
     )
     LOGGER.info(
         "Registered scheduled realtime drawdown check for %s at %s %s",
@@ -571,6 +575,12 @@ async def run_scheduled_market_check(
     plan_result = None
     profit_result = None
     try:
+        await retry_pending_standard_notifications(
+            application=application,
+            sqlite_path=sqlite_path,
+            allowed_user_ids=allowed_user_ids,
+            notification_settings=notification_settings,
+        )
         await retry_pending_drawdown_plan_notifications(
             application=application,
             sqlite_path=sqlite_path,
@@ -770,6 +780,7 @@ async def run_scheduled_fund_nav_process(
     processing_date = run_date or _current_date(timezone)
     LOGGER.info("Feeder-fund NAV processing started date=%s", processing_date)
     result = None
+    cancelled = False
     try:
         await retry_pending_standard_notifications(
             application=application,
@@ -898,6 +909,9 @@ async def run_scheduled_fund_nav_process(
             ],
             notification_settings=notification_settings,
         )
+    except asyncio.CancelledError:
+        cancelled = True
+        raise
     except Exception:
         LOGGER.exception("Feeder-fund NAV processing failed")
         raise
@@ -914,20 +928,22 @@ async def run_scheduled_fund_nav_process(
                 len(result.errors),
             )
 
-        def prune() -> dict[str, int]:
-            with open_connection(sqlite_path) as connection:
-                initialize_database(connection)
-                return prune_database(connection, today=processing_date)
+        if not cancelled:
 
-        try:
-            pruned = await run_serialized(work_lock, prune)
-            LOGGER.info(
-                "Database retention prune completed date=%s deleted=%s",
-                processing_date.isoformat(),
-                {table: count for table, count in pruned.items() if count},
-            )
-        except Exception:
-            LOGGER.exception("Database retention prune failed")
+            def prune() -> dict[str, int]:
+                with open_connection(sqlite_path) as connection:
+                    initialize_database(connection)
+                    return prune_database(connection, today=processing_date)
+
+            try:
+                pruned = await run_serialized(work_lock, prune)
+                LOGGER.info(
+                    "Database retention prune completed date=%s deleted=%s",
+                    processing_date.isoformat(),
+                    {table: count for table, count in pruned.items() if count},
+                )
+            except Exception:
+                LOGGER.exception("Database retention prune failed")
 
 
 async def run_scheduled_dca_check(
@@ -942,6 +958,7 @@ async def run_scheduled_dca_check(
     work_lock: Lock | None = None,
     rule_ids: Collection[int] | None = None,
     advance_cursor: bool = True,
+    retry_pending: bool = True,
 ) -> None:
     """Run the scheduled DCA reminder check and send due notifications."""
 
@@ -949,13 +966,14 @@ async def run_scheduled_dca_check(
     LOGGER.info("Scheduled DCA reminder check started for date=%s", check_date)
     result = None
     try:
-        await retry_pending_drawdown_plan_notifications(
-            application=application,
-            sqlite_path=sqlite_path,
-            allowed_user_ids=allowed_user_ids,
-            action_date=check_date,
-            notification_settings=notification_settings,
-        )
+        if retry_pending:
+            await retry_pending_drawdown_plan_notifications(
+                application=application,
+                sqlite_path=sqlite_path,
+                allowed_user_ids=allowed_user_ids,
+                action_date=check_date,
+                notification_settings=notification_settings,
+            )
 
         def evaluate() -> Any:
             with open_connection(sqlite_path) as connection:
@@ -987,7 +1005,7 @@ async def run_scheduled_dca_check(
             notification_settings=notification_settings,
         )
         if advance_cursor:
-            _write_dca_check_date(sqlite_path, check_date)
+            await asyncio.to_thread(_write_dca_check_date, sqlite_path, check_date)
     except Exception:
         LOGGER.exception("Scheduled DCA reminder check failed")
         raise
@@ -1032,26 +1050,45 @@ async def run_due_dca_checks(
     if current.timetz().replace(tzinfo=None) < parsed_reminder_time:
         latest_due_date -= timedelta(days=1)
 
-    with open_connection(sqlite_path) as connection:
-        initialize_database(connection)
-        failures = list_dca_evaluation_failures(connection)
-        enabled_rule_ids = {
-            int(row["id"])
-            for row in list_enabled_rules(connection)
-            if row["type"] == "dca_reminder"
-        }
-        for failure in failures:
-            if int(failure["rule_id"]) not in enabled_rule_ids:
-                clear_dca_evaluation_failure(
-                    connection,
-                    rule_id=int(failure["rule_id"]),
-                    check_date=str(failure["check_date"]),
-                )
-        row = connection.execute(
-            "SELECT value FROM app_metadata WHERE key = ?",
-            (DCA_LAST_CHECKED_DATE_KEY,),
-        ).fetchone()
+    def load_dca_state() -> tuple[list[Any], set[int], Any]:
+        with open_connection(sqlite_path) as connection:
+            initialize_database(connection)
+            all_failures = list_dca_evaluation_failures(connection)
+            enabled_ids = {
+                int(row["id"])
+                for row in list_enabled_rules(connection)
+                if row["type"] == "dca_reminder"
+            }
+            for failure in all_failures:
+                if int(failure["rule_id"]) not in enabled_ids:
+                    clear_dca_evaluation_failure(
+                        connection,
+                        rule_id=int(failure["rule_id"]),
+                        check_date=str(failure["check_date"]),
+                    )
+            cursor_row = connection.execute(
+                "SELECT value FROM app_metadata WHERE key = ?",
+                (DCA_LAST_CHECKED_DATE_KEY,),
+            ).fetchone()
+        return all_failures, enabled_ids, cursor_row
 
+    failures, enabled_rule_ids, row = await asyncio.to_thread(load_dca_state)
+
+    ran_retry_once = False
+
+    async def ensure_plan_retries(action_date: date) -> None:
+        nonlocal ran_retry_once
+        if not ran_retry_once:
+            ran_retry_once = True
+            await retry_pending_drawdown_plan_notifications(
+                application=application,
+                sqlite_path=sqlite_path,
+                allowed_user_ids=allowed_user_ids,
+                action_date=action_date,
+                notification_settings=notification_settings,
+            )
+
+    ran_active_failures = False
     for failure in failures:
         rule_id = int(failure["rule_id"])
         if rule_id not in enabled_rule_ids:
@@ -1064,16 +1101,24 @@ async def run_due_dca_checks(
                 rule_id,
                 failure["check_date"],
             )
-            with open_connection(sqlite_path) as connection:
-                initialize_database(connection)
-                clear_dca_evaluation_failure(
-                    connection,
-                    rule_id=rule_id,
-                    check_date=str(failure["check_date"]),
-                )
+
+            def clear_invalid(
+                rid: int = rule_id, raw: str = str(failure["check_date"])
+            ) -> None:
+                with open_connection(sqlite_path) as connection:
+                    initialize_database(connection)
+                    clear_dca_evaluation_failure(
+                        connection,
+                        rule_id=rid,
+                        check_date=raw,
+                    )
+
+            await asyncio.to_thread(clear_invalid)
             continue
         if failure_date > latest_due_date:
             continue
+        await ensure_plan_retries(current.date())
+        ran_active_failures = True
         await run_scheduled_dca_check(
             application=application,
             sqlite_path=sqlite_path,
@@ -1085,14 +1130,16 @@ async def run_due_dca_checks(
             work_lock=work_lock,
             rule_ids={rule_id},
             advance_cursor=False,
+            retry_pending=False,
         )
 
     if row is None:
         if latest_due_date < current.date():
             # Establish an upgrade-safe baseline without inventing reminders from
             # dates that predate cursor tracking.
-            _write_dca_check_date(sqlite_path, latest_due_date)
-            observe_job_result(skipped=True)
+            await asyncio.to_thread(_write_dca_check_date, sqlite_path, latest_due_date)
+            if not ran_active_failures:
+                observe_job_result(skipped=True)
             return 0
         first_pending_date = latest_due_date
     else:
@@ -1100,16 +1147,17 @@ async def run_due_dca_checks(
             last_checked_date = date.fromisoformat(str(row["value"]))
         except ValueError:
             LOGGER.warning("Ignoring invalid persisted DCA check date")
-            _write_dca_check_date(sqlite_path, latest_due_date)
+            await asyncio.to_thread(_write_dca_check_date, sqlite_path, latest_due_date)
             observe_job_result(errors=1)
             return 0
         first_pending_date = last_checked_date + timedelta(days=1)
 
     pending_count = max(0, (latest_due_date - first_pending_date).days + 1)
-    if pending_count == 0 and not failures:
+    if pending_count == 0 and not ran_active_failures:
         observe_job_result(skipped=True)
     for offset in range(pending_count):
         check_date = first_pending_date + timedelta(days=offset)
+        await ensure_plan_retries(current.date())
         await run_scheduled_dca_check(
             application=application,
             sqlite_path=sqlite_path,
@@ -1119,6 +1167,7 @@ async def run_due_dca_checks(
             run_date=check_date,
             notification_settings=notification_settings,
             work_lock=work_lock,
+            retry_pending=False,
         )
     return pending_count
 
@@ -1171,6 +1220,52 @@ async def send_scheduled_notifications(
         )
 
 
+def _restore_drawdown_plan_actions(
+    row: Any,
+    *,
+    action_date: date,
+) -> tuple[tuple[tuple[str, str], ...], ...]:
+    if row["data_date"] is None or str(row["data_date"]) != action_date.isoformat():
+        return ()
+    raw_payload = row["payload_json"]
+    if not raw_payload:
+        return ()
+    try:
+        payload = json.loads(str(raw_payload))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return ()
+    if not isinstance(payload, dict) or payload.get("phase") != "after_close":
+        return ()
+    raw_tiers = payload.get("actionable_tiers")
+    if raw_tiers is None:
+        raw_tiers = payload.get("crossed_tiers")
+    if not isinstance(raw_tiers, list):
+        return ()
+    tiers: list[DrawdownTier] = []
+    for item in raw_tiers:
+        if not isinstance(item, dict):
+            continue
+        if not {"drawdown", "amount", "key"}.issubset(item):
+            continue
+        try:
+            tiers.append(
+                DrawdownTier(
+                    drawdown=float(item["drawdown"]),
+                    amount=item["amount"],
+                    key=str(item["key"]),
+                )
+            )
+        except (TypeError, ValueError):
+            return ()
+    if not tiers:
+        return ()
+    return _drawdown_plan_action_rows(
+        int(row["rule_id"]),
+        int(row["id"]),
+        tuple(tiers),
+    )
+
+
 async def retry_pending_drawdown_plan_notifications(
     *,
     application: Application[Any, Any, Any, Any, Any, Any],
@@ -1181,21 +1276,27 @@ async def retry_pending_drawdown_plan_notifications(
 ) -> int:
     """Retry durable plan reminders independently of market-day evaluation."""
 
-    with open_connection(sqlite_path) as connection:
-        initialize_database(connection)
-        notifications = [
-            AlertNotification(
-                event_id=int(row["id"]),
-                title=str(row["title"]),
-                text=(
-                    format_delayed_drawdown_plan_message(str(row["message"]))
-                    if row["data_date"] is not None
-                    and str(row["data_date"]) < action_date.isoformat()
-                    else str(row["message"])
-                ),
-            )
-            for row in list_retryable_drawdown_plan_alert_events(connection)
-        ]
+    def load_notifications() -> list[AlertNotification]:
+        with open_connection(sqlite_path) as connection:
+            initialize_database(connection)
+            return [
+                AlertNotification(
+                    event_id=int(row["id"]),
+                    title=str(row["title"]),
+                    text=(
+                        format_delayed_drawdown_plan_message(str(row["message"]))
+                        if row["data_date"] is not None
+                        and str(row["data_date"]) < action_date.isoformat()
+                        else str(row["message"])
+                    ),
+                    telegram_actions=_restore_drawdown_plan_actions(
+                        row, action_date=action_date
+                    ),
+                )
+                for row in list_retryable_drawdown_plan_alert_events(connection)
+            ]
+
+    notifications = await asyncio.to_thread(load_notifications)
     await send_scheduled_notifications(
         application=application,
         sqlite_path=sqlite_path,
@@ -1215,47 +1316,50 @@ async def retry_pending_standard_notifications(
 ) -> int:
     """Retry durable standard reminders after delivery failure or restart."""
 
-    with open_connection(sqlite_path) as connection:
-        initialize_database(connection)
-        notifications = [
-            AlertNotification(
-                event_id=int(row["id"]),
-                title=str(row["title"]),
-                text=str(row["message"]),
-                telegram_actions=(
-                    (
+    def load_notifications() -> list[AlertNotification]:
+        with open_connection(sqlite_path) as connection:
+            initialize_database(connection)
+            return [
+                AlertNotification(
+                    event_id=int(row["id"]),
+                    title=str(row["title"]),
+                    text=str(row["message"]),
+                    telegram_actions=(
                         (
-                            f"⚠️ Deduction failed — {row['fund_symbol']}",
-                            f"dca_skip:{row['rule_id']}:{row['due_date']}",
-                        ),
-                    ),
-                )
-                if row["rule_type"] == "dca_reminder"
-                and row["due_date"] is not None
-                and row["occurrence_status"] == "pending"
-                else (),
-                dca_summary=(
-                    build_dca_notification_summary(
-                        message=str(row["message"]),
-                        due_date=str(row["due_date"]),
-                        amount=float(row["dca_amount"]),
-                        skipped=str(row["occurrence_status"]) == "skipped",
-                        current_status=str(row["occurrence_status"]),
-                        current_effective_date=(
-                            None
-                            if row["occurrence_effective_date"] is None
-                            else str(row["occurrence_effective_date"])
+                            (
+                                f"⚠️ Deduction failed — {row['fund_symbol']}",
+                                f"dca_skip:{row['rule_id']}:{row['due_date']}",
+                            ),
                         ),
                     )
                     if row["rule_type"] == "dca_reminder"
-                    and row["fund_symbol"] is not None
-                    and row["dca_amount"] is not None
-                    and row["occurrence_status"] is not None
-                    else None
-                ),
-            )
-            for row in list_retryable_standard_alert_events(connection)
-        ]
+                    and row["due_date"] is not None
+                    and row["occurrence_status"] == "pending"
+                    else (),
+                    dca_summary=(
+                        build_dca_notification_summary(
+                            message=str(row["message"]),
+                            due_date=str(row["due_date"]),
+                            amount=float(row["dca_amount"]),
+                            skipped=str(row["occurrence_status"]) == "skipped",
+                            current_status=str(row["occurrence_status"]),
+                            current_effective_date=(
+                                None
+                                if row["occurrence_effective_date"] is None
+                                else str(row["occurrence_effective_date"])
+                            ),
+                        )
+                        if row["rule_type"] == "dca_reminder"
+                        and row["fund_symbol"] is not None
+                        and row["dca_amount"] is not None
+                        and row["occurrence_status"] is not None
+                        else None
+                    ),
+                )
+                for row in list_retryable_standard_alert_events(connection)
+            ]
+
+    notifications = await asyncio.to_thread(load_notifications)
     await send_scheduled_notifications(
         application=application,
         sqlite_path=sqlite_path,
@@ -1275,17 +1379,20 @@ async def retry_pending_position_profit_notifications(
 ) -> int:
     """Retry durable position-linked Price-Gain reminders."""
 
-    with open_connection(sqlite_path) as connection:
-        initialize_database(connection)
-        notifications = [
-            AlertNotification(
-                event_id=int(row["id"]),
-                title=str(row["title"]),
-                text=str(row["message"]),
-                telegram_actions=position_profit_action_rows(int(row["id"])),
-            )
-            for row in list_retryable_position_profit_alert_events(connection)
-        ]
+    def load_notifications() -> list[AlertNotification]:
+        with open_connection(sqlite_path) as connection:
+            initialize_database(connection)
+            return [
+                AlertNotification(
+                    event_id=int(row["id"]),
+                    title=str(row["title"]),
+                    text=str(row["message"]),
+                    telegram_actions=position_profit_action_rows(int(row["id"])),
+                )
+                for row in list_retryable_position_profit_alert_events(connection)
+            ]
+
+    notifications = await asyncio.to_thread(load_notifications)
     await send_scheduled_notifications(
         application=application,
         sqlite_path=sqlite_path,

@@ -266,9 +266,9 @@ _EN_TO_ZH = {
     "Long-term trend from confirmed closes": "确认收盘价的长期趋势",
     "Long-term trend": "长期趋势",
     "Final confirmation will use closing data.": "最终确认将使用收盘数据。",
-    "Only after you actually subscribe, record it with:": (
-        "只有实际提交申购后，才使用以下命令记录："
-    ),
+    "Plan:": "计划：",
+    "Enabled drawdown plan was not found.": "未找到已启用的回撤加仓计划。",
+    "Price-Gain reminder was not found.": "未找到涨幅提醒。",
     "If you add today, remember to sync the fund position after units settle.": "如果今天加仓，请在份额确认后同步基金持仓。",
     "Current drawdown:": "当前回撤：",
     "Source:": "来源：",
@@ -666,6 +666,7 @@ _ZH_TO_EN = {
 _EXACT_ZH_TO_EN = {"取消": "Cancel"}
 
 _DECORATIONS = (
+    "  ",
     "📉 ",
     "💰 ",
     "⚠️ ",
@@ -695,6 +696,9 @@ _DYNAMIC_PREFIXES = (
     "Updated Drawdown Add Plan id=",
     "Updated DCA rule id=",
     "Updated fund",
+    "Position synced for fund",
+    "Price-Gain setup available for",
+    "Position sync required since",
     "Disabled drawdown plan id=",
     "Disabled fixed DCA rule id=",
     "Disabled auto-cost Price-Gain rule id=",
@@ -738,6 +742,26 @@ _LABEL_VALUE_TRANSLATIONS = {
     },
 }
 _DATED_LABELS = {"Peak:", "Latest:", "Cycle anchor:", "Current peak:"}
+_EN_TO_ZH_LABELS = tuple(
+    source
+    for source in sorted(_EN_TO_ZH, key=len, reverse=True)
+    if source.endswith((":", "："))
+)
+_ZH_TO_EN_LABELS = tuple(
+    source
+    for source in sorted(_ZH_TO_EN, key=len, reverse=True)
+    if source.endswith((":", "："))
+)
+_EN_TO_ZH_SENTENCES = tuple(
+    source
+    for source in sorted(_EN_TO_ZH, key=len, reverse=True)
+    if source.endswith(".")
+)
+_ZH_TO_EN_SENTENCES = tuple(
+    source
+    for source in sorted(_ZH_TO_EN, key=len, reverse=True)
+    if source.endswith(".")
+)
 
 
 def set_language(language: str) -> None:
@@ -755,7 +779,8 @@ def get_language() -> str:
 
 def _localize_label_value(label: str, value: str, replacements: dict[str, str]) -> str:
     if _language == "en" and label == "• 计划金额：":
-        value = value.removesuffix(" 元") + " RMB"
+        if value.endswith(" 元"):
+            value = value.removesuffix(" 元") + " RMB"
     elif _language == "zh-CN":
         if label == "Rearm:":
             value = value.replace(" from cycle anchor", " 距周期锚点")
@@ -816,12 +841,10 @@ def _localize_line(line: str) -> str:
             margin = line[len(rearm_sentence) : -len(" above the cycle anchor.")]
             return "新的配置周期需要确认的新高至少高于周期锚点 " + margin + "。"
 
+    label_keys = _EN_TO_ZH_LABELS if _language == "zh-CN" else _ZH_TO_EN_LABELS
+    sentence_keys = _EN_TO_ZH_SENTENCES if _language == "zh-CN" else _ZH_TO_EN_SENTENCES
     full_line_label = next(
-        (
-            source
-            for source in sorted(replacements, key=len, reverse=True)
-            if source.endswith((":", "：")) and line.startswith(source)
-        ),
+        (source for source in label_keys if line.startswith(source)),
         None,
     )
     if full_line_label is not None:
@@ -834,8 +857,24 @@ def _localize_line(line: str) -> str:
         return decoration + replacements[content]
 
     if _language == "zh-CN":
+        if content.startswith("Position cycle unavailable — rerun "):
+            return (
+                decoration
+                + "持仓周期不可用——请重新运行 "
+                + content.removeprefix("Position cycle unavailable — rerun ")
+            )
         if content.startswith("Position: "):
             position = content.removeprefix("Position: ")
+            if "; last sync " in position and "; later estimates " in position:
+                accuracy, remainder = position.split("; last sync ", 1)
+                synced_at, _, estimates = remainder.partition("; later estimates ")
+                accuracy_text = {"estimated": "估算", "exact": "精确"}.get(
+                    accuracy, accuracy
+                )
+                return (
+                    decoration
+                    + f"持仓： {accuracy_text}；最近同步 {synced_at}；后续估算 {estimates}"
+                )
             if "; average cost " in position and "; reached " in position:
                 accuracy, remainder = position.split("; average cost ", 1)
                 cost, _, reached = remainder.partition("; reached ")
@@ -936,11 +975,7 @@ def _localize_line(line: str) -> str:
             return decoration + cutoff + replacements[cutoff_suffix]
 
     label = next(
-        (
-            source
-            for source in sorted(replacements, key=len, reverse=True)
-            if source.endswith((":", "：")) and content.startswith(source)
-        ),
+        (source for source in label_keys if content.startswith(source)),
         None,
     )
     if label is not None:
@@ -969,11 +1004,7 @@ def _localize_line(line: str) -> str:
     # Prose lines contain no configured identifier field. Translate complete
     # leading sentences, then continue with the remaining prose.
     sentence = next(
-        (
-            source
-            for source in sorted(replacements, key=len, reverse=True)
-            if source.endswith(".") and content.startswith(source)
-        ),
+        (source for source in sentence_keys if content.startswith(source)),
         None,
     )
     if sentence is not None:

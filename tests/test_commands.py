@@ -3344,6 +3344,7 @@ def test_test_notify_sends_to_enabled_channels(monkeypatch) -> None:
                 "body": TEST_NOTIFICATION_MESSAGE,
             },
             "timeout": 10,
+            "allow_redirects": False,
         }
     ]
     assert message.replies == ["Sent test notification to 2 channel(s)."]

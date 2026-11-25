@@ -43,6 +43,7 @@ def test_bark_channel_posts_with_timeout(monkeypatch) -> None:
                 "body": "399006 is down 10.0%.",
             },
             "timeout": 10,
+            "allow_redirects": False,
         }
     ]
 
@@ -71,6 +72,7 @@ def test_ntfy_channel_posts_with_timeout(monkeypatch) -> None:
             "data": b"399006 is down 10.0%.",
             "headers": {"Title": "Drawdown alert"},
             "timeout": 10,
+            "allow_redirects": False,
         }
     ]
 
@@ -128,6 +130,7 @@ def test_webhook_channel_posts_with_timeout(monkeypatch) -> None:
                 "body": "399006 is down 10.0%.",
             },
             "timeout": 10,
+            "allow_redirects": False,
         }
     ]
 
@@ -286,7 +289,12 @@ def test_post_notification_reports_outcome_without_leaking_the_url(
     )
 
     assert calls == [
-        {"url": "https://example.test/secret-key", "timeout": 3, "json": {"title": "t"}}
+        {
+            "url": "https://example.test/secret-key",
+            "timeout": 3,
+            "allow_redirects": False,
+            "json": {"title": "t"},
+        }
     ]
     assert result.channel == "test"
     assert result.success is success

@@ -100,14 +100,23 @@ def format_plan_overview(
                 f"reached {row['reached_thresholds']}/{len(thresholds)}"
             )
     for row in dca_statuses:
-        params = _load_params(str(row["params_json"]))
+        try:
+            params = _load_params(str(row["params_json"]))
+            weekday = params["weekday"]
+            amount = float(params["amount"])
+            holiday_policy = params["holiday_policy"]
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            LOGGER.warning(
+                "Skipping malformed fixed DCA status rule_id=%s", row["rule_id"]
+            )
+            continue
         lines.extend(
             (
                 "",
                 f"{row['name']} (fixed DCA {row['rule_id']})",
-                f"Fund {row['fund_symbol']} / every {params['weekday']} / "
-                f"{format_plan_amount(float(params['amount']))}",
-                f"Holiday policy: {params['holiday_policy']}",
+                f"Fund {row['fund_symbol']} / every {weekday} / "
+                f"{format_plan_amount(amount)}",
+                f"Holiday policy: {holiday_policy}",
             )
         )
         if row["due_date"] is None:

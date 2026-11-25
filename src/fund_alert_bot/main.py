@@ -53,6 +53,8 @@ def run() -> None:
     configure_logging()
     settings = load_settings()
     set_language(settings.bot_language)
+    if not settings.telegram_bot_token:
+        raise ValueError("TELEGRAM_BOT_TOKEN is required.")
     if not (
         settings.telegram_allowed_user_ids
         or settings.notifications.bark_enabled
@@ -220,7 +222,12 @@ def run() -> None:
         application.run_polling()
     finally:
         if getattr(scheduler, "running", False):
-            scheduler.shutdown(wait=True)
+            try:
+                scheduler.shutdown(wait=False)
+            except RuntimeError:
+                LOGGER.debug(
+                    "APScheduler shutdown skipped because the event loop is closed"
+                )
         LOGGER.info("fund-alert-bot stopped")
 
 

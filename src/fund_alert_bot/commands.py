@@ -26,6 +26,7 @@ from fund_alert_bot.checks import (
     DrawdownCheckResult,
     DrawdownPlanStatusResult,
     ProfitCheckResult,
+    RuleNoDataSkip,
     derive_plan_readiness,
     evaluate_dca_rules,
     evaluate_drawdown_rules,
@@ -1145,10 +1146,22 @@ async def _edit_message_text(
     """Edit a callback message in the configured language."""
     if reply_markup is not None:
         reply_markup = _localize_reply_markup(reply_markup)
-    await query.edit_message_text(
-        localize_text(text),
-        reply_markup=reply_markup,
-    )
+    localized = localize_text(text)
+    chunks = split_telegram_text(localized)
+    first_markup = reply_markup if len(chunks) == 1 else None
+    try:
+        await query.edit_message_text(chunks[0], reply_markup=first_markup)
+    except Exception as exc:  # noqa: BLE001
+        if "message is not modified" in str(exc).lower():
+            return
+        raise
+    message = getattr(query, "message", None)
+    if len(chunks) > 1 and message is not None and hasattr(message, "reply_text"):
+        for index, chunk in enumerate(chunks[1:], start=1):
+            if reply_markup is not None and index == len(chunks) - 1:
+                await message.reply_text(chunk, reply_markup=reply_markup)
+            else:
+                await message.reply_text(chunk)
 
 
 async def reject_if_unauthorized(
@@ -2278,7 +2291,7 @@ def build_command_handlers(
     ) -> None:
         """Snooze actionable tiers for the current market date."""
 
-        try:
+        def defer_work() -> str:
             with open_connection(sqlite_path) as connection:
                 initialize_database(connection)
                 selection = load_manual_add_selection(
@@ -2302,12 +2315,10 @@ def build_command_handlers(
                     )
                 )
                 if not selected:
-                    await _edit_message_text(
-                        query,
+                    return (
                         "These tiers are already skipped for this cycle. No reminder "
-                        "state was changed.",
+                        "state was changed."
                     )
-                    return
                 selected_keys = tuple(tier.key for tier in selected)
                 already_deferred = all(
                     states.get(key) is not None
@@ -2321,20 +2332,22 @@ def build_command_handlers(
                         tier_keys=selected_keys,
                         market_date=action_date.isoformat(),
                     )
-        except (CommandParseError, ValueError, sqlite3.IntegrityError) as exc:
-            await _edit_message_text(query, str(exc))
-            return
-        if already_deferred:
-            message = (
-                "Already deferred for today. These tiers remain pending for the "
-                "next market date. No order has been placed."
-            )
-        else:
-            message = (
+            if already_deferred:
+                return (
+                    "Already deferred for today. These tiers remain pending for the "
+                    "next market date. No order has been placed."
+                )
+            return (
                 "⏰ Deferred for today. These tiers remain pending and will be "
                 "reminded again on the next market date if still reached. "
                 "No order has been placed."
             )
+
+        try:
+            message = await run_serialized(work_lock, defer_work)
+        except (CommandParseError, ValueError, sqlite3.IntegrityError) as exc:
+            await _edit_message_text(query, str(exc))
+            return
         await _edit_message_text(query, message)
 
     async def drawdown_defer_callback(
@@ -2392,7 +2405,8 @@ def build_command_handlers(
         if action == "cancel":
             await _edit_message_text(query, "Skip cancelled. Nothing was changed.")
             return
-        try:
+
+        def skip_work() -> tuple[str, Any]:
             with open_connection(sqlite_path) as connection:
                 initialize_database(connection)
                 if action == "choose":
@@ -2477,10 +2491,9 @@ def build_command_handlers(
                             "Choose which actionable tiers to skip for this drawdown "
                             "cycle."
                         )
-                    await _edit_message_text(query, message, reply_markup=markup)
-                    return
+                    return message, markup
                 if action == "confirm_all":
-                    selection = load_manual_add_selection(
+                    load_manual_add_selection(
                         connection,
                         plan_id=plan_id,
                         event_id=event_id,
@@ -2510,13 +2523,11 @@ def build_command_handlers(
                             ],
                         ]
                     )
-                    await _edit_message_text(
-                        query,
+                    return (
                         "Confirm skipping all currently actionable tiers? They will "
                         "not be reminded again in this drawdown cycle.",
-                        reply_markup=markup,
+                        markup,
                     )
-                    return
                 if action == "confirm":
                     if len(parts) != 6 or parts[4] != "tier":
                         raise ValueError("Invalid skip action.")
@@ -2554,19 +2565,16 @@ def build_command_handlers(
                             ],
                         ]
                     )
-                    await _edit_message_text(
-                        query,
+                    return (
                         "Confirm skipping "
                         f"-{format_plan_percent(tier.drawdown)} "
                         f"/ {format_plan_amount(tier.amount)}?\n\n"
                         "This tier will not be reminded again in the current "
                         "drawdown cycle.",
-                        reply_markup=markup,
+                        markup,
                     )
-                    return
                 if action != "apply" or len(parts) < 5:
-                    await _edit_message_text(query, "Invalid skip action.")
-                    return
+                    return "Invalid skip action.", None
                 selector = parts[4]
                 tier_index = None
                 if selector == "tier":
@@ -2607,10 +2615,14 @@ def build_command_handlers(
                         "⏭ Skipped for this drawdown cycle. These tiers will not be "
                         "reminded again until a new cycle. No order has been placed."
                     )
+                return message, None
+
+        try:
+            message, markup = await run_serialized(work_lock, skip_work)
         except (CommandParseError, ValueError, sqlite3.IntegrityError) as exc:
             await _edit_message_text(query, str(exc))
             return
-        await _edit_message_text(query, message)
+        await _edit_message_text(query, message, reply_markup=markup)
 
     def get_manual_add_draft(update: Update, token: str) -> ManualAddDraft | None:
         now = _clock_now(clock)
@@ -3734,11 +3746,23 @@ def build_command_handlers(
             with open_connection(sqlite_path) as connection:
                 initialize_database(connection)
                 if confirmed_end_date is None:
+                    drawdown_rules = [
+                        row
+                        for row in db_list_rules(connection)
+                        if bool(row["enabled"]) and row["type"] == DRAW_DOWN_RULE_TYPE
+                    ]
                     current_result = DrawdownCheckResult(
-                        checked_rules=0,
+                        checked_rules=len(drawdown_rules),
                         notifications=[],
                         skipped_duplicates=0,
-                        no_data_skips=[],
+                        no_data_skips=[
+                            RuleNoDataSkip(
+                                rule_id=int(row["id"]),
+                                symbol=str(row["symbol"]),
+                                message=("Confirmed previous market date unavailable."),
+                            )
+                            for row in drawdown_rules
+                        ],
                         errors=[],
                         statuses=[],
                     )

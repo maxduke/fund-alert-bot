@@ -238,6 +238,7 @@ def test_scheduled_check_prevents_duplicate_alerts_by_alert_key(
                 "body": EXPECTED_DRAWDOWN_10_MESSAGE,
             },
             "timeout": 10,
+            "allow_redirects": False,
         }
     ]
 
@@ -1830,6 +1831,7 @@ def test_scheduled_dca_check_prevents_duplicate_alerts_by_alert_key(
                 "body": expected_message,
             },
             "timeout": 10,
+            "allow_redirects": False,
         }
     ]
 

@@ -171,7 +171,12 @@ def track_job(
                     run.errors += 1
                     raise
                 finally:
-                    await _save_run(path, job_id, run_id, run)
+                    try:
+                        await asyncio.shield(_save_run(path, job_id, run_id, run))
+                    except asyncio.CancelledError:
+                        LOGGER.warning(
+                            "Cancelled while saving task status job_id=%s", job_id
+                        )
             finally:
                 _CURRENT_RUN.reset(token)
 
@@ -201,103 +206,117 @@ def format_runtime_status(sqlite_path: str | Path, *, timezone: str) -> str:
     with open_connection(sqlite_path) as connection:
         initialize_database(connection)
         connection.execute("BEGIN")
-        for job_id, label in JOB_LABELS.items():
-            label = localize_text(label)
-            row = connection.execute(
-                "SELECT value FROM app_metadata WHERE key = ?", (_KEY_PREFIX + job_id,)
-            ).fetchone()
-            if row is None:
-                lines.append(f"• {label}: {localize_text('No record yet')}")
-                continue
-            try:
-                state = json.loads(row["value"])
-            except (TypeError, ValueError):
-                state = None
-            if not _readable_state(state):
-                # One unreadable record must not hide every other job's status.
-                lines.append(f"• {label}: {localize_text('Unreadable status record')}")
-                continue
-            outcome = state["outcome"]
-            if outcome == "running" and state.get("process_id") != _PROCESS_ID:
-                outcome = "interrupted"
+        try:
+            for job_id, label in JOB_LABELS.items():
+                label = localize_text(label)
+                row = connection.execute(
+                    "SELECT value FROM app_metadata WHERE key = ?",
+                    (_KEY_PREFIX + job_id,),
+                ).fetchone()
+                if row is None:
+                    lines.append(f"• {label}: {localize_text('No record yet')}")
+                    continue
+                try:
+                    state = json.loads(row["value"])
+                except (TypeError, ValueError):
+                    state = None
+                if not _readable_state(state):
+                    # One unreadable record must not hide every other job's status.
+                    lines.append(
+                        f"• {label}: {localize_text('Unreadable status record')}"
+                    )
+                    continue
+                outcome = state["outcome"]
+                if outcome == "running" and state.get("process_id") != _PROCESS_ID:
+                    outcome = "interrupted"
+                lines.extend(
+                    (
+                        f"• {label}: {localize_text(_OUTCOMES[outcome])}",
+                        f"  Last started: {timestamp(state.get('started_at'))}",
+                        f"  Last finished: {timestamp(state.get('finished_at'))}",
+                        "  Last complete success: "
+                        f"{timestamp(state.get('last_success_at'))}",
+                        f"  {localize_text('No-data skips:')} "
+                        f"{state.get('no_data', 0)}; "
+                        f"{localize_text('Errors:')} {state.get('errors', 0)}; "
+                        f"{localize_text('Delivery problems:')} "
+                        f"{state.get('delivery_failures', 0)}",
+                    )
+                )
+
+            deliveries = dict(
+                connection.execute(
+                    "SELECT status, COUNT(*) FROM notification_deliveries "
+                    "GROUP BY status"
+                ).fetchall()
+            )
+            unassigned = connection.execute(
+                """
+                SELECT COUNT(*) FROM alert_events AS e
+                WHERE e.notification_status IN ('pending', 'failed')
+                    AND NOT EXISTS (
+                        SELECT 1 FROM notification_deliveries AS d
+                        WHERE d.event_id = e.id
+                    )
+                """
+            ).fetchone()[0]
+            pending_dca = connection.execute(
+                "SELECT COUNT(*) FROM scheduled_dca_occurrences "
+                "WHERE status = 'pending'"
+            ).fetchone()[0]
+            pending_manual = connection.execute(
+                "SELECT COUNT(*) FROM manual_add_estimates WHERE status = 'pending'"
+            ).fetchone()[0]
             lines.extend(
                 (
-                    f"• {label}: {localize_text(_OUTCOMES[outcome])}",
-                    f"  Last started: {timestamp(state.get('started_at'))}",
-                    f"  Last finished: {timestamp(state.get('finished_at'))}",
-                    "  Last complete success: "
-                    f"{timestamp(state.get('last_success_at'))}",
-                    f"  {localize_text('No-data skips:')} {state.get('no_data', 0)}; "
-                    f"{localize_text('Errors:')} {state.get('errors', 0)}; "
-                    f"{localize_text('Delivery problems:')} "
-                    f"{state.get('delivery_failures', 0)}",
+                    "",
+                    f"Pending deliveries: {deliveries.get('pending', 0)}",
+                    f"In-flight deliveries: {deliveries.get('sending', 0)}",
+                    f"Failed deliveries: {deliveries.get('failed', 0)}",
+                    f"Cancelled deliveries: {deliveries.get('cancelled', 0)}",
+                    f"Unassigned reminder events: {unassigned}",
+                    f"Pending DCA estimates: {pending_dca}",
+                    f"Pending manual-add estimates: {pending_manual}",
+                    "Pending estimates may require NAV data, settings or "
+                    "position sync.",
                 )
             )
-
-        deliveries = dict(
-            connection.execute(
-                "SELECT status, COUNT(*) FROM notification_deliveries GROUP BY status"
+            lines.extend(
+                format_pending_work(
+                    connection, zone=zone, today=datetime.now(zone).date()
+                )
+            )
+            lines.extend(("", "Local market-data dates:"))
+            histories = connection.execute(
+                """
+                SELECT symbol, asset_type, price_basis, MAX(date) AS date
+                FROM market_daily_history GROUP BY symbol, asset_type, price_basis
+                ORDER BY symbol, asset_type, price_basis
+                LIMIT 6
+                """
             ).fetchall()
-        )
-        unassigned = connection.execute(
-            """
-            SELECT COUNT(*) FROM alert_events AS e
-            WHERE e.notification_status IN ('pending', 'failed')
-                AND NOT EXISTS (
-                    SELECT 1 FROM notification_deliveries AS d WHERE d.event_id = e.id
+            navs = connection.execute(
+                """
+                SELECT fund_symbol, MAX(nav_date) AS date
+                FROM fund_nav_history GROUP BY fund_symbol ORDER BY fund_symbol LIMIT 6
+                """
+            ).fetchall()
+            for row in histories[:5]:
+                lines.append(
+                    f"• {row['symbol']} / {row['asset_type']} / "
+                    f"{row['price_basis']}: {row['date']}"
                 )
-            """
-        ).fetchone()[0]
-        pending_dca = connection.execute(
-            "SELECT COUNT(*) FROM scheduled_dca_occurrences WHERE status = 'pending'"
-        ).fetchone()[0]
-        pending_manual = connection.execute(
-            "SELECT COUNT(*) FROM manual_add_estimates WHERE status = 'pending'"
-        ).fetchone()[0]
-        lines.extend(
-            (
-                "",
-                f"Pending deliveries: {deliveries.get('pending', 0)}",
-                f"In-flight deliveries: {deliveries.get('sending', 0)}",
-                f"Failed deliveries: {deliveries.get('failed', 0)}",
-                f"Cancelled deliveries: {deliveries.get('cancelled', 0)}",
-                f"Unassigned reminder events: {unassigned}",
-                f"Pending DCA estimates: {pending_dca}",
-                f"Pending manual-add estimates: {pending_manual}",
-                "Pending estimates may require NAV data, settings or position sync.",
-            )
-        )
-        lines.extend(
-            format_pending_work(connection, zone=zone, today=datetime.now(zone).date())
-        )
-        lines.extend(("", "Local market-data dates:"))
-        histories = connection.execute(
-            """
-            SELECT symbol, asset_type, price_basis, MAX(date) AS date
-            FROM market_daily_history GROUP BY symbol, asset_type, price_basis
-            ORDER BY symbol, asset_type, price_basis
-            LIMIT 6
-            """
-        ).fetchall()
-        navs = connection.execute(
-            """
-            SELECT fund_symbol, MAX(nav_date) AS date
-            FROM fund_nav_history GROUP BY fund_symbol ORDER BY fund_symbol LIMIT 6
-            """
-        ).fetchall()
-        for row in histories[:5]:
-            lines.append(
-                f"• {row['symbol']} / {row['asset_type']} / "
-                f"{row['price_basis']}: {row['date']}"
-            )
-        for row in navs[:5]:
-            lines.append(
-                f"• {localize_text('Fund NAV')} {row['fund_symbol']}: {row['date']}"
-            )
-        if not histories and not navs:
-            lines.append("No cached market data")
-        if len(histories) > 5 or len(navs) > 5:
-            lines.append("Additional cached symbols omitted.")
+            for row in navs[:5]:
+                lines.append(
+                    f"• {localize_text('Fund NAV')} {row['fund_symbol']}: {row['date']}"
+                )
+            if not histories and not navs:
+                lines.append("No cached market data")
+            if len(histories) > 5 or len(navs) > 5:
+                lines.append("Additional cached symbols omitted.")
+        finally:
+            if connection.in_transaction:
+                connection.rollback()
     lines.extend(
         (
             "",
